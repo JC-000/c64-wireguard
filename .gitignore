@@ -1,0 +1,12 @@
+build/
+*.prg
+*.d64
+*.d71
+*.d81
+*.o
+__pycache__/
+*.pyc
+.vscode/
+*.swp
+*.swo
+*~
