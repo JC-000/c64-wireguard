@@ -68,22 +68,12 @@ def c64_blake2s_init(transport, labels, out_len=32, key=b""):
     robust_jsr(transport, labels["blake2s_init"], timeout=10.0)
 
 
-def safe_write_bytes(transport, addr, data, chunk_size=64):
-    """Write bytes in small chunks to avoid VICE monitor truncation."""
-    offset = 0
-    while offset < len(data):
-        end = min(offset + chunk_size, len(data))
-        write_bytes(transport, addr + offset, data[offset:end])
-        offset = end
-
-
 def c64_blake2s_update(transport, labels, data):
     """Call blake2s_update on C64 with given data."""
     if len(data) == 0:
         return
-    # Write data to a temp location (use input_buffer) in safe chunks
     buf_addr = labels["input_buffer"]
-    safe_write_bytes(transport, buf_addr, data)
+    write_bytes(transport, buf_addr, data)
     # Set b2s_data_ptr and b2s_remain
     write_bytes(transport, labels["b2s_data_ptr"],
                 bytes([buf_addr & 0xFF, buf_addr >> 8]))
@@ -108,7 +98,7 @@ def c64_hmac_blake2s(transport, labels, key, data):
     """Call hmac_blake2s on C64."""
     # Write key to a temp area and set hmac_key_ptr/len
     key_addr = labels["input_buffer"]
-    safe_write_bytes(transport, key_addr, key)
+    write_bytes(transport, key_addr, key)
     write_bytes(transport, labels["hmac_key_ptr"],
                 bytes([key_addr & 0xFF, key_addr >> 8]))
     write_bytes(transport, labels["hmac_key_len"], bytes([len(key)]))
@@ -116,7 +106,7 @@ def c64_hmac_blake2s(transport, labels, key, data):
     # Write data after key in input_buffer
     data_addr = key_addr + len(key)
     if data:
-        safe_write_bytes(transport, data_addr, data)
+        write_bytes(transport, data_addr, data)
     write_bytes(transport, labels["hmac_data_ptr"],
                 bytes([data_addr & 0xFF, data_addr >> 8]))
     write_bytes(transport, labels["hmac_data_len"], bytes([len(data)]))
