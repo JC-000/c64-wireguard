@@ -157,3 +157,82 @@ aead_tag:
 ; Poly1305 padding/length block scratch (16 bytes)
 aead_scratch:
         !fill 16, 0
+
+; --- fe25519 field arithmetic ---
+fe_wide:
+        !fill 64, 0            ; 512-bit product from multiply
+fe_tmp1:
+        !fill 32, 0            ; temporary field element 1
+fe_tmp2:
+        !fill 32, 0            ; temporary field element 2
+fe_tmp3:
+        !fill 32, 0            ; temporary field element 3
+fe_tmp4:
+        !fill 32, 0            ; temporary field element 4
+
+; p = 2^255 - 19 in little-endian
+fe_p:
+        !byte $ed
+        !fill 30, $ff
+        !byte $7f
+
+; --- X25519 state ---
+x25_scalar:
+        !fill 32, 0            ; clamped scalar
+x25_u:
+        !fill 32, 0            ; input u-coordinate
+x25_result:
+        !fill 32, 0            ; output u-coordinate
+x25_x2:
+        !fill 32, 0            ; Montgomery ladder state
+x25_z2:
+        !fill 32, 0
+x25_x3:
+        !fill 32, 0
+x25_z3:
+        !fill 32, 0
+x25_a:
+        !fill 32, 0            ; ladder temporaries
+x25_b:
+        !fill 32, 0
+x25_da:
+        !fill 32, 0
+x25_cb:
+        !fill 32, 0
+x25_e:
+        !fill 32, 0
+x25_basepoint:
+        !byte 9
+        !fill 31, 0
+
+; --- Handshake state ---
+hs_c:
+        !fill 32, 0            ; chaining key
+hs_h:
+        !fill 32, 0            ; hash
+hs_static_priv:
+        !fill 32, 0            ; our static private key
+hs_static_pub:
+        !fill 32, 0            ; our static public key
+hs_resp_pub:
+        !fill 32, 0            ; responder's static public key
+hs_ephem_priv:
+        !fill 32, 0            ; ephemeral private key
+hs_ephem_pub:
+        !fill 32, 0            ; ephemeral public key
+hs_dh_result:
+        !fill 32, 0            ; DH output (temp)
+hs_sender_idx:
+        !fill 4, 0             ; sender index
+hs_timestamp:
+        !fill 12, 0            ; TAI64N timestamp
+hs_mac1_key:
+        !fill 32, 0            ; precomputed MAC1 key
+hs_packet:
+        !fill 148, 0           ; outgoing Type 1 packet
+hs_resp_packet:
+        !fill 92, 0            ; incoming Type 2 packet
+hs_transport_send:
+        !fill 32, 0            ; transport send key
+hs_transport_recv:
+        !fill 32, 0            ; transport recv key
