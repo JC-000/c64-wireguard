@@ -77,6 +77,22 @@ poly_j          = $1b           ; outer loop counter
 poly_carry      = $1c           ; carry byte for multi-precision arithmetic
 poly_tmp        = $1d           ; temp for multiply
 
+; fe25519 field arithmetic working variables
+fe_src1         = $1e           ; 2-byte pointer to operand 1
+fe_src2         = $20           ; 2-byte pointer to operand 2
+fe_dst          = $22           ; 2-byte pointer to destination
+fe_misc         = $24           ; 2-byte misc pointer
+fe_carry        = $26           ; carry/borrow byte
+fe_loop         = $27           ; loop counter
+fe_mul_i        = $28           ; multiply outer index
+fe_mul_j        = $29           ; multiply inner index
+
+; X25519 working variables
+x25_prev_bit    = $2a           ; previous k_t for swap
+x25_bit_ctr     = $2b           ; bit counter
+x25_byte_idx    = $2c           ; byte index in scalar
+x25_bit_mask    = $2d           ; current bit mask
+
 ; --- BLAKE2s constants ---
 blake2s_block_size = 64         ; bytes per block
 blake2s_hash_size  = 32         ; output size (256 bits)

@@ -18,6 +18,10 @@
 !source "chacha20.asm"
 !source "poly1305.asm"
 !source "aead.asm"
+!source "fe25519.asm"
+!source "x25519.asm"
+!source "tai64n.asm"
+!source "handshake.asm"
 
 ; --- Data and strings (placed after code) ---
 !source "data.asm"
