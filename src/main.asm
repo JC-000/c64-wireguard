@@ -15,6 +15,9 @@
 !source "word32.asm"
 !source "blake2s.asm"
 !source "blake2s_kdf.asm"
+!source "chacha20.asm"
+!source "poly1305.asm"
+!source "aead.asm"
 
 ; --- Data and strings (placed after code) ---
 !source "data.asm"

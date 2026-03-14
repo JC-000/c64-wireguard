@@ -299,6 +299,175 @@ rotl32_1:
         rts
 
 ; =============================================================================
+; rotl32_8 - Rotate left 32 bits by 8 (byte rotate left)
+; Little-endian: [b0 b1 b2 b3] <<< 8 = [b3 b0 b1 b2]
+;
+; value <<< 8 = value * 256 mod 2^32:
+;   new byte[0] = b3, byte[1] = b0, byte[2] = b1, byte[3] = b2
+;
+; Preserves: X
+; Clobbers: A, Y
+; =============================================================================
+rotl32_8:
+        ldy #3
+        lda (w32_dst),y        ; save b3
+        pha
+        ldy #2
+        lda (w32_dst),y        ; b2
+        ldy #3
+        sta (w32_dst),y        ; pos3 = b2
+        ldy #1
+        lda (w32_dst),y        ; b1
+        ldy #2
+        sta (w32_dst),y        ; pos2 = b1
+        ldy #0
+        lda (w32_dst),y        ; b0
+        ldy #1
+        sta (w32_dst),y        ; pos1 = b0
+        pla                    ; old b3
+        ldy #0
+        sta (w32_dst),y        ; pos0 = b3
+        rts
+
+; =============================================================================
+; rotl32_4 - Rotate left 32 bits by 4 (nibble shift left)
+;
+; Each byte: new_b[i] = (b[i] << 4) | (b[i-1] >> 4), with wrap
+; In LE: new_b0 = (b0 << 4) | (b3 >> 4)  [wrap from MSB byte]
+;        new_b1 = (b1 << 4) | (b0 >> 4)
+;        new_b2 = (b2 << 4) | (b1 >> 4)
+;        new_b3 = (b3 << 4) | (b2 >> 4)
+;
+; Preserves: X
+; Clobbers: A, Y
+; =============================================================================
+rotl32_4:
+        ; save b3 high nibble for wrap-around into b0
+        ldy #3
+        lda (w32_dst),y
+        lsr
+        lsr
+        lsr
+        lsr                    ; b3 >> 4 (for wrapping into b0 low)
+        sta zp_tmp1            ; save wrap value
+
+        ; b3 = (b3 << 4) | (b2 >> 4)
+        ldy #3
+        lda (w32_dst),y
+        asl
+        asl
+        asl
+        asl
+        sta zp_tmp2            ; b3 << 4
+        ldy #2
+        lda (w32_dst),y
+        lsr
+        lsr
+        lsr
+        lsr
+        ora zp_tmp2
+        ldy #3
+        sta (w32_dst),y
+
+        ; b2 = (b2 << 4) | (b1 >> 4)
+        ldy #2
+        lda (w32_dst),y
+        asl
+        asl
+        asl
+        asl
+        sta zp_tmp2
+        ldy #1
+        lda (w32_dst),y
+        lsr
+        lsr
+        lsr
+        lsr
+        ora zp_tmp2
+        ldy #2
+        sta (w32_dst),y
+
+        ; b1 = (b1 << 4) | (b0 >> 4)
+        ldy #1
+        lda (w32_dst),y
+        asl
+        asl
+        asl
+        asl
+        sta zp_tmp2
+        ldy #0
+        lda (w32_dst),y
+        lsr
+        lsr
+        lsr
+        lsr
+        ora zp_tmp2
+        ldy #1
+        sta (w32_dst),y
+
+        ; b0 = (b0 << 4) | (b3 >> 4)  [wrap from saved value]
+        ldy #0
+        lda (w32_dst),y
+        asl
+        asl
+        asl
+        asl
+        ora zp_tmp1            ; wrapped b3 high nibble
+        sta (w32_dst),y
+        rts
+
+; =============================================================================
+; rotl32_12 - Rotate left 32 bits by 12 = rotl_8 + rotl_4
+; Preserves: X
+; Clobbers: A, Y
+; =============================================================================
+rotl32_12:
+        jsr rotl32_8
+        jmp rotl32_4           ; tail call
+
+; =============================================================================
+; rotr32_1 - Rotate right 32 bits by 1
+; Little-endian right shift: start from MSB (byte 3)
+; Preserves: X
+; Clobbers: A, Y
+; =============================================================================
+rotr32_1:
+        clc
+        ldy #3
+        lda (w32_dst),y
+        ror
+        sta (w32_dst),y
+        dey
+        lda (w32_dst),y
+        ror
+        sta (w32_dst),y
+        dey
+        lda (w32_dst),y
+        ror
+        sta (w32_dst),y
+        dey
+        lda (w32_dst),y
+        ror
+        sta (w32_dst),y
+        ; carry = old LSB, wraps to bit 7 of byte 3
+        bcc +
+        ldy #3
+        lda (w32_dst),y
+        ora #$80
+        sta (w32_dst),y
++
+        rts
+
+; =============================================================================
+; rotl32_7 - Rotate left 32 bits by 7 = rotl_8 - rotr_1 = rotl_8 then rotr_1
+; Preserves: X
+; Clobbers: A, Y
+; =============================================================================
+rotl32_7:
+        jsr rotl32_8
+        jmp rotr32_1           ; tail call
+
+; =============================================================================
 ; copy32 - Copy 4 bytes: (w32_dst) = (w32_src1)
 ; Preserves: X
 ; Clobbers: A, Y

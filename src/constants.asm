@@ -64,6 +64,19 @@ b2s_remain      = $11           ; bytes remaining in current update
 b2s_key_len     = $12           ; key length (0 = unkeyed)
 b2s_offset      = $13           ; offset into current block buffer
 
+; ChaCha20 working variables
+cc20_round      = $14           ; round counter (0-9)
+cc20_qr_idx     = $15           ; quarter-round parameter index
+cc20_data_ptr   = $16           ; 2-byte pointer to input data ($16-$17)
+cc20_remain     = $18           ; bytes remaining
+cc20_buf_pos    = $19           ; position within 64-byte keystream buffer
+
+; Poly1305 working variables
+poly_i          = $1a           ; inner loop counter
+poly_j          = $1b           ; outer loop counter
+poly_carry      = $1c           ; carry byte for multi-precision arithmetic
+poly_tmp        = $1d           ; temp for multiply
+
 ; --- BLAKE2s constants ---
 blake2s_block_size = 64         ; bytes per block
 blake2s_hash_size  = 32         ; output size (256 bits)
