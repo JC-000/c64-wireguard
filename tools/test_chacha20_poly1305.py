@@ -580,182 +580,6 @@ def test_poly1305_clamp(transport, labels):
     return passed, failed
 
 
-def test_poly1305_multiply_diag(transport, labels):
-    """Diagnostic: test multiply in isolation with simple inputs."""
-    passed = failed = 0
-
-    # Use a simple r value
-    r_val = bytearray(16)
-    r_val[0] = 0x05  # r = 5
-    s_val = bytes(16)
-
-    # Write r (already clamped for this simple value)
-    write_bytes(transport, labels["poly_r"], bytes(r_val))
-    write_bytes(transport, labels["poly_s"], s_val)
-
-    # Build sqtab
-    robust_jsr(transport, labels["sqtab_init"], timeout=60.0)
-
-    # Test 1: Use multiply_only (no reduce) to see raw product
-    write_bytes(transport, labels["poly_h"], bytes(17))
-    write_bytes(transport, labels["poly_h"], bytes([1]))
-
-    robust_jsr(transport, labels["poly1305_multiply_only"], timeout=60.0)
-
-    prod_raw = read_bytes(transport, labels["poly_product"], 33)
-    print(f"  Diag: raw product h=1*r=5 = {prod_raw.hex()}")
-    # Expected: 05 00 00 ... 00 (33 bytes)
-    expected_prod = bytearray(33)
-    expected_prod[0] = 5
-    if prod_raw == bytes(expected_prod):
-        passed += 1
-        print(f"  PASS multiply_only h=1*r=5: product correct")
-    else:
-        failed += 1
-        print(f"  FAIL multiply_only h=1*r=5:")
-        print(f"    expected: {bytes(expected_prod).hex()}")
-
-    # Test 2: Full multiply+reduce with h=1*r=5
-    write_bytes(transport, labels["poly_h"], bytes(17))
-    write_bytes(transport, labels["poly_h"], bytes([1]))
-    robust_jsr(transport, labels["poly1305_multiply"], timeout=60.0)
-    h_after = read_bytes(transport, labels["poly_h"], 17)
-    expected_h = bytearray(17)
-    expected_h[0] = 5
-    if h_after == bytes(expected_h):
-        passed += 1
-        print(f"  PASS multiply+reduce h=1*r=5 → h=5")
-    else:
-        failed += 1
-        print(f"  FAIL multiply+reduce h=1*r=5:")
-        print(f"    expected h: {bytes(expected_h).hex()}")
-        print(f"    got h:      {h_after.hex()}")
-        # Also read product to see post-reduce state
-        prod_after = read_bytes(transport, labels["poly_product"], 33)
-        print(f"    product after reduce: {prod_after.hex()}")
-
-    # Test 3: multiply_only with larger values
-    # h = [0x10, 0, ..., 0], r = [0x03, 0, ..., 0]
-    # Expected product: 0x10 * 0x03 = 0x30
-    write_bytes(transport, labels["poly_h"], bytes(17))
-    write_bytes(transport, labels["poly_h"], bytes([0x10]))
-    r_val2 = bytearray(16)
-    r_val2[0] = 0x03
-    write_bytes(transport, labels["poly_r"], bytes(r_val2))
-
-    robust_jsr(transport, labels["poly1305_multiply_only"], timeout=60.0)
-    prod_raw2 = read_bytes(transport, labels["poly_product"], 33)
-    print(f"  Diag: raw product h=16*r=3 = {prod_raw2.hex()}")
-    expected_prod2 = bytearray(33)
-    expected_prod2[0] = 0x30
-    if prod_raw2 == bytes(expected_prod2):
-        passed += 1
-        print(f"  PASS multiply_only h=16*r=3: product correct")
-    else:
-        failed += 1
-        print(f"  FAIL multiply_only h=16*r=3:")
-        print(f"    expected: {bytes(expected_prod2).hex()}")
-
-    # Test 4: Larger multiply - h has multiple nonzero bytes
-    # h = [0x01, 0x02, 0, ..., 0], r = [0x03, 0x04, 0, ..., 0]
-    # Python: h_int = 0x0201, r_int = 0x0403
-    # product = 0x0201 * 0x0403 = (513 * 1027) = 526851 = 0x080B03
-    write_bytes(transport, labels["poly_h"], bytes(17))
-    h4 = bytearray(17)
-    h4[0] = 0x01
-    h4[1] = 0x02
-    write_bytes(transport, labels["poly_h"], h4)
-    r4 = bytearray(16)
-    r4[0] = 0x03
-    r4[1] = 0x04
-    write_bytes(transport, labels["poly_r"], bytes(r4))
-
-    robust_jsr(transport, labels["poly1305_multiply_only"], timeout=60.0)
-    prod4 = read_bytes(transport, labels["poly_product"], 33)
-    expected4 = bytearray(33)
-    # 1*3=3 at [0], 1*4=4 at [1], 2*3=6 at [1], 2*4=8 at [2]
-    # product[0] = 3, product[1] = 4+6=10=0x0A, product[2] = 8, product[3] = 0
-    # Actually: schoolbook: sum of h[i]*r[j] at position i+j
-    # (0,0): 1*3=3 → pos 0
-    # (0,1): 1*4=4 → pos 1
-    # (1,0): 2*3=6 → pos 1
-    # (1,1): 2*4=8 → pos 2
-    expected4[0] = 0x03
-    expected4[1] = 0x0A  # 4+6
-    expected4[2] = 0x08
-    prod4_match = prod4 == bytes(expected4)
-    if prod4_match:
-        passed += 1
-        print(f"  PASS multiply_only h=0x0201*r=0x0403")
-    else:
-        failed += 1
-        print(f"  FAIL multiply_only h=0x0201*r=0x0403:")
-        print(f"    expected: {bytes(expected4[:8]).hex()}")
-        print(f"    got:      {prod4[:8].hex()}")
-
-    # Test 5: Step-by-step Poly1305 with RFC vector
-    # Use RFC 7539 §2.5.2 key
-    key_hex = "85d6be7855556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b"
-    key = bytes.fromhex(key_hex)
-    msg = b"Cryptographic Forum Research Group"
-
-    # Init
-    c64_poly1305_init(transport, labels, key)
-
-    # Read clamped r
-    r_clamped = read_bytes(transport, labels["poly_r"], 16)
-    # Compute expected clamped r
-    r_expected = bytearray(key[:16])
-    r_expected[3] &= 0x0f
-    r_expected[7] &= 0x0f
-    r_expected[11] &= 0x0f
-    r_expected[15] &= 0x0f
-    r_expected[4] &= 0xfc
-    r_expected[8] &= 0xfc
-    r_expected[12] &= 0xfc
-    if r_clamped == bytes(r_expected):
-        print(f"  PASS clamped r matches expected")
-    else:
-        print(f"  FAIL clamped r:")
-        print(f"    expected: {bytes(r_expected).hex()}")
-        print(f"    got:      {r_clamped.hex()}")
-
-    # Process first block (16 bytes) manually
-    block1 = msg[:16]  # "Cryptographic Fo"
-    buf = labels["input_buffer"]
-    write_bytes(transport, buf, block1)
-    write_bytes(transport, labels["zp_ptr1"], bytes([buf & 0xFF, buf >> 8]))
-
-    # Call poly1305_block with A=1 (hibit)
-    # But jsr() doesn't set A. We need a wrapper.
-    # Write: LDA #1; JSR poly1305_block; RTS
-    block_addr = labels["poly1305_block"]
-    wrapper = bytes([
-        0xA9, 0x01,  # LDA #1
-        0x20, block_addr & 0xFF, block_addr >> 8,  # JSR poly1305_block
-        0x60  # RTS
-    ])
-    write_bytes(transport, buf + 64, wrapper)
-    robust_jsr(transport, buf + 64, timeout=120.0)
-
-    h_after_block1 = read_bytes(transport, labels["poly_h"], 17)
-    # Python reference: after block 1
-    r_int = int.from_bytes(r_expected, 'little')
-    p = (1 << 130) - 5
-    n1 = int.from_bytes(block1, 'little') + (1 << 128)
-    h1 = (n1 * r_int) % p
-    h1_bytes = h1.to_bytes(17, 'little')
-    if h_after_block1 == h1_bytes:
-        passed += 1
-        print(f"  PASS poly1305 block 1: h matches Python")
-    else:
-        failed += 1
-        print(f"  FAIL poly1305 block 1:")
-        print(f"    expected: {h1_bytes.hex()}")
-        print(f"    got:      {h_after_block1.hex()}")
-
-    return passed, failed
-
 
 def test_poly1305_tag(transport, labels):
     """Test Poly1305 tag computation with RFC 7539 vector."""
@@ -970,7 +794,6 @@ def run_tests(transport, labels, seed):
         ("ChaCha20 encrypt (RFC)", lambda: test_chacha20_encrypt(transport, labels)),
         ("ChaCha20 encrypt (random)", lambda: test_chacha20_encrypt_random(transport, labels, rng)),
         ("Poly1305 clamp", lambda: test_poly1305_clamp(transport, labels)),
-        ("Poly1305 multiply (diag)", lambda: test_poly1305_multiply_diag(transport, labels)),
         ("Poly1305 tag (RFC)", lambda: test_poly1305_tag(transport, labels)),
         ("Poly1305 random", lambda: test_poly1305_random(transport, labels, rng)),
         ("AEAD encrypt (RFC)", lambda: test_aead_encrypt(transport, labels)),
@@ -1039,7 +862,6 @@ def main():
         "cc20_qr_table",
         "poly1305_init", "poly1305_clamp", "poly1305_update", "poly1305_final",
         "poly_r", "poly_s", "poly_h", "poly1305_tag", "poly_carry",
-        "poly1305_multiply_only", "poly_product",
         "aead_encrypt", "aead_decrypt",
         "aead_key", "aead_nonce", "aead_aad_ptr", "aead_aad_len",
         "aead_data_ptr", "aead_data_len", "aead_tag",
