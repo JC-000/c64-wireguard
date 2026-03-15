@@ -4,6 +4,8 @@ build/
 *.d71
 *.d81
 *.o
+*.bin
+*.map
 __pycache__/
 *.pyc
 .vscode/
