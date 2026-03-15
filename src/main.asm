@@ -40,6 +40,7 @@
 !source "x25519.asm"
 !source "tai64n.asm"
 !source "handshake.asm"
+!source "transport.asm"
 
 ; --- Data and strings (placed after code) ---
 !source "data.asm"
