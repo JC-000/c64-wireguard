@@ -42,11 +42,17 @@ main_loop:
         beq quit
         cmp #$49                ; 'I' = init network
         beq @init_net
+        cmp #$53                ; 'S' = send test packet
+        beq @send_test
 
         jmp main_loop
 
 @init_net:
         jsr do_net_init
+        jmp main_loop
+
+@send_test:
+        jsr do_send_test
         jmp main_loop
 
 quit:
@@ -121,6 +127,33 @@ do_net_init:
         ; mark network as initialized
         lda #1
         sta net_initialized
+        rts
+
+; =============================================================================
+; do_send_test - send a test transport packet
+; =============================================================================
+do_send_test:
+        ; set up test payload pointer
+        lda #<test_payload
+        sta tp_payload_ptr
+        lda #>test_payload
+        sta tp_payload_ptr+1
+        lda #test_payload_len
+        sta tp_payload_len
+
+        ; encrypt and send
+        jsr transport_send
+        bcs @send_err
+
+        lda #<send_ok_msg
+        ldy #>send_ok_msg
+        jsr print_string
+        rts
+
+@send_err:
+        lda #<send_err_msg
+        ldy #>send_err_msg
+        jsr print_string
         rts
 
 ; =============================================================================
