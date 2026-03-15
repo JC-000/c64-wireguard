@@ -34,6 +34,9 @@ main_loop:
         lda net_initialized
         beq @no_poll
         jsr net_poll            ; poll ip65 for packets
+        lda udp_recv_ready
+        beq @no_poll
+        jsr session_handle_packet
 @no_poll:
         jsr getin
         beq main_loop           ; wait for keypress
@@ -42,6 +45,8 @@ main_loop:
         beq quit
         cmp #$49                ; 'I' = init network
         beq @init_net
+        cmp #$48                ; 'H' = handshake
+        beq @handshake
         cmp #$53                ; 'S' = send test packet
         beq @send_test
 
@@ -53,6 +58,10 @@ main_loop:
 
 @send_test:
         jsr do_send_test
+        jmp main_loop
+
+@handshake:
+        jsr do_handshake
         jmp main_loop
 
 quit:
@@ -154,6 +163,32 @@ do_send_test:
         lda #<send_err_msg
         ldy #>send_err_msg
         jsr print_string
+        rts
+
+; =============================================================================
+; do_handshake - initiate WireGuard handshake
+; =============================================================================
+do_handshake:
+        lda #<hs_start_msg
+        ldy #>hs_start_msg
+        jsr print_string
+
+        ; init entropy sources
+        jsr entropy_init
+
+        ; small delay for SID to settle (256 iterations)
+        ldx #0
+@delay:
+        nop
+        nop
+        nop
+        nop
+        dex
+        bne @delay
+
+        ; initiate session
+        jsr session_initiate
+
         rts
 
 ; =============================================================================

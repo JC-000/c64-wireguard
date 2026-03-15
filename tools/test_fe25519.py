@@ -582,14 +582,15 @@ def main():
     random.seed(seed)
     print(f"Random seed: {seed} (reproduce with --seed {seed})")
 
-    # Build
-    print("Building...")
-    subprocess.run(["make", "clean"], capture_output=True, cwd=PROJECT_ROOT)
-    result = subprocess.run(["make"], capture_output=True, text=True,
-                            cwd=PROJECT_ROOT)
-    if result.returncode != 0:
-        print(f"Build failed:\n{result.stderr}")
-        sys.exit(1)
+    # Build (skip if run_regression.py already built)
+    if not os.environ.get("C64_SKIP_BUILD"):
+        print("Building...")
+        subprocess.run(["make", "clean"], capture_output=True, cwd=PROJECT_ROOT)
+        result = subprocess.run(["make"], capture_output=True, text=True,
+                                cwd=PROJECT_ROOT)
+        if result.returncode != 0:
+            print(f"Build failed:\n{result.stderr}")
+            sys.exit(1)
     print(f"Built: {PRG_PATH}")
 
     # Load labels
@@ -613,7 +614,9 @@ def main():
     # Launch VICE
     allocator = PortAllocator(port_range_start=6510, port_range_end=6530)
     port = allocator.allocate()
-    print(f"Using port {port}")
+    reservation = allocator.take_socket(port)
+    if reservation:
+        reservation.close()
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
                         port=port)
     with ViceProcess(config) as vice:
@@ -622,6 +625,7 @@ def main():
             allocator.release(port)
             sys.exit(1)
 
+        print(f"VICE PID={vice.pid}, port={port}")
         transport = ViceTransport(port=port)
         grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
         if grid is None:

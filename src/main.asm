@@ -41,6 +41,9 @@
 !source "tai64n.asm"
 !source "handshake.asm"
 !source "transport.asm"
+!source "entropy.asm"
+!source "config.asm"
+!source "session.asm"
 
 ; --- Data and strings (placed after code) ---
 !source "data.asm"

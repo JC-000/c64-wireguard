@@ -537,13 +537,14 @@ def main():
     random.seed(seed)
     print(f"Random seed: {seed} (reproduce with --seed {seed})")
 
-    # Build
-    print("Building...")
-    subprocess.run(["make", "clean"], capture_output=True, cwd=PROJECT_ROOT)
-    result = subprocess.run(["make"], capture_output=True, text=True, cwd=PROJECT_ROOT)
-    if result.returncode != 0:
-        print(f"Build failed:\n{result.stderr}")
-        sys.exit(1)
+    # Build (skip if run_regression.py already built)
+    if not os.environ.get("C64_SKIP_BUILD"):
+        print("Building...")
+        subprocess.run(["make", "clean"], capture_output=True, cwd=PROJECT_ROOT)
+        result = subprocess.run(["make"], capture_output=True, text=True, cwd=PROJECT_ROOT)
+        if result.returncode != 0:
+            print(f"Build failed:\n{result.stderr}")
+            sys.exit(1)
 
     assert os.path.exists(PRG_PATH), f"{PRG_PATH} not found after build"
     print(f"Built: {PRG_PATH}")
@@ -571,13 +572,22 @@ def main():
     print(f"Labels loaded: {len(required)} required labels verified")
 
     # Launch VICE
-    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
+    from c64_test_harness.backends.vice_manager import PortAllocator
+    allocator = PortAllocator(port_range_start=6510, port_range_end=6530)
+    port = allocator.allocate()
+    reservation = allocator.take_socket(port)
+    if reservation:
+        reservation.close()
+    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
+                        port=port)
     with ViceProcess(config) as vice:
         if not vice.wait_for_monitor(timeout=30.0):
             print("FATAL: Could not connect to VICE monitor")
+            allocator.release(port)
             sys.exit(1)
 
-        transport = ViceTransport(port=config.port)
+        print(f"VICE PID={vice.pid}, port={port}")
+        transport = ViceTransport(port=port)
         grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
         if grid is None:
             print("FATAL: Main menu did not appear")
