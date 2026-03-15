@@ -5,7 +5,7 @@
 title_msg:
         !text "WIREGUARD NOISE PROTOCOL", 13
         !text "FOR COMMODORE 64", 13, 13
-        !text "I=INIT  S=SEND  Q=QUIT", 13, 0
+        !text "I=INIT H=HS S=SEND Q=QUIT", 13, 0
 
 net_init_msg:
         !text "INITIALIZING NETWORK...", 13, 0
@@ -31,3 +31,15 @@ send_err_msg:
 test_payload:
         !text "HELLO WIREGUARD"
 test_payload_len = * - test_payload
+
+; --- Session status messages ---
+hs_start_msg:
+        !text "STARTING HANDSHAKE...", 13, 0
+hs_ok_msg:
+        !text "HANDSHAKE OK", 13, 0
+hs_fail_msg:
+        !text "HANDSHAKE FAILED", 13, 0
+decrypt_fail_msg:
+        !text "DECRYPT FAILED", 13, 0
+recv_data_msg:
+        !text "RECV: ", 0

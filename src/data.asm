@@ -274,3 +274,19 @@ tp_packet:
         !fill 256, 0           ; Type 4 packet buffer
 tp_packet_len:
         !word 0                ; total packet length
+
+; --- Session state ---
+wg_state:
+        !byte 0                 ; 0=IDLE, 1=HS_SENT, 2=ACTIVE
+
+; --- Configuration buffers ---
+cfg_static_priv:
+        !fill 32, 0             ; static private key
+cfg_static_pub:
+        !fill 32, 0             ; static public key
+cfg_peer_pub:
+        !fill 32, 0             ; peer's public key
+cfg_peer_endpoint_ip:
+        !fill 4, 0              ; peer endpoint IP
+cfg_peer_endpoint_port:
+        !word 0                 ; peer endpoint port

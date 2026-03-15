@@ -4,7 +4,7 @@ WireGuard Noise protocol implementation for the Commodore 64, written in 6502 as
 
 ## Status
 
-**Phase 5 complete**: Transport data packets (Type 4 encrypt/decrypt with replay protection).
+**Phase 6 complete**: Session state machine — hardware entropy, config, handshake initiation, packet dispatch, and full WireGuard client loop.
 
 | Phase | Components | Tests |
 |-------|-----------|-------|
@@ -13,7 +13,8 @@ WireGuard Noise protocol implementation for the Commodore 64, written in 6502 as
 | 3 | Field arithmetic mod 2^255-19, X25519, Noise handshake | 87 |
 | 4 | UDP networking (ip65, RR-Net, DHCP, ZP time-sharing) | 64 |
 | 5 | Transport data packets (Type 4 encrypt/decrypt, replay protection) | 54 |
-| **Total** | | **325** |
+| 6 | Session state machine (entropy, config, handshake, packet dispatch) | 49 |
+| **Total** | | **369** |
 
 ## Building
 
@@ -31,9 +32,9 @@ make clean
 ## Memory Layout
 
 ```
-$0801-$0A12  Boot stub, main loop, network wrapper (net.asm)
+$0801-$0A72  Boot stub, main loop, network wrapper (net.asm)
 $2000-$32EF  ip65 binary blob (UDP-only, 4,847 bytes)
-$32F0-$5B9D  Crypto modules + transport + data buffers + strings
+$32F0-$5D3D  Crypto modules + transport + session + data buffers + strings
 $7800-$7BFF  Quarter-square multiply tables (page-aligned)
 ```
 
@@ -58,7 +59,10 @@ ip65 uses zero page $02-$1B (cc65 standard). These overlap our crypto ZP variabl
 | `src/tai64n.asm` | TAI64N timestamp increment |
 | `src/handshake.asm` | WireGuard IKpsk2 Noise handshake (Type 1/Type 2 packets) |
 | `src/transport.asm` | Transport data packets: Type 4 encrypt/decrypt, replay protection |
-| `src/data.asm` | Mutable buffers (crypto state, transport state, network buffers) |
+| `src/entropy.asm` | Hardware RNG: SID voice 3 noise XOR CIA1 timer |
+| `src/config.asm` | Peer configuration: copy config buffers to handshake state |
+| `src/session.asm` | Session state machine: initiate, handle packet, reset, display |
+| `src/data.asm` | Mutable buffers (crypto state, transport state, session config, network buffers) |
 | `src/strings.asm` | Display strings |
 
 ### ip65 Build
@@ -105,6 +109,12 @@ python3 tools/test_networking.py                 # 64 tests
 
 # Phase 5: Transport data packets
 python3 tools/test_transport.py                  # 54 tests
+
+# Phase 6: Session state machine
+python3 tools/test_session.py                    # 49 tests
+
+# All suites in parallel (builds once, staggered launch)
+python3 tools/run_regression.py
 
 # VICE write chunking validation
 python3 tools/test_write_bytes_limit.py
@@ -154,3 +164,19 @@ Each packet is encrypted with ChaCha20-Poly1305 AEAD using the transport key der
 UDP packets are sent and received via [ip65](https://github.com/cc65/ip65), driving the RR-Net CS8900a ethernet adapter. The ip65 library is built as a standalone binary blob (ca65/ld65) and included at $2000 via ACME's `!binary` directive. A 10-entry jump table provides: init, process, DHCP, DNS, UDP add/remove listener, UDP send, and helper wrappers.
 
 The UDP receive callback fires during `ip65_process` while ip65 owns the zero page. It copies incoming packet data to `udp_recv_buf` and sets a flag for the main loop — no crypto ZP is touched.
+
+### Session State Machine
+
+The session module connects all components into a working WireGuard client:
+
+```
+STATE_IDLE (0) → session_initiate → STATE_HS_SENT (1)
+STATE_HS_SENT (1) → Type 2 received → STATE_ACTIVE (2)
+STATE_ACTIVE (2) → session_reset → STATE_IDLE (0)
+```
+
+- **session_initiate**: Loads peer config, generates ephemeral key (SID+CIA hardware entropy), creates Type 1 handshake packet, sends via UDP
+- **session_handle_packet**: Dispatches by type — Type 2 (handshake response) derives transport keys, Type 4 (data) decrypts and displays payload
+- **display_payload**: Renders decrypted plaintext as ASCII (non-printable bytes shown as '.')
+
+State guards ensure Type 2 packets are only accepted during STATE_HS_SENT and Type 4 packets only during STATE_ACTIVE.
