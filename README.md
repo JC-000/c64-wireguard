@@ -4,7 +4,7 @@ WireGuard Noise protocol implementation for the Commodore 64, written in 6502 as
 
 ## Status
 
-**Phase 4 complete**: UDP networking via ip65 (RR-Net CS8900a ethernet adapter).
+**Phase 5 complete**: Transport data packets (Type 4 encrypt/decrypt with replay protection).
 
 | Phase | Components | Tests |
 |-------|-----------|-------|
@@ -12,7 +12,8 @@ WireGuard Noise protocol implementation for the Commodore 64, written in 6502 as
 | 2 | ChaCha20, Poly1305 MAC, ChaCha20-Poly1305 AEAD | 55 |
 | 3 | Field arithmetic mod 2^255-19, X25519, Noise handshake | 87 |
 | 4 | UDP networking (ip65, RR-Net, DHCP, ZP time-sharing) | 64 |
-| **Total** | | **271** |
+| 5 | Transport data packets (Type 4 encrypt/decrypt, replay protection) | 54 |
+| **Total** | | **325** |
 
 ## Building
 
@@ -32,7 +33,7 @@ make clean
 ```
 $0801-$0A12  Boot stub, main loop, network wrapper (net.asm)
 $2000-$32EF  ip65 binary blob (UDP-only, 4,847 bytes)
-$32F0-$596A  Crypto modules + data buffers + strings
+$32F0-$5B9D  Crypto modules + transport + data buffers + strings
 $7800-$7BFF  Quarter-square multiply tables (page-aligned)
 ```
 
@@ -56,7 +57,8 @@ ip65 uses zero page $02-$1B (cc65 standard). These overlap our crypto ZP variabl
 | `src/x25519.asm` | X25519 scalar multiplication (Montgomery ladder, RFC 7748) |
 | `src/tai64n.asm` | TAI64N timestamp increment |
 | `src/handshake.asm` | WireGuard IKpsk2 Noise handshake (Type 1/Type 2 packets) |
-| `src/data.asm` | Mutable buffers (crypto state, network buffers) |
+| `src/transport.asm` | Transport data packets: Type 4 encrypt/decrypt, replay protection |
+| `src/data.asm` | Mutable buffers (crypto state, transport state, network buffers) |
 | `src/strings.asm` | Display strings |
 
 ### ip65 Build
@@ -101,6 +103,9 @@ python3 tools/test_handshake.py                  # 19 tests
 # Phase 4: Networking infrastructure
 python3 tools/test_networking.py                 # 64 tests
 
+# Phase 5: Transport data packets
+python3 tools/test_transport.py                  # 54 tests
+
 # VICE write chunking validation
 python3 tools/test_write_bytes_limit.py
 ```
@@ -130,6 +135,19 @@ The WireGuard handshake follows the IKpsk2 Noise pattern:
 2. **Responder** replies with a 92-byte Type 2 packet. The initiator processes it to derive symmetric transport keys for data encryption.
 
 Key derivation uses HMAC-BLAKE2s based HKDF. All field arithmetic operates mod 2^255-19 in little-endian representation, matching the 6502's native carry propagation direction.
+
+### Transport
+
+After the handshake, data is exchanged using Type 4 transport packets:
+
+```
+[0-3]   type = 4 (LE u32)
+[4-7]   receiver_index (from handshake)
+[8-15]  counter (64-bit LE, per-packet nonce)
+[16+]   encrypted payload + 16-byte Poly1305 tag
+```
+
+Each packet is encrypted with ChaCha20-Poly1305 AEAD using the transport key derived from the handshake. The 12-byte AEAD nonce is 4 zero bytes followed by the 8-byte counter. Replay protection rejects packets with counters below the highest successfully decrypted counter.
 
 ### Networking
 

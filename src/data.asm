@@ -256,3 +256,21 @@ wg_local_port:
         !word 0                ; our listening port
 net_initialized:
         !byte 0                ; 0=not initialized, 1=network ready
+
+; --- Transport state ---
+tp_send_counter:
+        !fill 8, 0             ; 64-bit send counter (LE)
+tp_recv_counter:
+        !fill 8, 0             ; next minimum accepted recv counter (LE)
+tp_recv_counter_tmp:
+        !fill 8, 0             ; temp for incoming counter
+tp_peer_recv_idx:
+        !fill 4, 0             ; peer's sender index
+tp_payload_ptr:
+        !word 0                ; pointer to plaintext data
+tp_payload_len:
+        !byte 0                ; payload length (max ~220)
+tp_packet:
+        !fill 256, 0           ; Type 4 packet buffer
+tp_packet_len:
+        !word 0                ; total packet length
