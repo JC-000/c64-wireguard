@@ -31,12 +31,22 @@ start:
 
         ; fall through to main loop
 main_loop:
+        lda net_initialized
+        beq @no_poll
+        jsr net_poll            ; poll ip65 for packets
+@no_poll:
         jsr getin
         beq main_loop           ; wait for keypress
 
         cmp #$51                ; 'Q' = quit
         beq quit
+        cmp #$49                ; 'I' = init network
+        beq @init_net
 
+        jmp main_loop
+
+@init_net:
+        jsr do_net_init
         jmp main_loop
 
 quit:
@@ -44,6 +54,73 @@ quit:
         lda proc_port
         ora #$01
         sta proc_port
+        rts
+
+; =============================================================================
+; do_net_init - initialize network, DHCP, start UDP listener
+; =============================================================================
+do_net_init:
+        ; print init message
+        lda #<net_init_msg
+        ldy #>net_init_msg
+        jsr print_string
+
+        ; init ip65
+        jsr net_init
+        bcc @init_ok
+
+        ; init failed
+        lda #<net_err_msg
+        ldy #>net_err_msg
+        jsr print_string
+        rts
+
+@init_ok:
+        ; print DHCP message
+        lda #<net_dhcp_msg
+        ldy #>net_dhcp_msg
+        jsr print_string
+
+        ; request DHCP
+        jsr net_dhcp
+        bcc @dhcp_ok
+
+        ; DHCP failed
+        lda #<dhcp_err_msg
+        ldy #>dhcp_err_msg
+        jsr print_string
+        rts
+
+@dhcp_ok:
+        ; print IP address
+        lda #<net_ok_msg
+        ldy #>net_ok_msg
+        jsr print_string
+        jsr net_print_ip
+
+        ; set default WireGuard port
+        lda #<wg_default_port
+        sta wg_local_port
+        lda #>wg_default_port
+        sta wg_local_port+1
+
+        ; start UDP listener
+        jsr net_udp_listen
+        bcc @listen_ok
+
+        lda #<net_listen_err_msg
+        ldy #>net_listen_err_msg
+        jsr print_string
+        rts
+
+@listen_ok:
+        lda #<net_listen_msg
+        ldy #>net_listen_msg
+        jsr print_string
+
+        ; mark network as initialized
+        lda #1
+        sta net_initialized
         rts
 
 ; =============================================================================

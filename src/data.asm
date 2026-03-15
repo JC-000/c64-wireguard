@@ -236,3 +236,23 @@ hs_transport_send:
         !fill 32, 0            ; transport send key
 hs_transport_recv:
         !fill 32, 0            ; transport recv key
+
+; --- Network buffers ---
+zp_save_buf:
+        !fill 26, 0            ; ZP save area ($02-$1B)
+udp_recv_buf:
+        !fill 256, 0           ; incoming UDP packet buffer
+udp_recv_len:
+        !word 0                ; length of received packet
+udp_recv_src_ip:
+        !fill 4, 0             ; source IP of received packet
+udp_recv_ready:
+        !byte 0                ; 0=no packet, 1=packet waiting
+wg_peer_ip:
+        !fill 4, 0             ; WireGuard peer IP address
+wg_peer_port:
+        !word 0                ; WireGuard peer port (usually 51820)
+wg_local_port:
+        !word 0                ; our listening port
+net_initialized:
+        !byte 0                ; 0=not initialized, 1=network ready
