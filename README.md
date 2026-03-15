@@ -4,32 +4,48 @@ WireGuard Noise protocol implementation for the Commodore 64, written in 6502 as
 
 ## Status
 
-**Phase 3 complete**: full WireGuard IKpsk2 Noise handshake initiator with all cryptographic primitives.
+**Phase 4 complete**: UDP networking via ip65 (RR-Net CS8900a ethernet adapter).
 
 | Phase | Components | Tests |
 |-------|-----------|-------|
 | 1 | BLAKE2s-256, HMAC-BLAKE2s, WireGuard KDF | 64 |
 | 2 | ChaCha20, Poly1305 MAC, ChaCha20-Poly1305 AEAD | 55 |
 | 3 | Field arithmetic mod 2^255-19, X25519, Noise handshake | 87 |
-| **Total** | | **206** |
+| 4 | UDP networking (ip65, RR-Net, DHCP, ZP time-sharing) | 64 |
+| **Total** | | **271** |
 
 ## Building
 
-Requires the [ACME](https://sourceforge.net/projects/acme-crossass/) cross-assembler.
+Requires:
+- [ACME](https://sourceforge.net/projects/acme-crossass/) cross-assembler
+- [cc65](https://cc65.github.io/) toolchain (ca65 + ld65) — for building the ip65 binary blob
+- [ip65](https://github.com/cc65/ip65) source tree — symlinked at `ip65/`
 
 ```bash
-make            # build/wireguard.prg + build/labels.txt
+make            # build ip65 blob + build/wireguard.prg + build/labels.txt
 make run        # build and launch in VICE (x64sc)
 make clean
 ```
+
+## Memory Layout
+
+```
+$0801-$0A12  Boot stub, main loop, network wrapper (net.asm)
+$2000-$32EF  ip65 binary blob (UDP-only, 4,847 bytes)
+$32F0-$596A  Crypto modules + data buffers + strings
+$7800-$7BFF  Quarter-square multiply tables (page-aligned)
+```
+
+ip65 uses zero page $02-$1B (cc65 standard). These overlap our crypto ZP variables. The `net.asm` wrapper saves and restores $02-$1B around every ip65 call (~60 cycles overhead, negligible vs network latency).
 
 ## Source Files
 
 | File | Description |
 |---|---|
-| `src/main.asm` | Top-level includes |
-| `src/constants.asm` | Zero page variables, hardware equates, constants |
-| `src/boot.asm` | BASIC stub, startup, screen utilities |
+| `src/main.asm` | Top-level includes, memory layout with ip65 blob |
+| `src/constants.asm` | Zero page variables, hardware equates, ip65 jump table |
+| `src/boot.asm` | BASIC stub, startup, main loop, network init UI |
+| `src/net.asm` | ip65 wrapper: ZP save/restore, init, DHCP, UDP listen/send/recv |
 | `src/word32.asm` | 32-bit arithmetic: add, xor, rotate (7/8/12/16), copy, zero |
 | `src/blake2s.asm` | BLAKE2s-256: init, update, final, compress, G function, keyed hashing |
 | `src/blake2s_kdf.asm` | HMAC-BLAKE2s and WireGuard KDF (kdf_1, kdf_2, kdf_3) |
@@ -40,8 +56,15 @@ make clean
 | `src/x25519.asm` | X25519 scalar multiplication (Montgomery ladder, RFC 7748) |
 | `src/tai64n.asm` | TAI64N timestamp increment |
 | `src/handshake.asm` | WireGuard IKpsk2 Noise handshake (Type 1/Type 2 packets) |
-| `src/data.asm` | Mutable buffers |
+| `src/data.asm` | Mutable buffers (crypto state, network buffers) |
 | `src/strings.asm` | Display strings |
+
+### ip65 Build
+
+| File | Description |
+|---|---|
+| `ip65-build/ip65_stub.s` | Jump table with 10 UDP-focused entry points |
+| `ip65-build/ip65.cfg` | ld65 linker config (raw binary at $2000) |
 
 ## Zero Page Layout
 
@@ -54,6 +77,8 @@ make clean
 | $1E-$29 | fe_* | Field element arithmetic |
 | $2A-$2D | x25_* | X25519 ladder state |
 | $FB-$FE | zp_ptr1/2 | General-purpose pointers |
+
+Note: $02-$1B overlaps with ip65's cc65 ZP usage. The `net.asm` wrapper handles time-sharing via save/restore.
 
 ## Testing
 
@@ -72,6 +97,9 @@ python3 tools/test_chacha20_poly1305.py          # 55 tests
 python3 tools/test_fe25519.py                    # 64 tests
 python3 tools/test_x25519.py                     # 4 tests (--slow for scalarmult)
 python3 tools/test_handshake.py                  # 19 tests
+
+# Phase 4: Networking infrastructure
+python3 tools/test_networking.py                 # 64 tests
 
 # VICE write chunking validation
 python3 tools/test_write_bytes_limit.py
@@ -102,3 +130,9 @@ The WireGuard handshake follows the IKpsk2 Noise pattern:
 2. **Responder** replies with a 92-byte Type 2 packet. The initiator processes it to derive symmetric transport keys for data encryption.
 
 Key derivation uses HMAC-BLAKE2s based HKDF. All field arithmetic operates mod 2^255-19 in little-endian representation, matching the 6502's native carry propagation direction.
+
+### Networking
+
+UDP packets are sent and received via [ip65](https://github.com/cc65/ip65), driving the RR-Net CS8900a ethernet adapter. The ip65 library is built as a standalone binary blob (ca65/ld65) and included at $2000 via ACME's `!binary` directive. A 10-entry jump table provides: init, process, DHCP, DNS, UDP add/remove listener, UDP send, and helper wrappers.
+
+The UDP receive callback fires during `ip65_process` while ip65 owns the zero page. It copies incoming packet data to `udp_recv_buf` and sets a flag for the main loop — no crypto ZP is touched.
