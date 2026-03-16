@@ -679,8 +679,9 @@ hs_process_response:
         dex
         bpl @upd_c3
 
-        ; AEAD decrypt empty message (verify tag)
-        ; kdf_2(C, empty) → C + key
+        ; --- PSK mixing (IKpsk2 psk2 token) ---
+        ; kdf_3(C, psk) → C=out1, tau=out2, key=out3
+hs_psk_mix:
         ldx #31
 @save_c4:
         lda hs_c,x
@@ -688,13 +689,13 @@ hs_process_response:
         dex
         bpl @save_c4
 
-        lda #<hs_hs_empty
+        lda #<hs_preshared_key
         sta kdf_input_ptr
-        lda #>hs_hs_empty
+        lda #>hs_preshared_key
         sta kdf_input_ptr+1
-        lda #0
+        lda #32
         sta kdf_input_len
-        jsr kdf_2
+        jsr kdf_3
 
         ldx #31
 @upd_c4:
@@ -703,10 +704,20 @@ hs_process_response:
         dex
         bpl @upd_c4
 
+        ; mix_hash(H, tau=kdf_out2) — required for IKpsk2
+        lda #<kdf_out2
+        sta zp_ptr1
+        lda #>kdf_out2
+        sta zp_ptr1+1
+        lda #32
+        sta b2s_remain
+        jsr hs_mix_hash
+
         ; Verify AEAD tag (empty plaintext, 16-byte tag at packet[44..59])
+        ; AEAD key = kdf_out3 (third output from kdf_3)
         ldx #31
 @copy_key:
-        lda kdf_out2,x
+        lda kdf_out3,x
         sta aead_key,x
         dex
         bpl @copy_key

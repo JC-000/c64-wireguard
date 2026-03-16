@@ -88,7 +88,7 @@ def mix_hash(h, data):
 
 
 def py_noise_responder(type1_packet, resp_static_priv_bytes, resp_static_pub_bytes,
-                       init_static_pub_bytes):
+                       init_static_pub_bytes, psk=None):
     """Process a Type 1 initiation packet as responder and produce Type 2.
 
     Returns: (type2_packet_92_bytes, initiator_send_key, initiator_recv_key)
@@ -96,6 +96,8 @@ def py_noise_responder(type1_packet, resp_static_priv_bytes, resp_static_pub_byt
 
     Raises on AEAD verification failure.
     """
+    if psk is None:
+        psk = b'\x00' * 32
     # Parse Type 1 (148 bytes)
     assert len(type1_packet) == 148
     assert type1_packet[0] == 1  # type
@@ -172,9 +174,8 @@ def py_noise_responder(type1_packet, resp_static_priv_bytes, resp_static_pub_byt
     dh4 = resp_ephem_priv.exchange(init_static_pub_key)
     (c,) = kdf_n(c, dh4, 1)
 
-    # AEAD encrypt nothing (empty plaintext)
-    c, t, k = kdf_n(c, b'', 3)
-    # t is the PSK-related token (WireGuard zeros PSK by default)
+    # AEAD encrypt nothing (empty plaintext) — IKpsk2 PSK mixing
+    c, t, k = kdf_n(c, psk, 3)
     h = mix_hash(h, t)
 
     aead = ChaCha20Poly1305(k)
@@ -205,7 +206,7 @@ def py_noise_responder(type1_packet, resp_static_priv_bytes, resp_static_pub_byt
 
 def py_noise_responder_from_state(c, h, init_ephem_pub, init_static_pub_bytes,
                                    resp_static_priv_bytes, resp_static_pub_bytes,
-                                   init_sender_idx):
+                                   init_sender_idx, psk=None):
     """Build Type 2 from mid-handshake state (after Type 1 processing).
 
     This allows testing Type 2 processing WITHOUT running X25519 on C64.
@@ -213,6 +214,8 @@ def py_noise_responder_from_state(c, h, init_ephem_pub, init_static_pub_bytes,
 
     Returns: (type2_packet, initiator_send_key, initiator_recv_key)
     """
+    if psk is None:
+        psk = b'\x00' * 32
     resp_ephem_priv = X25519PrivateKey.generate()
     resp_ephem_pub = resp_ephem_priv.public_key().public_bytes_raw()
     resp_sender_idx = os.urandom(4)
@@ -234,8 +237,8 @@ def py_noise_responder_from_state(c, h, init_ephem_pub, init_static_pub_bytes,
     dh4 = resp_ephem_priv.exchange(init_static_pub_key)
     (c,) = kdf_n(c, dh4, 1)
 
-    # AEAD encrypt nothing
-    c, t, k = kdf_n(c, b'', 3)
+    # AEAD encrypt nothing — IKpsk2 PSK mixing
+    c, t, k = kdf_n(c, psk, 3)
     h = mix_hash(h, t)
 
     nonce = b'\x00' * 12

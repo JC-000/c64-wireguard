@@ -236,6 +236,8 @@ hs_transport_send:
         !fill 32, 0            ; transport send key
 hs_transport_recv:
         !fill 32, 0            ; transport recv key
+hs_preshared_key:
+        !fill 32, 0            ; PSK for handshake (copied from cfg)
 
 ; --- Network buffers ---
 zp_save_buf:
@@ -290,6 +292,8 @@ cfg_peer_endpoint_ip:
         !fill 4, 0              ; peer endpoint IP
 cfg_peer_endpoint_port:
         !word 0                 ; peer endpoint port
+cfg_preshared_key:
+        !fill 32, 0            ; PSK from config file (zeros = no PSK)
 
 ; --- Phase 7: Tunnel config ---
 tunnel_ip:
