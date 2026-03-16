@@ -80,9 +80,24 @@ session_handle_packet:
         lda udp_recv_buf
         cmp #2
         beq @type2
+        cmp #3
+        beq @type3
         cmp #4
         beq @type4
         rts                     ; unknown type, ignore
+
+@type3:
+        jsr cookie_handle_type3
+        cmp #0
+        bne @cookie_fail
+        lda #<cookie_recv_msg
+        ldy #>cookie_recv_msg
+        jsr print_string
+        ; re-initiate handshake with cookie
+        jsr session_initiate
+        rts
+@cookie_fail:
+        rts
 
 @type2:
         ; Only accept in HS_SENT state
@@ -109,6 +124,8 @@ session_handle_packet:
         ; Transition to ACTIVE
         lda #SESSION_ACTIVE
         sta wg_state
+
+        jsr timer_session_start
 
         ; Print success
         lda #<hs_ok_msg
@@ -152,9 +169,54 @@ session_handle_packet:
         cmp #0
         bne @decrypt_fail
 
-        ; Display decrypted payload
+        ; Route by IP protocol
+        lda tp_packet+16+9      ; IP protocol byte
+        cmp #IP_PROTO_ICMP
+        beq @t4_icmp
+        cmp #IP_PROTO_UDP
+        beq @t4_udp
+        ; fallback: display raw
         jsr display_payload
-
+        rts
+@t4_icmp:
+        jsr icmp_parse_reply
+        cmp #0
+        bne @t4_icmp_other
+        lda #<ping_reply_msg
+        ldy #>ping_reply_msg
+        jsr print_string
+        rts
+@t4_icmp_other:
+        jsr display_payload
+        rts
+@t4_udp:
+        jsr udp_tunnel_parse
+        cmp #0
+        bne @t4_udp_bad
+        ; display received message
+        lda #<msg_recv_hdr
+        ldy #>msg_recv_hdr
+        jsr print_string
+        ; print msg_recv_len bytes from msg_recv_ptr
+        lda msg_recv_ptr
+        sta zp_ptr1
+        lda msg_recv_ptr+1
+        sta zp_ptr1+1
+        ldy #0
+        ldx msg_recv_len
+        beq @t4_udp_done
+@t4_udp_print:
+        lda (zp_ptr1),y
+        jsr chrout
+        iny
+        dex
+        bne @t4_udp_print
+@t4_udp_done:
+        lda #$0d
+        jsr chrout
+        rts
+@t4_udp_bad:
+        jsr display_payload
         rts
 
 @decrypt_fail:
