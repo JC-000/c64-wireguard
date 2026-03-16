@@ -4,7 +4,7 @@ WireGuard Noise protocol implementation for the Commodore 64, written in 6502 as
 
 ## Status
 
-**Phase 7 complete**: Application layer — IP/ICMP/UDP tunnel packets, disk-based config, Type 3 cookie support, session timers (keepalive/rekey/expire).
+**Phase 8 complete**: Pre-Shared Key (PSK) support — IKpsk2 protocol compliance, optional PSK in disk config, backward-compatible with zero PSK.
 
 | Phase | Components | Tests |
 |-------|-----------|-------|
@@ -15,7 +15,8 @@ WireGuard Noise protocol implementation for the Commodore 64, written in 6502 as
 | 5 | Transport data packets (Type 4 encrypt/decrypt, replay protection) | 54 |
 | 6 | Session state machine (entropy, config, handshake, packet dispatch) | 49 |
 | 7 | Application layer (IP packets, disk config, cookies, timers) | 116 |
-| **Total** | | **485** |
+| 8 | Pre-Shared Key support (IKpsk2 compliance, config, disk parsing) | 24 |
+| **Total** | | **509** |
 
 ## Building
 
@@ -122,6 +123,9 @@ python3 tools/test_session.py                    # 49 tests
 python3 tools/test_phase7.py                     # 85 tests
 python3 tools/test_disk_config.py                # 31 tests
 
+# Phase 8: Pre-Shared Key support
+python3 tools/test_phase8_psk.py                 # 24 tests
+
 # All suites in parallel (builds once, staggered launch)
 python3 tools/run_regression.py
 
@@ -201,7 +205,7 @@ User commands: `L` loads config from disk, `H` initiates handshake, `P` sends pi
 
 ### Configuration
 
-Peer configuration is loaded from a `WG.CFG` sequential file on disk (device 8). The file contains 7 CR-terminated lines:
+Peer configuration is loaded from a `WG.CFG` sequential file on disk (device 8). The file contains 7 or 8 CR-terminated lines:
 
 1. Static private key (64 hex chars)
 2. Static public key (64 hex chars)
@@ -210,6 +214,7 @@ Peer configuration is loaded from a `WG.CFG` sequential file on disk (device 8).
 5. Endpoint port (decimal)
 6. Tunnel IP (dotted decimal)
 7. Ping target IP (dotted decimal)
+8. Pre-shared key (64 hex chars) — *optional, defaults to zeros if omitted*
 
 ### Cookies and Timers
 

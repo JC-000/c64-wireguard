@@ -12,6 +12,7 @@
 ;   Line 5: endpoint port (decimal, e.g. "51820")
 ;   Line 6: tunnel IP (dotted decimal)
 ;   Line 7: ping target IP (dotted decimal)
+;   Line 8: preshared key (64 hex chars) — optional, zeros if omitted
 ;
 ; Interface:
 ;   config_read_file  - read and parse entire config file
@@ -41,12 +42,16 @@ config_read_file:
 
         ; OPEN
         jsr open
-        bcs @fail
+        bcc @open_ok
+        jmp @fail
+@open_ok:
 
         ; CHKIN: set input channel to logical file 2
         ldx #2
         jsr chkin
-        bcs @close_fail
+        bcc @chkin_ok
+        jmp @close_fail
+@chkin_ok:
 
         ; --- Line 1: static private key (32 bytes from 64 hex chars) ---
         lda #<cfg_static_priv
@@ -105,6 +110,29 @@ config_read_file:
         lda #>ping_target_ip
         sta zp_ptr1+1
         jsr parse_decimal_ip
+
+        ; --- Line 8 (optional): preshared key (64 hex chars) ---
+        jsr readst
+        and #$40                ; bit 6 = EOF
+        bne @skip_psk
+
+        lda #<cfg_preshared_key
+        sta zp_ptr2
+        lda #>cfg_preshared_key
+        sta zp_ptr2+1
+        lda #32
+        sta zp_tmp1
+        jsr hex_to_bytes
+        jsr chrin               ; consume CR
+        jmp @psk_done
+@skip_psk:
+        ldx #31
+        lda #0
+@zero_psk:
+        sta cfg_preshared_key,x
+        dex
+        bpl @zero_psk
+@psk_done:
 
         ; Close and restore channels
         jsr clrchn

@@ -53,4 +53,12 @@ config_load:
         lda cfg_peer_endpoint_port+1
         sta wg_peer_port+1
 
+        ; Copy preshared key (32 bytes)
+        ldx #31
+@psk:
+        lda cfg_preshared_key,x
+        sta hs_preshared_key,x
+        dex
+        bpl @psk
+
         rts

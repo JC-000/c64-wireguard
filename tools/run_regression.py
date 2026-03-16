@@ -20,6 +20,7 @@ TESTS = [
     ("handshake",  ["tools/test_handshake.py", "--seed", "7539"]),
     ("phase7",     ["tools/test_phase7.py", "--seed", "7"]),
     ("disk_config",["tools/test_disk_config.py", "--seed", "7"]),
+    ("phase8_psk", ["tools/test_phase8_psk.py", "--seed", "7"]),
 ]
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -74,7 +75,7 @@ def main():
 
     print("=" * 70)
     if all_ok:
-        print("All 9 suites passed!")
+        print("All 10 suites passed!")
     else:
         print("\nFailed suites:")
         for name, (rc, out) in results.items():
