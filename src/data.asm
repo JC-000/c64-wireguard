@@ -290,3 +290,71 @@ cfg_peer_endpoint_ip:
         !fill 4, 0              ; peer endpoint IP
 cfg_peer_endpoint_port:
         !word 0                 ; peer endpoint port
+
+; --- Phase 7: Tunnel config ---
+tunnel_ip:
+        !fill 4, 0              ; our tunnel IP address
+ping_target_ip:
+        !fill 4, 0              ; ping target IP
+
+; --- ICMP ---
+ping_seq:
+        !word 0                  ; ICMP echo sequence number
+ip_cksum_result:
+        !word 0                  ; IP checksum scratch
+
+; --- Messaging ---
+msg_port:
+        !word $270f              ; message UDP port (9999, big-endian)
+msg_input_buf:
+        !fill 40, 0             ; keyboard input buffer
+msg_input_len:
+        !byte 0                 ; input length
+msg_recv_ptr:
+        !word 0                  ; pointer to received message text
+msg_recv_len:
+        !byte 0                 ; received message length
+
+; --- IP packet buffer ---
+ip_packet_buf:
+        !fill 80, 0             ; outgoing IP packet
+ip_pkt_len:
+        !byte 0                 ; IP packet length
+
+; --- IPv4 header template ---
+ip_hdr_template:
+        !byte $45               ; version=4, IHL=5
+        !byte $00               ; DSCP/ECN
+        !byte $00, $00          ; total length (filled per packet)
+        !byte $00, $00          ; identification
+        !byte $40, $00          ; flags: DF=1, frag offset=0
+        !byte $40               ; TTL=64
+        !byte $00               ; protocol (filled per packet)
+        !byte $00, $00          ; header checksum (filled per packet)
+        !byte $00,$00,$00,$00   ; src IP (filled per packet)
+        !byte $00,$00,$00,$00   ; dst IP (filled per packet)
+
+; --- Cookie state ---
+cookie_buf:
+        !fill 32, 0             ; decrypted cookie (16B used)
+cookie_nonce:
+        !fill 24, 0             ; cookie nonce scratch
+cookie_valid:
+        !byte 0                 ; 1 = valid cookie available
+
+; --- Timer state ---
+session_start_jiffy:
+        !fill 3, 0              ; session start time ($A0-$A2 format)
+last_send_jiffy:
+        !fill 3, 0              ; last packet send time
+rekey_pending:
+        !byte 0                 ; 1 = rekey initiated
+
+; --- Disk I/O ---
+config_filename:
+        !text "WG.CFG"
+config_filename_len = * - config_filename
+disk_line_buf:
+        !fill 66, 0             ; line buffer for config reading
+disk_line_len:
+        !byte 0                 ; current line length

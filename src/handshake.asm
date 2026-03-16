@@ -500,13 +500,19 @@ hs_create_initiation:
         dex
         bpl @copy_mac1
 
-        ; MAC2 = zeros (no cookie)
+        ; MAC2: use cookie if available, else zeros
+        lda cookie_valid
+        beq @zero_mac2
+        jsr hs_set_mac2
+        jmp @mac2_done
+@zero_mac2:
         ldx #15
         lda #0
-@zero_mac2:
+@clr_mac2:
         sta hs_packet+132,x
         dex
-        bpl @zero_mac2
+        bpl @clr_mac2
+@mac2_done:
 
         rts
 

@@ -13,6 +13,8 @@ open            = $ffc0         ; open file
 close           = $ffc3         ; close file
 clrchn          = $ffcc         ; clear channels
 load            = $ffd5         ; load from device
+readst          = $ffb7         ; read I/O status
+chkin           = $ffc6         ; set input channel
 
 ; --- Hardware registers ---
 vic_border      = $d020         ; border color
@@ -152,3 +154,7 @@ ip65_udp_data_off   = 8                ; offset of data within UDP packet
 
 ; WireGuard default port
 wg_default_port     = 51820
+
+WG_ICMP_ID      = $c640         ; ICMP echo identifier
+IP_PROTO_ICMP   = 1             ; IP protocol: ICMP
+IP_PROTO_UDP    = 17            ; IP protocol: UDP

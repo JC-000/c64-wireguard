@@ -44,6 +44,10 @@
 !source "entropy.asm"
 !source "config.asm"
 !source "session.asm"
+!source "ip_build.asm"
+!source "disk_config.asm"
+!source "cookie.asm"
+!source "timer.asm"
 
 ; --- Data and strings (placed after code) ---
 !source "data.asm"

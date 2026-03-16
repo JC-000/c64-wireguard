@@ -4,7 +4,7 @@ WireGuard Noise protocol implementation for the Commodore 64, written in 6502 as
 
 ## Status
 
-**Phase 6 complete**: Session state machine — hardware entropy, config, handshake initiation, packet dispatch, and full WireGuard client loop.
+**Phase 7 complete**: Application layer — IP/ICMP/UDP tunnel packets, disk-based config, Type 3 cookie support, session timers (keepalive/rekey/expire).
 
 | Phase | Components | Tests |
 |-------|-----------|-------|
@@ -14,7 +14,8 @@ WireGuard Noise protocol implementation for the Commodore 64, written in 6502 as
 | 4 | UDP networking (ip65, RR-Net, DHCP, ZP time-sharing) | 64 |
 | 5 | Transport data packets (Type 4 encrypt/decrypt, replay protection) | 54 |
 | 6 | Session state machine (entropy, config, handshake, packet dispatch) | 49 |
-| **Total** | | **369** |
+| 7 | Application layer (IP packets, disk config, cookies, timers) | 116 |
+| **Total** | | **485** |
 
 ## Building
 
@@ -34,7 +35,7 @@ make clean
 ```
 $0801-$0A72  Boot stub, main loop, network wrapper (net.asm)
 $2000-$32EF  ip65 binary blob (UDP-only, 4,847 bytes)
-$32F0-$5D3D  Crypto modules + transport + session + data buffers + strings
+$32F0-$65BF  Crypto + transport + session + application + data buffers + strings
 $7800-$7BFF  Quarter-square multiply tables (page-aligned)
 ```
 
@@ -62,6 +63,10 @@ ip65 uses zero page $02-$1B (cc65 standard). These overlap our crypto ZP variabl
 | `src/entropy.asm` | Hardware RNG: SID voice 3 noise XOR CIA1 timer |
 | `src/config.asm` | Peer configuration: copy config buffers to handshake state |
 | `src/session.asm` | Session state machine: initiate, handle packet, reset, display |
+| `src/ip_build.asm` | IP/ICMP/UDP packet construction for tunnel payloads |
+| `src/disk_config.asm` | KERNAL SEQ file reader for WG.CFG (hex, IP, port parsing) |
+| `src/cookie.asm` | Type 3 cookie handling (HChaCha20, XChaCha20-Poly1305) |
+| `src/timer.asm` | Session timers: keepalive (10s), rekey (120s), expire (180s) |
 | `src/data.asm` | Mutable buffers (crypto state, transport state, session config, network buffers) |
 | `src/strings.asm` | Display strings |
 
@@ -112,6 +117,10 @@ python3 tools/test_transport.py                  # 54 tests
 
 # Phase 6: Session state machine
 python3 tools/test_session.py                    # 49 tests
+
+# Phase 7: Application layer
+python3 tools/test_phase7.py                     # 85 tests
+python3 tools/test_disk_config.py                # 31 tests
 
 # All suites in parallel (builds once, staggered launch)
 python3 tools/run_regression.py
@@ -176,7 +185,37 @@ STATE_ACTIVE (2) → session_reset → STATE_IDLE (0)
 ```
 
 - **session_initiate**: Loads peer config, generates ephemeral key (SID+CIA hardware entropy), creates Type 1 handshake packet, sends via UDP
-- **session_handle_packet**: Dispatches by type — Type 2 (handshake response) derives transport keys, Type 4 (data) decrypts and displays payload
-- **display_payload**: Renders decrypted plaintext as ASCII (non-printable bytes shown as '.')
+- **session_handle_packet**: Dispatches by type — Type 2 (handshake response) derives transport keys, Type 3 (cookie) decrypts and stores cookie for next handshake, Type 4 (data) decrypts and routes by IP protocol
+- **Payload routing**: Decrypted Type 4 payloads are routed by IP protocol — ICMP echo replies are validated, UDP packets matching the message port are displayed as text, other payloads are shown as hex
 
 State guards ensure Type 2 packets are only accepted during STATE_HS_SENT and Type 4 packets only during STATE_ACTIVE.
+
+### Application Layer
+
+The tunnel carries standard IPv4 packets. The C64 constructs outgoing IP packets from templates:
+
+- **ICMP ping**: 20-byte IPv4 header + 8-byte ICMP echo request, with RFC 1071 checksum
+- **UDP messaging**: 20-byte IPv4 header + 8-byte UDP header + text payload
+
+User commands: `L` loads config from disk, `H` initiates handshake, `P` sends ping, `M` opens message prompt, `S` sends test payload, `Q` quits.
+
+### Configuration
+
+Peer configuration is loaded from a `WG.CFG` sequential file on disk (device 8). The file contains 7 CR-terminated lines:
+
+1. Static private key (64 hex chars)
+2. Static public key (64 hex chars)
+3. Peer public key (64 hex chars)
+4. Endpoint IP (dotted decimal)
+5. Endpoint port (decimal)
+6. Tunnel IP (dotted decimal)
+7. Ping target IP (dotted decimal)
+
+### Cookies and Timers
+
+**Type 3 cookies**: When the server is under load, it replies with a cookie instead of completing the handshake. The cookie is decrypted using XChaCha20-Poly1305 (HChaCha20 subkey derivation) and included as MAC2 in the next handshake initiation.
+
+**Session timers** use the C64's jiffy clock ($A0-$A2, 60 Hz):
+- **Keepalive**: Empty Type 4 packet after 10 seconds of silence
+- **Rekey**: Re-initiate handshake after 120 seconds
+- **Expire**: Reset session after 180 seconds
