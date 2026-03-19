@@ -276,6 +276,8 @@ tp_packet:
         !fill 256, 0           ; Type 4 packet buffer
 tp_packet_len:
         !word 0                ; total packet length
+tp_encrypt_error:
+        !byte 0                ; 1 = encrypt rejected (counter exhausted)
 
 ; --- Session state ---
 wg_state:

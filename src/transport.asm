@@ -149,6 +149,27 @@ transport_build_nonce:
 ; Clobbers: A, X, Y
 ; =============================================================================
 transport_encrypt:
+        ; --- 0. Check counter exhaustion ---
+        lda #0
+        sta tp_encrypt_error    ; clear error flag
+
+        lda tp_send_counter+7   ; check highest byte of 64-bit counter
+        cmp #REJECT_COUNTER_B7
+        bcc @counter_ok         ; < $10, proceed
+        ; Counter exhausted — reject
+        lda #1
+        sta tp_encrypt_error
+        rts                     ; return without encrypting
+
+@counter_ok:
+        ; Check if approaching limit (rekey warning)
+        lda tp_send_counter+7
+        cmp #REKEY_COUNTER_B7
+        bcc @no_rekey           ; < $0F, no rekey needed
+        lda #1
+        sta rekey_pending       ; signal rekey
+@no_rekey:
+
         ; --- 1. Write header ---
         ; type = 4 (LE u32)
         lda #$04
@@ -290,6 +311,13 @@ transport_decrypt:
         sta tp_recv_counter_tmp,x
         dex
         bpl @copy_ctr
+
+        ; --- 2b. Check received counter limit ---
+        lda tp_recv_counter_tmp+7
+        cmp #REJECT_COUNTER_B7
+        bcc @counter_ok         ; < $10, proceed
+        jmp @decrypt_fail       ; counter byte 7 >= $10, reject
+@counter_ok:
 
         ; --- 3. Replay check: received counter >= tp_recv_counter ---
         ; Compare MSB to LSB (byte 7 to byte 0)
