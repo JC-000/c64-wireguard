@@ -43,6 +43,16 @@ def robust_jsr(transport, addr, timeout=30.0, retries=5):
             raise
 
 
+def reset_recv_state(transport, labels):
+    """Reset all receive/replay state (counter, sliding window bitmap, max)."""
+    write_bytes(transport, labels["tp_recv_counter"], bytes(8))
+    # Reset sliding window replay state
+    if "rw_counter_max" in labels:
+        write_bytes(transport, labels["rw_counter_max"], bytes(8))
+    if "rw_bitmap" in labels:
+        write_bytes(transport, labels["rw_bitmap"], bytes(256))
+
+
 # ============================================================================
 # Python reference helpers
 # ============================================================================
@@ -314,7 +324,7 @@ def test_transport_decrypt(transport, labels, rng):
 
         # Set up C64 state
         write_bytes(transport, labels["hs_transport_recv"], key)
-        write_bytes(transport, labels["tp_recv_counter"], bytes(8))  # reset
+        reset_recv_state(transport, labels)
 
         # Write packet to udp_recv_buf
         write_bytes(transport, labels["udp_recv_buf"], packet)
@@ -357,7 +367,7 @@ def test_decrypt_failures(transport, labels, rng):
     counter_val = 0
 
     # Reset recv counter
-    write_bytes(transport, labels["tp_recv_counter"], bytes(8))
+    reset_recv_state(transport, labels)
     write_bytes(transport, labels["hs_transport_recv"], key)
 
     # --- Test 1: Tampered ciphertext ---
@@ -368,7 +378,7 @@ def test_decrypt_failures(transport, labels, rng):
     write_bytes(transport, labels["udp_recv_buf"], bytes(packet))
     write_bytes(transport, labels["udp_recv_len"],
                 struct.pack('<H', len(packet)))
-    write_bytes(transport, labels["tp_recv_counter"], bytes(8))
+    reset_recv_state(transport, labels)
 
     robust_jsr(transport, labels["transport_decrypt"], timeout=60.0)
     # After decrypt, check a flag or read the payload_len
@@ -396,7 +406,7 @@ def test_decrypt_failures(transport, labels, rng):
     write_bytes(transport, labels["udp_recv_buf"], bytes(packet))
     write_bytes(transport, labels["udp_recv_len"],
                 struct.pack('<H', len(packet)))
-    write_bytes(transport, labels["tp_recv_counter"], bytes(8))
+    reset_recv_state(transport, labels)
 
     robust_jsr(transport, labels["transport_decrypt"], timeout=60.0)
     recv_ctr = read_bytes(transport, labels["tp_recv_counter"], 8)
@@ -417,7 +427,7 @@ def test_decrypt_failures(transport, labels, rng):
     write_bytes(transport, labels["udp_recv_buf"], packet)
     write_bytes(transport, labels["udp_recv_len"],
                 struct.pack('<H', len(packet)))
-    write_bytes(transport, labels["tp_recv_counter"], bytes(8))
+    reset_recv_state(transport, labels)
 
     robust_jsr(transport, labels["transport_decrypt"], timeout=60.0)
     recv_ctr = read_bytes(transport, labels["tp_recv_counter"], 8)
@@ -440,7 +450,7 @@ def test_decrypt_failures(transport, labels, rng):
     write_bytes(transport, labels["udp_recv_buf"], bytes(packet))
     write_bytes(transport, labels["udp_recv_len"],
                 struct.pack('<H', len(packet)))
-    write_bytes(transport, labels["tp_recv_counter"], bytes(8))
+    reset_recv_state(transport, labels)
 
     robust_jsr(transport, labels["transport_decrypt"], timeout=60.0)
     recv_ctr = read_bytes(transport, labels["tp_recv_counter"], 8)
@@ -462,7 +472,7 @@ def test_replay_protection(transport, labels, rng):
     plaintext = b"REPLAY TEST DATA"
 
     write_bytes(transport, labels["hs_transport_recv"], key)
-    write_bytes(transport, labels["tp_recv_counter"], bytes(8))  # start at 0
+    reset_recv_state(transport, labels)  # start at 0
 
     # --- Test 1: Accept counter=0 (first packet) ---
     packet = build_type4_packet(b'\x01\x00\x00\x00', 0, key, plaintext)
@@ -589,7 +599,7 @@ def test_round_trip(transport, labels, rng):
 
         # Now set up for decrypt — use same key as recv key
         write_bytes(transport, labels["hs_transport_recv"], key)
-        write_bytes(transport, labels["tp_recv_counter"], bytes(8))
+        reset_recv_state(transport, labels)
 
         # Copy packet to udp_recv_buf
         write_bytes(transport, labels["udp_recv_buf"], packet)
@@ -678,7 +688,12 @@ def main():
     # Build (skip if run_regression.py already built)
     if not os.environ.get("C64_SKIP_BUILD"):
         print("Building...")
-        subprocess.run(["make", "clean"], capture_output=True, cwd=PROJECT_ROOT)
+        # Only clean ACME outputs, not ip65 binary (may not be rebuildable)
+        build_dir = os.path.join(PROJECT_ROOT, "build")
+        for f in ["wireguard.prg", "labels.txt"]:
+            p = os.path.join(build_dir, f)
+            if os.path.exists(p):
+                os.remove(p)
         result = subprocess.run(["make"], capture_output=True, text=True,
                                 cwd=PROJECT_ROOT)
         if result.returncode != 0:
