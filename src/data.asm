@@ -279,6 +279,24 @@ tp_packet:
 tp_packet_len:
         !word 0                ; total packet length
 
+; --- Replay window state ---
+rw_bitmap:
+        !fill 256, 0           ; 2048-bit sliding window bitmap
+rw_counter_max:
+        !fill 8, 0             ; highest accepted counter (64-bit LE)
+
+; Bit mask lookup (index 0-7 -> bit mask)
+rw_bit_mask:
+        !byte $01,$02,$04,$08,$10,$20,$40,$80
+
+; Temporaries for replay window computation
+rw_shift_lo:
+        !byte 0                ; low byte of shift amount
+rw_shift_hi:
+        !byte 0                ; high byte of shift amount
+rw_new_counter:
+        !byte 0                ; flag: 1 = received > max (new high counter)
+
 ; --- Session state ---
 wg_state:
         !byte 0                 ; 0=IDLE, 1=HS_SENT, 2=ACTIVE
