@@ -163,6 +163,12 @@ net_udp_recv_cb:
         lda ip65_udp_inp - 5
         sta udp_recv_src_ip+3
 
+        ; copy source port from UDP header (network byte order)
+        lda ip65_udp_inp + 0    ; source port high byte
+        sta udp_recv_src_port
+        lda ip65_udp_inp + 1    ; source port low byte
+        sta udp_recv_src_port+1
+
         ; set ready flag
         lda #1
         sta udp_recv_ready

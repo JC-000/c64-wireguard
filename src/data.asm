@@ -248,6 +248,8 @@ udp_recv_len:
         !word 0                ; length of received packet
 udp_recv_src_ip:
         !fill 4, 0             ; source IP of received packet
+udp_recv_src_port:
+        !word 0                ; source port of received packet (big-endian)
 udp_recv_ready:
         !byte 0                ; 0=no packet, 1=packet waiting
 wg_peer_ip:
