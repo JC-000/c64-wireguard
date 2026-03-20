@@ -17,7 +17,9 @@ WireGuard Noise protocol implementation for the Commodore 64, written in 6502 as
 | 7 | Application layer (IP packets, disk config, cookies, timers) | 116 |
 | 8 | Pre-Shared Key support (IKpsk2 compliance, config, disk parsing) | 24 |
 | MTU | 16-bit payload transport encrypt/decrypt/round-trip (0–1468 bytes) | 37 |
-| **Total** | | **546** |
+| TAI64N | Real-time timestamp init, elapsed seconds, monotonic sequence | 19 |
+| MAC2 | Cookie decryption → MAC2 integration end-to-end flow | 6 |
+| **Total** | | **571** |
 
 ## Building
 
@@ -130,6 +132,12 @@ python3 tools/test_phase8_psk.py                 # 24 tests
 # MTU: Large payload transport (16-bit lengths)
 python3 tools/test_mtu.py                        # 37 tests
 
+# TAI64N: Real-time timestamps
+python3 tools/test_tai64n.py                     # 19 tests
+
+# MAC2: Cookie → handshake integration
+python3 tools/test_mac2_integration.py           # 6 tests
+
 # All suites in parallel (builds once, staggered launch)
 python3 tools/run_regression.py
 
@@ -209,7 +217,7 @@ User commands: `L` loads config from disk, `H` initiates handshake, `P` sends pi
 
 ### Configuration
 
-Peer configuration is loaded from a `WG.CFG` sequential file on disk (device 8). The file contains 7 or 8 CR-terminated lines:
+Peer configuration is loaded from a `WG.CFG` sequential file on disk (device 8). The file contains 7 to 9 CR-terminated lines:
 
 1. Static private key (64 hex chars)
 2. Static public key (64 hex chars)
@@ -219,6 +227,9 @@ Peer configuration is loaded from a `WG.CFG` sequential file on disk (device 8).
 6. Tunnel IP (dotted decimal)
 7. Ping target IP (dotted decimal)
 8. Pre-shared key (64 hex chars) — *optional, defaults to zeros if omitted*
+9. Unix timestamp (decimal, up to 10 digits) — *optional, defaults to zeros if omitted*
+
+The Unix timestamp (line 9) initializes the TAI64N epoch anchor for handshake replay protection. If omitted, timestamps start from zero and increment monotonically.
 
 ### Cookies and Timers
 
