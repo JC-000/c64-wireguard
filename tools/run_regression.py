@@ -22,6 +22,8 @@ TESTS = [
     ("disk_config",["tools/test_disk_config.py", "--seed", "7"]),
     ("phase8_psk", ["tools/test_phase8_psk.py", "--seed", "7"]),
     ("mtu",        ["tools/test_mtu.py", "--seed", "1500"]),
+    ("tai64n",     ["tools/test_tai64n.py", "--verbose"]),
+    ("mac2",       ["tools/test_mac2_integration.py", "--verbose"]),
 ]
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")

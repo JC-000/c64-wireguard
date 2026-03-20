@@ -380,6 +380,14 @@ last_send_jiffy:
 rekey_pending:
         !byte 0                 ; 1 = rekey initiated
 
+; --- TAI64N timestamp state ---
+tai64n_base_time:
+        !fill 8, 0              ; base Unix time from config (big-endian)
+tai64n_init_jiffy:
+        !fill 3, 0              ; jiffy clock snapshot at tai64n_init
+tai64n_seq:
+        !fill 4, 0              ; monotonic sub-second sequence counter (big-endian)
+
 ; --- Disk I/O ---
 config_filename:
         !text "WG.CFG"
