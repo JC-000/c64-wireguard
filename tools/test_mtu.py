@@ -41,6 +41,19 @@ def robust_jsr(transport, addr, timeout=30.0, retries=5, poll_interval=0.2):
             raise
 
 
+def reset_recv_state(transport, labels):
+    """Reset all receive/replay state (counter, sliding window bitmap, max).
+
+    Must be called before each transport_decrypt to avoid stale replay window
+    state rejecting valid packets.
+    """
+    write_bytes(transport, labels["tp_recv_counter"], bytes(8))
+    if "rw_counter_max" in labels:
+        write_bytes(transport, labels["rw_counter_max"], bytes(8))
+    if "rw_bitmap" in labels:
+        write_bytes(transport, labels["rw_bitmap"], bytes(256))
+
+
 def py_encrypt(key, counter_val, plaintext):
     """Encrypt using ChaCha20-Poly1305 with WireGuard transport nonce."""
     nonce = b'\x00' * 4 + struct.pack('<Q', counter_val)
@@ -225,7 +238,7 @@ def test_decrypt_large(transport, labels, rng):
 
         # Set up C64 state
         write_bytes(transport, labels["hs_transport_recv"], key)
-        write_bytes(transport, labels["tp_recv_counter"], bytes(8))
+        reset_recv_state(transport, labels)
 
         # Write packet to udp_recv_buf
         write_bytes(transport, labels["udp_recv_buf"], packet)
@@ -296,7 +309,7 @@ def test_round_trip_large(transport, labels, rng):
 
         # Now set up for decrypt
         write_bytes(transport, labels["hs_transport_recv"], key)
-        write_bytes(transport, labels["tp_recv_counter"], bytes(8))
+        reset_recv_state(transport, labels)
 
         write_bytes(transport, labels["udp_recv_buf"], packet)
         write_bytes(transport, labels["udp_recv_len"],
@@ -393,7 +406,7 @@ def test_regression_small(transport, labels, rng):
 
         # Set up C64
         write_bytes(transport, labels["hs_transport_recv"], key)
-        write_bytes(transport, labels["tp_recv_counter"], bytes(8))
+        reset_recv_state(transport, labels)
         write_bytes(transport, labels["udp_recv_buf"], packet)
         write_bytes(transport, labels["udp_recv_len"],
                     struct.pack('<H', len(packet)))
@@ -451,6 +464,8 @@ def run_tests(transport, labels, seed):
     for name, test_fn in groups:
         print(f"\n--- {name} ---")
         try:
+            # Re-write safety loop before each group to ensure stable CPU state
+            write_bytes(transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
             p, f = test_fn()
             total_passed += p
             total_failed += f
