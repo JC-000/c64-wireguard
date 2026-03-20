@@ -16,7 +16,8 @@ WireGuard Noise protocol implementation for the Commodore 64, written in 6502 as
 | 6 | Session state machine (entropy, config, handshake, packet dispatch) | 49 |
 | 7 | Application layer (IP packets, disk config, cookies, timers) | 116 |
 | 8 | Pre-Shared Key support (IKpsk2 compliance, config, disk parsing) | 24 |
-| **Total** | | **509** |
+| MTU | 16-bit payload transport encrypt/decrypt/round-trip (0–1468 bytes) | 37 |
+| **Total** | | **546** |
 
 ## Building
 
@@ -126,6 +127,9 @@ python3 tools/test_disk_config.py                # 31 tests
 # Phase 8: Pre-Shared Key support
 python3 tools/test_phase8_psk.py                 # 24 tests
 
+# MTU: Large payload transport (16-bit lengths)
+python3 tools/test_mtu.py                        # 37 tests
+
 # All suites in parallel (builds once, staggered launch)
 python3 tools/run_regression.py
 
@@ -133,7 +137,7 @@ python3 tools/run_regression.py
 python3 tools/test_write_bytes_limit.py
 ```
 
-All tests use the direct-memory `jsr()` pattern. Use `--seed N` to reproduce specific runs.
+All tests use the direct-memory `jsr()` pattern. Use `--seed N` to reproduce specific runs. The MTU suite uses a flag-based `jsr_flag()` that polls a completion flag instead of relying on VICE breakpoints, which become unreliable during long warp-mode computations (>~1000 byte payloads).
 
 ### Performance
 
