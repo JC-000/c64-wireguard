@@ -24,10 +24,9 @@ import time
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 from c64_test_harness import (
-    Labels, ViceConfig, ViceProcess, ViceTransport,
+    Labels, ViceConfig, ViceInstanceManager,
     read_bytes, write_bytes, jsr, wait_for_text,
 )
-from c64_test_harness.backends.vice_manager import PortAllocator
 from c64_test_harness.disk import DiskImage, FileType
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -402,44 +401,27 @@ def call_config_read(transport, labels):
     return read_bytes(transport, 0x0360, 1)[0]
 
 
-def launch_vice_with_disk(disk, allocator):
-    port = allocator.allocate()
-    reservation = allocator.take_socket(port)
-    if reservation:
-        reservation.close()
-    config = ViceConfig(
-        prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
-        port=port, disk_image=disk,
-    )
-    vice = ViceProcess(config)
-    vice.__enter__()
-    if not vice.wait_for_monitor(timeout=30.0):
-        vice.__exit__(None, None, None)
-        allocator.release(port)
-        raise RuntimeError("Could not connect to VICE monitor")
-    transport = ViceTransport(port=port)
+def launch_vice_with_disk(disk, mgr):
+    inst = mgr.acquire(disk_image=disk)
+    transport = inst.transport
     grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
     if grid is None:
-        vice.__exit__(None, None, None)
-        allocator.release(port)
+        mgr.release(inst)
         raise RuntimeError("Main menu did not appear")
     write_bytes(transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
-    return vice, transport, port
+    return inst, transport
 
 
-def cleanup_vice(vice, allocator, port):
+def cleanup_vice(inst, mgr):
     try:
-        vice.__exit__(None, None, None)
+        mgr.release(inst)
     except Exception:
         pass
-    allocator.release(port)
 
 
-def test_config_parsing(labels, rng):
+def test_config_parsing(labels, rng, mgr):
     """Test PSK parsing from disk config files."""
     passed = failed = 0
-
-    allocator = PortAllocator(port_range_start=6510, port_range_end=6530)
 
     # Common config values
     static_priv = bytes(rng.randint(0, 255) for _ in range(32))
@@ -457,13 +439,13 @@ def test_config_parsing(labels, rng):
             endpoint_ip, endpoint_port, tunnel_ip, target_ip,
             psk=None)
         disk = create_disk_with_config(tmpdir, content)
-        vice, transport, port = launch_vice_with_disk(disk, allocator)
+        inst, transport = launch_vice_with_disk(disk, mgr)
         try:
             result = call_config_read(transport, labels)
             if result != 0:
                 failed += 1
                 print("  FAIL config_7line: config_read_file returned failure")
-                cleanup_vice(vice, allocator, port)
+                cleanup_vice(inst, mgr)
                 return passed, failed
 
             got = bytes(read_bytes(transport, labels["cfg_preshared_key"], 32))
@@ -475,7 +457,7 @@ def test_config_parsing(labels, rng):
                 failed += 1
                 print(f"  FAIL config_7line: expected zeros, got {got.hex()}")
         finally:
-            cleanup_vice(vice, allocator, port)
+            cleanup_vice(inst, mgr)
 
     # Test 2: 8-line config with all-zero PSK
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -485,13 +467,13 @@ def test_config_parsing(labels, rng):
             endpoint_ip, endpoint_port, tunnel_ip, target_ip,
             psk=psk_zeros)
         disk = create_disk_with_config(tmpdir, content)
-        vice, transport, port = launch_vice_with_disk(disk, allocator)
+        inst, transport = launch_vice_with_disk(disk, mgr)
         try:
             result = call_config_read(transport, labels)
             if result != 0:
                 failed += 1
                 print("  FAIL config_psk_zeros: config_read_file returned failure")
-                cleanup_vice(vice, allocator, port)
+                cleanup_vice(inst, mgr)
                 return passed, failed
 
             got = bytes(read_bytes(transport, labels["cfg_preshared_key"], 32))
@@ -503,7 +485,7 @@ def test_config_parsing(labels, rng):
                 failed += 1
                 print(f"  FAIL config_psk_zeros: got {got.hex()}")
         finally:
-            cleanup_vice(vice, allocator, port)
+            cleanup_vice(inst, mgr)
 
     # Test 3: 8-line config with all-FF PSK
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -513,13 +495,13 @@ def test_config_parsing(labels, rng):
             endpoint_ip, endpoint_port, tunnel_ip, target_ip,
             psk=psk_ff)
         disk = create_disk_with_config(tmpdir, content)
-        vice, transport, port = launch_vice_with_disk(disk, allocator)
+        inst, transport = launch_vice_with_disk(disk, mgr)
         try:
             result = call_config_read(transport, labels)
             if result != 0:
                 failed += 1
                 print("  FAIL config_psk_ff: config_read_file returned failure")
-                cleanup_vice(vice, allocator, port)
+                cleanup_vice(inst, mgr)
                 return passed, failed
 
             got = bytes(read_bytes(transport, labels["cfg_preshared_key"], 32))
@@ -531,7 +513,7 @@ def test_config_parsing(labels, rng):
                 failed += 1
                 print(f"  FAIL config_psk_ff: got {got.hex()}")
         finally:
-            cleanup_vice(vice, allocator, port)
+            cleanup_vice(inst, mgr)
 
     # Test 4: 8-line config with random PSK
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -541,13 +523,13 @@ def test_config_parsing(labels, rng):
             endpoint_ip, endpoint_port, tunnel_ip, target_ip,
             psk=psk_rand)
         disk = create_disk_with_config(tmpdir, content)
-        vice, transport, port = launch_vice_with_disk(disk, allocator)
+        inst, transport = launch_vice_with_disk(disk, mgr)
         try:
             result = call_config_read(transport, labels)
             if result != 0:
                 failed += 1
                 print("  FAIL config_psk_random: config_read_file returned failure")
-                cleanup_vice(vice, allocator, port)
+                cleanup_vice(inst, mgr)
                 return passed, failed
 
             got = bytes(read_bytes(transport, labels["cfg_preshared_key"], 32))
@@ -559,7 +541,7 @@ def test_config_parsing(labels, rng):
                 failed += 1
                 print(f"  FAIL config_psk_random: expected {psk_rand.hex()}, got {got.hex()}")
         finally:
-            cleanup_vice(vice, allocator, port)
+            cleanup_vice(inst, mgr)
 
     # Test 5: config_load copies PSK from cfg → hs
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -569,7 +551,7 @@ def test_config_parsing(labels, rng):
             endpoint_ip, endpoint_port, tunnel_ip, target_ip,
             psk=psk_copy)
         disk = create_disk_with_config(tmpdir, content)
-        vice, transport, port = launch_vice_with_disk(disk, allocator)
+        inst, transport = launch_vice_with_disk(disk, mgr)
         try:
             call_config_read(transport, labels)
             robust_jsr(transport, labels["config_load"])
@@ -585,7 +567,7 @@ def test_config_parsing(labels, rng):
                 print(f"    expected: {psk_copy.hex()}")
                 print(f"    got:      {got.hex()}")
         finally:
-            cleanup_vice(vice, allocator, port)
+            cleanup_vice(inst, mgr)
 
     # Test 6: 7-line config + config_load → hs_preshared_key = zeros
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -594,7 +576,7 @@ def test_config_parsing(labels, rng):
             endpoint_ip, endpoint_port, tunnel_ip, target_ip,
             psk=None)
         disk = create_disk_with_config(tmpdir, content)
-        vice, transport, port = launch_vice_with_disk(disk, allocator)
+        inst, transport = launch_vice_with_disk(disk, mgr)
         try:
             # Pre-fill hs_preshared_key with garbage to ensure config_load clears it
             write_bytes(transport, labels["hs_preshared_key"], b'\xAA' * 32)
@@ -610,7 +592,7 @@ def test_config_parsing(labels, rng):
                 failed += 1
                 print(f"  FAIL config_load: expected zeros, got {got.hex()}")
         finally:
-            cleanup_vice(vice, allocator, port)
+            cleanup_vice(inst, mgr)
 
     return passed, failed
 
@@ -808,21 +790,16 @@ def main():
     print(f"Labels loaded: {len(required)} required labels verified")
 
     # Launch VICE for non-disk tests
-    allocator = PortAllocator(port_range_start=6510, port_range_end=6530)
-    port = allocator.allocate()
-    reservation = allocator.take_socket(port)
-    if reservation:
-        reservation.close()
-    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
-                        port=port)
-    with ViceProcess(config) as vice:
-        if not vice.wait_for_monitor(timeout=30.0):
-            print("FATAL: Could not connect to VICE monitor")
-            allocator.release(port)
-            sys.exit(1)
+    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
 
-        print(f"VICE PID={vice.pid}, port={port}")
-        transport = ViceTransport(port=port)
+    with ViceInstanceManager(
+        config=config,
+        port_range_start=6510,
+        port_range_end=6530,
+    ) as mgr:
+        inst = mgr.acquire()
+        print(f"VICE PID={inst.pid}, port={inst.port}")
+        transport = inst.transport
         grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
         if grid is None:
             print("FATAL: Main menu did not appear")
@@ -833,21 +810,21 @@ def main():
 
         passed, failed = run_tests(transport, labels, seed)
 
-    allocator.release(port)
+        mgr.release(inst)
 
-    # Disk config tests (separate VICE instances per test)
-    print("\n--- config parsing (disk) ---")
-    try:
-        rng = random.Random(seed + 1000)
-        dp, df = test_config_parsing(labels, rng)
-        passed += dp
-        failed += df
-        print(f"  {dp} passed, {df} failed")
-    except Exception as e:
-        print(f"  EXCEPTION: {e}")
-        import traceback
-        traceback.print_exc()
-        failed += 1
+        # Disk config tests (separate VICE instances per test)
+        print("\n--- config parsing (disk) ---")
+        try:
+            rng = random.Random(seed + 1000)
+            dp, df = test_config_parsing(labels, rng, mgr)
+            passed += dp
+            failed += df
+            print(f"  {dp} passed, {df} failed")
+        except Exception as e:
+            print(f"  EXCEPTION: {e}")
+            import traceback
+            traceback.print_exc()
+            failed += 1
 
     total_passed = passed + bp
     total_failed = failed + bf

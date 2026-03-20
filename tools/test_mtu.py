@@ -18,10 +18,9 @@ import time
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 from c64_test_harness import (
-    Labels, ViceConfig, ViceProcess, ViceTransport,
+    Labels, ViceConfig, ViceInstanceManager,
     read_bytes, write_bytes, jsr, wait_for_text,
 )
-from c64_test_harness.backends.vice_manager import PortAllocator
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "wireguard.prg")
@@ -30,11 +29,11 @@ LABELS_PATH = os.path.join(PROJECT_ROOT, "build", "labels.txt")
 VERBOSE = False
 
 
-def robust_jsr(transport, addr, timeout=30.0, retries=5):
+def robust_jsr(transport, addr, timeout=30.0, retries=5, poll_interval=0.2):
     """jsr() with retry for transient VICE connection failures."""
     for attempt in range(retries):
         try:
-            return jsr(transport, addr, timeout=timeout)
+            return jsr(transport, addr, timeout=timeout, poll_interval=poll_interval)
         except Exception as e:
             if attempt < retries - 1:
                 time.sleep(1.0 + attempt * 0.5)
@@ -150,7 +149,7 @@ def test_encrypt_large(transport, labels, rng):
                     struct.pack('<H', size))
 
         timeout = 120.0 if size >= 1000 else 90.0
-        robust_jsr(transport, labels["transport_encrypt"], timeout=timeout)
+        robust_jsr(transport, labels["transport_encrypt"], timeout=timeout, poll_interval=2.0)
 
         # Read total packet length
         pkt_len_bytes = read_bytes(transport, labels["tp_packet_len"], 2)
@@ -234,7 +233,7 @@ def test_decrypt_large(transport, labels, rng):
                     struct.pack('<H', len(packet)))
 
         timeout = 120.0 if size >= 1000 else 90.0
-        robust_jsr(transport, labels["transport_decrypt"], timeout=timeout)
+        robust_jsr(transport, labels["transport_decrypt"], timeout=timeout, poll_interval=2.0)
 
         # Check result
         result_len = int.from_bytes(
@@ -288,7 +287,7 @@ def test_round_trip_large(transport, labels, rng):
                     struct.pack('<H', size))
 
         timeout = 120.0 if size >= 1000 else 90.0
-        robust_jsr(transport, labels["transport_encrypt"], timeout=timeout)
+        robust_jsr(transport, labels["transport_encrypt"], timeout=timeout, poll_interval=2.0)
 
         # Read the encrypted packet
         pkt_len_bytes = read_bytes(transport, labels["tp_packet_len"], 2)
@@ -303,7 +302,7 @@ def test_round_trip_large(transport, labels, rng):
         write_bytes(transport, labels["udp_recv_len"],
                     struct.pack('<H', pkt_len))
 
-        robust_jsr(transport, labels["transport_decrypt"], timeout=timeout)
+        robust_jsr(transport, labels["transport_decrypt"], timeout=timeout, poll_interval=2.0)
 
         # Verify round-trip
         result_len = int.from_bytes(
@@ -352,7 +351,7 @@ def test_python_reference_large(transport, labels, rng):
                     struct.pack('<H', size))
 
         timeout = 120.0 if size >= 1000 else 90.0
-        robust_jsr(transport, labels["transport_encrypt"], timeout=timeout)
+        robust_jsr(transport, labels["transport_encrypt"], timeout=timeout, poll_interval=2.0)
 
         pkt_len_bytes = read_bytes(transport, labels["tp_packet_len"], 2)
         pkt_len = int.from_bytes(pkt_len_bytes, 'little')
@@ -509,31 +508,30 @@ def main():
         sys.exit(1)
 
     # Launch VICE
-    allocator = PortAllocator(port_range_start=6510, port_range_end=6530)
-    port = allocator.allocate()
-    reservation = allocator.take_socket(port)
-    if reservation:
-        reservation.close()
-    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
-                        port=port)
-    with ViceProcess(config) as vice:
-        if not vice.wait_for_monitor(timeout=30.0):
-            print("FATAL: Could not connect to VICE monitor")
-            allocator.release(port)
-            sys.exit(1)
+    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
 
-        print(f"VICE PID={vice.pid}, port={port}")
-        transport = ViceTransport(port=port)
+    with ViceInstanceManager(
+        config=config,
+        port_range_start=6510,
+        port_range_end=6530,
+    ) as mgr:
+        inst = mgr.acquire()
+        print(f"VICE PID={inst.pid}, port={inst.port}")
+
+        transport = inst.transport
         grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)
+
+        write_bytes(transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
 
         print("VICE ready, running tests...")
 
         passed, failed = run_tests(transport, labels, seed)
         total_passed = passed + p
         total_failed = failed + f
+        mgr.release(inst)
 
     total = total_passed + total_failed
     print(f"\n{'='*60}")
