@@ -117,6 +117,10 @@ cc20_nonce:
 cc20_counter:
         !fill 4, 0
 
+; High byte of cc20_remain for 16-bit length support
+cc20_remain_hi:
+        !byte 0
+
 ; --- Poly1305 state ---
 ; 130-bit accumulator (17 bytes for carry room)
 poly_h:
@@ -150,7 +154,7 @@ aead_aad_len:
 aead_data_ptr:
         !word 0
 aead_data_len:
-        !byte 0
+        !word 0                ; 16-bit data length for MTU up to 1500
 aead_tag:
         !fill 16, 0
 
@@ -243,7 +247,7 @@ hs_preshared_key:
 zp_save_buf:
         !fill 26, 0            ; ZP save area ($02-$1B)
 udp_recv_buf:
-        !fill 256, 0           ; incoming UDP packet buffer
+        !fill 1500, 0          ; incoming UDP packet buffer (MTU-sized)
 udp_recv_len:
         !word 0                ; length of received packet
 udp_recv_src_ip:
@@ -273,9 +277,9 @@ tp_peer_recv_idx:
 tp_payload_ptr:
         !word 0                ; pointer to plaintext data
 tp_payload_len:
-        !byte 0                ; payload length (max ~220)
+        !word 0                ; 16-bit payload length (up to 1500)
 tp_packet:
-        !fill 256, 0           ; Type 4 packet buffer
+        !fill 1500, 0          ; Type 4 packet buffer (MTU-sized)
 tp_packet_len:
         !word 0                ; total packet length
 tp_encrypt_error:

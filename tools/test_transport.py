@@ -125,11 +125,11 @@ def test_build_verification(labels):
         addr_str = f"${tp_packet_addr:04X}" if tp_packet_addr else "None"
         print(f"  FAIL tp_packet {addr_str} not below $7800")
 
-    # tp_packet + 256 must be below $7800
-    if tp_packet_addr is not None and tp_packet_addr + 256 < 0x7800:
+    # tp_packet + 1500 must be below $7800
+    if tp_packet_addr is not None and tp_packet_addr + 1500 < 0x7800:
         passed += 1
         if VERBOSE:
-            print(f"  PASS tp_packet end ${tp_packet_addr+256:04X} < $7800")
+            print(f"  PASS tp_packet end ${tp_packet_addr+1500:04X} < $7800")
     else:
         failed += 1
         print(f"  FAIL tp_packet buffer extends past $7800")
@@ -244,7 +244,7 @@ def test_transport_encrypt(transport, labels, rng):
         write_bytes(transport, labels["input_buffer"], plaintext)
         write_bytes(transport, labels["tp_payload_ptr"],
                     struct.pack('<H', labels["input_buffer"]))
-        write_bytes(transport, labels["tp_payload_len"], bytes([size]))
+        write_bytes(transport, labels["tp_payload_len"], struct.pack('<H', size))
 
         robust_jsr(transport, labels["transport_encrypt"], timeout=60.0)
 
@@ -335,7 +335,7 @@ def test_transport_decrypt(transport, labels, rng):
 
         # Check return value — read A from the last state
         # Actually we need to check tp_payload_len and the decrypted data
-        result_len = read_bytes(transport, labels["tp_payload_len"], 1)[0]
+        result_len = int.from_bytes(read_bytes(transport, labels["tp_payload_len"], 2), 'little')
         result_data = read_bytes(transport, labels["tp_packet"] + 16, size)
 
         if result_len == size and result_data == plaintext:
@@ -588,7 +588,7 @@ def test_round_trip(transport, labels, rng):
         write_bytes(transport, labels["input_buffer"], plaintext)
         write_bytes(transport, labels["tp_payload_ptr"],
                     struct.pack('<H', labels["input_buffer"]))
-        write_bytes(transport, labels["tp_payload_len"], bytes([size]))
+        write_bytes(transport, labels["tp_payload_len"], struct.pack('<H', size))
 
         robust_jsr(transport, labels["transport_encrypt"], timeout=60.0)
 
@@ -609,7 +609,7 @@ def test_round_trip(transport, labels, rng):
         robust_jsr(transport, labels["transport_decrypt"], timeout=60.0)
 
         # Verify round-trip
-        result_len = read_bytes(transport, labels["tp_payload_len"], 1)[0]
+        result_len = int.from_bytes(read_bytes(transport, labels["tp_payload_len"], 2), 'little')
         result_data = read_bytes(transport, labels["tp_packet"] + 16, size)
 
         if result_len == size and result_data == plaintext:

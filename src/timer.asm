@@ -113,6 +113,7 @@ timer_check:
         ; Send keepalive (empty Type 4 packet)
         lda #0
         sta tp_payload_len
+        sta tp_payload_len+1
         jsr transport_send
         jsr timer_mark_send
 
