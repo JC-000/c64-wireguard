@@ -184,6 +184,8 @@ cookie_handle_type3:
         sta aead_data_ptr+1
         lda #16
         sta aead_data_len
+        lda #0
+        sta aead_data_len+1
 
         ; Copy tag from packet
         ldx #15

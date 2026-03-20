@@ -10,7 +10,7 @@
 ;   aead_aad_ptr  (2 bytes)  — pointer to AAD
 ;   aead_aad_len  (1 byte)   — AAD length (0-255)
 ;   aead_data_ptr (2 bytes)  — pointer to plaintext/ciphertext
-;   aead_data_len (1 byte)   — data length (0-255)
+;   aead_data_len (2 bytes)  — data length (16-bit, up to 1500)
 ;
 ; Output:
 ;   Ciphertext written in-place at aead_data_ptr
@@ -48,6 +48,8 @@ aead_encrypt:
         sta cc20_data_ptr+1
         lda aead_data_len
         sta cc20_remain
+        lda aead_data_len+1
+        sta cc20_remain_hi
         jsr chacha20_encrypt
 
         ; --- 3. Compute Poly1305 tag ---
@@ -92,6 +94,8 @@ aead_decrypt:
         sta cc20_data_ptr+1
         lda aead_data_len
         sta cc20_remain
+        lda aead_data_len+1
+        sta cc20_remain_hi
         jsr chacha20_encrypt    ; XOR = decrypt
 
         lda #0                  ; success
@@ -181,6 +185,8 @@ aead_compute_tag:
         lda aead_aad_len
         beq @skip_aad
         sta cc20_remain
+        lda #0
+        sta cc20_remain_hi      ; AAD length is always <= 255
         lda aead_aad_ptr
         sta zp_ptr1
         lda aead_aad_ptr+1
@@ -188,10 +194,14 @@ aead_compute_tag:
         jsr aead_process_padded
 
 @skip_aad:
-        ; --- Process ciphertext ---
+        ; --- Process ciphertext (16-bit length) ---
         lda aead_data_len
+        ora aead_data_len+1
         beq @skip_ct
+        lda aead_data_len
         sta cc20_remain
+        lda aead_data_len+1
+        sta cc20_remain_hi
         lda aead_data_ptr
         sta zp_ptr1
         lda aead_data_ptr+1
@@ -211,7 +221,9 @@ aead_compute_tag:
         lda aead_aad_len
         sta aead_scratch        ; low byte of AAD length (rest is 0)
         lda aead_data_len
-        sta aead_scratch+8      ; low byte of CT length (rest is 0)
+        sta aead_scratch+8      ; low byte of CT length
+        lda aead_data_len+1
+        sta aead_scratch+9      ; high byte of CT length
 
         ; Process as one 16-byte block with hibit=1
         lda #<aead_scratch
@@ -228,18 +240,27 @@ aead_compute_tag:
 ; =============================================================================
 ; aead_process_padded - Process data as Poly1305 blocks, zero-padding last block
 ;
-; Input: zp_ptr1 = data pointer, cc20_remain = length (>0)
+; Input: zp_ptr1 = data pointer
+;        cc20_remain = length low byte, cc20_remain_hi = length high byte
 ; All blocks processed with hibit=1. Last partial block is zero-padded to 16.
 ;
 ; Clobbers: A, X, Y
 ; =============================================================================
 aead_process_padded:
 @next_block:
+        ; Check if done (16-bit)
         lda cc20_remain
+        ora cc20_remain_hi
         beq @done
+
+        ; Check if >= 16 bytes remain
+        lda cc20_remain_hi
+        bne @full_block         ; > 255 remaining, definitely >= 16
+        lda cc20_remain
         cmp #16
         bcc @partial            ; < 16 bytes left
 
+@full_block:
         ; Full 16-byte block with hibit=1
         lda #1
         jsr poly1305_block
@@ -253,10 +274,14 @@ aead_process_padded:
         adc #0
         sta zp_ptr1+1
 
+        ; 16-bit subtract 16
         lda cc20_remain
         sec
         sbc #16
         sta cc20_remain
+        lda cc20_remain_hi
+        sbc #0
+        sta cc20_remain_hi
         jmp @next_block
 
 @partial:

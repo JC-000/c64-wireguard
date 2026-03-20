@@ -794,7 +794,7 @@ def test_type4_in_session(transport, labels, rng):
         robust_jsr(transport, labels["session_handle_packet"], timeout=60.0)
 
         # Verify payload was decrypted
-        dec_len = read_bytes(transport, labels["tp_payload_len"], 1)[0]
+        dec_len = int.from_bytes(read_bytes(transport, labels["tp_payload_len"], 2), 'little')
         decrypted = bytes(read_bytes(transport, labels["tp_packet"] + 16, payload_len))
 
         if decrypted == plaintext and dec_len == payload_len:
@@ -839,7 +839,7 @@ def test_round_trip(transport, labels, rng):
         write_bytes(transport, labels["input_buffer"], plaintext)
         write_bytes(transport, labels["tp_payload_ptr"],
                     struct.pack('<H', labels["input_buffer"]))
-        write_bytes(transport, labels["tp_payload_len"], bytes([size]))
+        write_bytes(transport, labels["tp_payload_len"], struct.pack('<H', size))
 
         robust_jsr(transport, labels["transport_encrypt"], timeout=60.0)
 
@@ -878,7 +878,7 @@ def test_display_payload(transport, labels):
     test_msg = b"HELLO WIREGUARD"
     tp_pkt_addr = labels["tp_packet"]
     write_bytes(transport, tp_pkt_addr + 16, test_msg)
-    write_bytes(transport, labels["tp_payload_len"], bytes([len(test_msg)]))
+    write_bytes(transport, labels["tp_payload_len"], struct.pack('<H', len(test_msg)))
 
     # Call display_payload (just verify it doesn't crash)
     robust_jsr(transport, labels["display_payload"])
@@ -889,14 +889,14 @@ def test_display_payload(transport, labels):
     # Test with non-printable characters
     test_mixed = bytes([0x01, 0x41, 0x42, 0x7F, 0x43])
     write_bytes(transport, tp_pkt_addr + 16, test_mixed)
-    write_bytes(transport, labels["tp_payload_len"], bytes([len(test_mixed)]))
+    write_bytes(transport, labels["tp_payload_len"], struct.pack('<H', len(test_mixed)))
     robust_jsr(transport, labels["display_payload"])
     passed += 1
     if VERBOSE:
         print("  PASS display_payload with non-printable chars")
 
     # Test with zero length
-    write_bytes(transport, labels["tp_payload_len"], bytes([0]))
+    write_bytes(transport, labels["tp_payload_len"], bytes([0, 0]))
     robust_jsr(transport, labels["display_payload"])
     passed += 1
     if VERBOSE:

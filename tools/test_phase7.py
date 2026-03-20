@@ -853,7 +853,7 @@ def test_keepalive(transport, labels, rng):
             write_bytes(transport, labels["tp_peer_recv_idx"], receiver_idx)
             write_bytes(transport, labels["tp_send_counter"],
                         struct.pack('<Q', counter_val))
-            write_bytes(transport, labels["tp_payload_len"], bytes([0]))
+            write_bytes(transport, labels["tp_payload_len"], bytes([0, 0]))
 
             robust_jsr(transport, labels["transport_encrypt"])
 
@@ -916,7 +916,7 @@ def test_keepalive(transport, labels, rng):
 
             robust_jsr(transport, labels["session_handle_packet"], timeout=60.0)
 
-            dec_len = read_bytes(transport, labels["tp_payload_len"], 1)[0]
+            dec_len = int.from_bytes(read_bytes(transport, labels["tp_payload_len"], 2), 'little')
             if dec_len == 0:
                 passed += 1
                 if VERBOSE:
@@ -1228,7 +1228,7 @@ def test_payload_routing(transport, labels, rng):
     encrypt_and_send(recv_key, receiver_idx, counter, b'')
     counter += 1
     # tp_payload_len should be 0 after keepalive
-    dec_len = read_bytes(transport, labels["tp_payload_len"], 1)[0]
+    dec_len = int.from_bytes(read_bytes(transport, labels["tp_payload_len"], 2), 'little')
     if dec_len == 0:
         passed += 1
         if VERBOSE:
@@ -1375,7 +1375,7 @@ def test_round_trip(transport, labels, rng):
         robust_jsr(transport, labels["transport_decrypt"], timeout=60.0)
 
         # Read A result from transport_decrypt: check via tp_payload_len
-        dec_len = read_bytes(transport, labels["tp_payload_len"], 1)[0]
+        dec_len = int.from_bytes(read_bytes(transport, labels["tp_payload_len"], 2), 'little')
         decrypted = bytes(read_bytes(transport, labels["tp_packet"] + 16,
                                      len(reply_pkt)))
 
@@ -1429,7 +1429,7 @@ def test_round_trip(transport, labels, rng):
                     struct.pack('<H', len(type4)))
         robust_jsr(transport, labels["transport_decrypt"], timeout=60.0)
 
-        dec_len = read_bytes(transport, labels["tp_payload_len"], 1)[0]
+        dec_len = int.from_bytes(read_bytes(transport, labels["tp_payload_len"], 2), 'little')
 
         if dec_len == len(udp_pkt):
             # Parse UDP via trampoline

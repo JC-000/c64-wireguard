@@ -260,7 +260,7 @@ def c64_aead_encrypt(transport, labels, key, nonce, aad, plaintext):
         write_bytes(transport, pt_buf, plaintext)
     write_bytes(transport, labels["aead_data_ptr"],
                 bytes([pt_buf & 0xFF, pt_buf >> 8]))
-    write_bytes(transport, labels["aead_data_len"], bytes([len(plaintext)]))
+    write_bytes(transport, labels["aead_data_len"], struct.pack('<H', len(plaintext)))
 
     robust_jsr(transport, labels["aead_encrypt"], timeout=300.0)
 
@@ -288,7 +288,7 @@ def c64_aead_decrypt(transport, labels, key, nonce, aad, ciphertext, tag):
         write_bytes(transport, ct_buf, ciphertext)
     write_bytes(transport, labels["aead_data_ptr"],
                 bytes([ct_buf & 0xFF, ct_buf >> 8]))
-    write_bytes(transport, labels["aead_data_len"], bytes([len(ciphertext)]))
+    write_bytes(transport, labels["aead_data_len"], struct.pack('<H', len(ciphertext)))
 
     # Write expected tag
     write_bytes(transport, labels["aead_tag"], tag)
@@ -753,7 +753,7 @@ def test_aead_decrypt(transport, labels, rng):
     write_bytes(transport, ct_buf, ct)
     write_bytes(transport, labels["aead_data_ptr"],
                 bytes([ct_buf & 0xFF, ct_buf >> 8]))
-    write_bytes(transport, labels["aead_data_len"], bytes([len(ct)]))
+    write_bytes(transport, labels["aead_data_len"], struct.pack('<H', len(ct)))
     write_bytes(transport, labels["aead_tag"], bytes(bad_tag))
 
     # Call aead_decrypt — with tampered tag it should return A=$FF

@@ -148,15 +148,40 @@ session_handle_packet:
         cmp #SESSION_ACTIVE
         bne @wrong_state
 
-        ; Copy received packet to tp_packet for decrypt
-        ; Need to know length - use udp_recv_len
-        ldx #0
-@copy_t4:
-        lda udp_recv_buf,x
-        sta tp_packet,x
-        inx
-        cpx udp_recv_len        ; low byte (max 255)
-        bne @copy_t4
+        ; Copy received packet to tp_packet for decrypt (16-bit)
+        lda #<udp_recv_buf
+        sta zp_ptr1
+        lda #>udp_recv_buf
+        sta zp_ptr1+1
+        lda #<tp_packet
+        sta zp_ptr2
+        lda #>tp_packet
+        sta zp_ptr2+1
+        ; Copy full pages
+        ldx udp_recv_len+1
+        ldy #0
+        cpx #0
+        beq @t4_copy_rem
+@t4_copy_pg:
+        lda (zp_ptr1),y
+        sta (zp_ptr2),y
+        iny
+        bne @t4_copy_pg
+        inc zp_ptr1+1
+        inc zp_ptr2+1
+        dex
+        bne @t4_copy_pg
+@t4_copy_rem:
+        ldx udp_recv_len
+        beq @t4_copy_done
+        ldy #0
+@t4_copy_lo:
+        lda (zp_ptr1),y
+        sta (zp_ptr2),y
+        iny
+        dex
+        bne @t4_copy_lo
+@t4_copy_done:
 
         ; Set packet length
         lda udp_recv_len

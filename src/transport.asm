@@ -136,7 +136,7 @@ transport_build_nonce:
 ;
 ; Input:
 ;   tp_payload_ptr  — pointer to plaintext data
-;   tp_payload_len  — payload length (max ~220)
+;   tp_payload_len  — 16-bit payload length (up to ~1468)
 ;   hs_transport_send — 32-byte send key
 ;   tp_peer_recv_idx — 4-byte receiver index
 ;   tp_send_counter — 8-byte send counter
@@ -175,19 +175,40 @@ transport_encrypt:
         bpl @copy_ctr
 
         ; --- 2. Copy plaintext to tp_packet+16 for in-place AEAD ---
+        ; 16-bit copy using ZP indirect
         lda tp_payload_ptr
         sta zp_ptr1
         lda tp_payload_ptr+1
         sta zp_ptr1+1
+        lda #<(tp_packet+16)
+        sta zp_ptr2
+        lda #>(tp_packet+16)
+        sta zp_ptr2+1
+        ; Copy full pages
+        ldx tp_payload_len+1
         ldy #0
+        cpx #0
+        beq @enc_copy_rem
+@enc_copy_pg:
+        lda (zp_ptr1),y
+        sta (zp_ptr2),y
+        iny
+        bne @enc_copy_pg
+        inc zp_ptr1+1
+        inc zp_ptr2+1
+        dex
+        bne @enc_copy_pg
+@enc_copy_rem:
+        ; Copy remaining bytes (low byte)
         ldx tp_payload_len
         beq @skip_copy
-@copy_pt:
+        ldy #0
+@enc_copy_lo:
         lda (zp_ptr1),y
-        sta tp_packet+16,y
+        sta (zp_ptr2),y
         iny
         dex
-        bne @copy_pt
+        bne @enc_copy_lo
 @skip_copy:
 
         ; --- 3. Set up AEAD ---
@@ -217,18 +238,20 @@ transport_encrypt:
         sta aead_data_ptr+1
         lda tp_payload_len
         sta aead_data_len
+        lda tp_payload_len+1
+        sta aead_data_len+1
 
         ; --- 4. Encrypt ---
         jsr aead_encrypt
 
         ; --- 5. Append Poly1305 tag after ciphertext ---
-        ; tag goes at tp_packet + 16 + payload_len
+        ; tag goes at tp_packet + 16 + payload_len (16-bit add)
         lda #<(tp_packet+16)
         clc
         adc tp_payload_len
         sta zp_ptr1
         lda #>(tp_packet+16)
-        adc #0
+        adc tp_payload_len+1
         sta zp_ptr1+1
 
         ldy #0
@@ -244,7 +267,7 @@ transport_encrypt:
         clc
         adc #32
         sta tp_packet_len
-        lda #0
+        lda tp_payload_len+1
         adc #0
         sta tp_packet_len+1
 
@@ -310,38 +333,71 @@ transport_decrypt:
         rts
 
 @replay_ok:
-        ; --- 4. Compute payload_len = udp_recv_len - 32 ---
+        ; --- 4. Compute payload_len = udp_recv_len - 32 (16-bit) ---
         ; Total = 16 header + payload + 16 tag, so payload = total - 32
         lda udp_recv_len
         sec
         sbc #32
         sta tp_payload_len
-        ; If carry was clear, packet too small
-        bcc @decrypt_fail
+        lda udp_recv_len+1
+        sbc #0
+        sta tp_payload_len+1
+        ; If high byte negative (borrow), packet too small
+        bcs @no_underflow
+        jmp @decrypt_fail
+@no_underflow:
 
-        ; --- 5. Copy ciphertext to tp_packet+16 ---
+        ; --- 5. Copy ciphertext to tp_packet+16 (16-bit) ---
+        lda #<(udp_recv_buf+16)
+        sta zp_ptr1
+        lda #>(udp_recv_buf+16)
+        sta zp_ptr1+1
+        lda #<(tp_packet+16)
+        sta zp_ptr2
+        lda #>(tp_packet+16)
+        sta zp_ptr2+1
+        ; Copy full pages
+        ldx tp_payload_len+1
         ldy #0
+        cpx #0
+        beq @dec_copy_rem
+@dec_copy_pg:
+        lda (zp_ptr1),y
+        sta (zp_ptr2),y
+        iny
+        bne @dec_copy_pg
+        inc zp_ptr1+1
+        inc zp_ptr2+1
+        dex
+        bne @dec_copy_pg
+@dec_copy_rem:
+        ; Copy remaining bytes (low byte)
         ldx tp_payload_len
         beq @skip_ct_copy
-@copy_ct:
-        lda udp_recv_buf+16,y
-        sta tp_packet+16,y
+        ldy #0
+@dec_copy_lo:
+        lda (zp_ptr1),y
+        sta (zp_ptr2),y
         iny
         dex
-        bne @copy_ct
+        bne @dec_copy_lo
 @skip_ct_copy:
 
         ; Copy tag (16 bytes after ciphertext in recv buf)
-        ; Tag is at udp_recv_buf + 16 + payload_len
-        ; Y already = payload_len from the copy loop (or 0 if skip)
-        ldy tp_payload_len
-        ldx #0
+        ; Tag is at udp_recv_buf + 16 + payload_len (16-bit)
+        lda #<(udp_recv_buf+16)
+        clc
+        adc tp_payload_len
+        sta zp_ptr1
+        lda #>(udp_recv_buf+16)
+        adc tp_payload_len+1
+        sta zp_ptr1+1
+        ldy #0
 @copy_in_tag:
-        lda udp_recv_buf+16,y
-        sta aead_tag,x
+        lda (zp_ptr1),y
+        sta aead_tag,y
         iny
-        inx
-        cpx #16
+        cpy #16
         bne @copy_in_tag
 
         ; --- 6. Set up AEAD for decryption ---
@@ -371,6 +427,8 @@ transport_decrypt:
         sta aead_data_ptr+1
         lda tp_payload_len
         sta aead_data_len
+        lda tp_payload_len+1
+        sta aead_data_len+1
 
         ; --- 7. Decrypt and verify ---
         jsr aead_decrypt
