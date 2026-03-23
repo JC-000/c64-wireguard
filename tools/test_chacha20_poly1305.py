@@ -15,12 +15,11 @@ import random
 import struct
 import subprocess
 import sys
-import time
-
 from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
-    read_bytes, write_bytes, jsr, wait_for_text,
+    read_bytes, write_bytes, jsr,
 )
+from vice_util import binary_wait_for_text
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "wireguard.prg")
@@ -28,18 +27,6 @@ LABELS_PATH = os.path.join(PROJECT_ROOT, "build", "labels.txt")
 VECTORS_PATH = os.path.join(PROJECT_ROOT, "test", "rfc7539_vectors.json")
 
 VERBOSE = False
-
-
-def robust_jsr(transport, addr, timeout=30.0, retries=3):
-    """jsr() with retry for transient VICE connection failures."""
-    for attempt in range(retries):
-        try:
-            return jsr(transport, addr, timeout=timeout)
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(0.5)
-                continue
-            raise
 
 
 # ============================================================================
@@ -171,12 +158,12 @@ def c64_chacha20_init(transport, labels, key, nonce, counter=0):
     write_bytes(transport, labels["cc20_nonce"], nonce)
     write_bytes(transport, labels["cc20_counter"],
                 counter.to_bytes(4, 'little'))
-    robust_jsr(transport, labels["chacha20_init"])
+    jsr(transport, labels["chacha20_init"])
 
 
 def c64_chacha20_block(transport, labels):
     """Generate one ChaCha20 keystream block. Returns 64 bytes."""
-    robust_jsr(transport, labels["chacha20_block"], timeout=120.0)
+    jsr(transport, labels["chacha20_block"], timeout=120.0)
     return read_bytes(transport, labels["cc20_keystream"], 64)
 
 
@@ -190,7 +177,7 @@ def c64_chacha20_encrypt(transport, labels, key, nonce, data, counter=1):
     write_bytes(transport, labels["cc20_data_ptr"],
                 bytes([buf & 0xFF, buf >> 8]))
     write_bytes(transport, labels["cc20_remain"], bytes([len(data)]))
-    robust_jsr(transport, labels["chacha20_encrypt"], timeout=180.0)
+    jsr(transport, labels["chacha20_encrypt"], timeout=180.0)
     return read_bytes(transport, buf, len(data))
 
 
@@ -198,7 +185,7 @@ def c64_poly1305_init(transport, labels, otk):
     """Initialize Poly1305 with 32-byte OTK."""
     write_bytes(transport, labels["poly_r"], otk[:16])
     write_bytes(transport, labels["poly_s"], otk[16:])
-    robust_jsr(transport, labels["poly1305_init"], timeout=60.0)
+    jsr(transport, labels["poly1305_init"], timeout=60.0)
 
 
 def c64_poly1305_block(transport, labels, block_data, hibit=1):
@@ -224,12 +211,12 @@ def c64_poly1305_update(transport, labels, data):
     write_bytes(transport, labels["zp_ptr1"],
                 bytes([buf & 0xFF, buf >> 8]))
     write_bytes(transport, labels["cc20_remain"], bytes([len(data)]))
-    robust_jsr(transport, labels["poly1305_update"], timeout=120.0)
+    jsr(transport, labels["poly1305_update"], timeout=120.0)
 
 
 def c64_poly1305_final(transport, labels):
     """Finalize Poly1305 and return 16-byte tag."""
-    robust_jsr(transport, labels["poly1305_final"], timeout=30.0)
+    jsr(transport, labels["poly1305_final"], timeout=30.0)
     return read_bytes(transport, labels["poly1305_tag"], 16)
 
 
@@ -261,7 +248,7 @@ def c64_aead_encrypt(transport, labels, key, nonce, aad, plaintext):
                 bytes([pt_buf & 0xFF, pt_buf >> 8]))
     write_bytes(transport, labels["aead_data_len"], struct.pack('<H', len(plaintext)))
 
-    robust_jsr(transport, labels["aead_encrypt"], timeout=300.0)
+    jsr(transport, labels["aead_encrypt"], timeout=300.0)
 
     ct = read_bytes(transport, pt_buf, len(plaintext))
     tag = read_bytes(transport, labels["poly1305_tag"], 16)
@@ -292,7 +279,7 @@ def c64_aead_decrypt(transport, labels, key, nonce, aad, ciphertext, tag):
     # Write expected tag
     write_bytes(transport, labels["aead_tag"], tag)
 
-    robust_jsr(transport, labels["aead_decrypt"], timeout=300.0)
+    jsr(transport, labels["aead_decrypt"], timeout=300.0)
 
     pt = read_bytes(transport, ct_buf, len(ciphertext))
     # Check A register result — stored by BRK handler? No, we can't easily
@@ -332,7 +319,7 @@ def test_rotl32(transport, labels):
             write_bytes(transport, labels["b2s_tmp0"], val_bytes)
             set_w32_dst(transport, labels, labels["b2s_tmp0"])
 
-            robust_jsr(transport, labels[rot_label])
+            jsr(transport, labels[rot_label])
             result = read_bytes(transport, labels["b2s_tmp0"], 4)
             result_val = int.from_bytes(result, "little")
 
@@ -352,7 +339,7 @@ def test_rotl32(transport, labels):
         write_bytes(transport, labels["b2s_tmp0"], val_bytes)
         set_w32_dst(transport, labels, labels["b2s_tmp0"])
 
-        robust_jsr(transport, labels["rotr32_1"])
+        jsr(transport, labels["rotr32_1"])
         result = read_bytes(transport, labels["b2s_tmp0"], 4)
         result_val = int.from_bytes(result, "little")
 
@@ -400,7 +387,7 @@ def test_chacha20_quarter_round(transport, labels):
         write_bytes(transport, labels["cc20_qr_table"], bytes([0, 1, 2, 3]))
         write_bytes(transport, labels["cc20_qr_idx"], bytes([0]))
 
-        robust_jsr(transport, labels["chacha20_quarter_round"], timeout=30.0)
+        jsr(transport, labels["chacha20_quarter_round"], timeout=30.0)
 
         # Restore original table
         write_bytes(transport, labels["cc20_qr_table"], orig_table)
@@ -530,7 +517,7 @@ def test_poly1305_clamp(transport, labels):
     write_bytes(transport, labels["poly_r"], r_val)
     write_bytes(transport, labels["poly_s"], bytes(16))  # s doesn't matter
 
-    robust_jsr(transport, labels["poly1305_clamp"])
+    jsr(transport, labels["poly1305_clamp"])
 
     result = read_bytes(transport, labels["poly_r"], 16)
     expected = bytearray(range(16))
@@ -555,7 +542,7 @@ def test_poly1305_clamp(transport, labels):
     # Test with all-FF
     r_val = bytes([0xFF] * 16)
     write_bytes(transport, labels["poly_r"], r_val)
-    robust_jsr(transport, labels["poly1305_clamp"])
+    jsr(transport, labels["poly1305_clamp"])
     result = read_bytes(transport, labels["poly_r"], 16)
     expected = bytearray([0xFF] * 16)
     expected[3] &= 0x0f
@@ -758,7 +745,7 @@ def test_aead_decrypt(transport, labels, rng):
     # Call aead_decrypt — with tampered tag it should return A=$FF
     # We verify by checking that poly_carry is nonzero (the XOR accumulator
     # from verify_tag)
-    robust_jsr(transport, labels["aead_decrypt"], timeout=300.0)
+    jsr(transport, labels["aead_decrypt"], timeout=300.0)
     verify_result = read_bytes(transport, labels["poly_carry"], 1)
 
     # After aead_decrypt returns from @auth_fail, the ciphertext should NOT
@@ -877,15 +864,11 @@ def main():
     # Launch VICE
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
 
-    with ViceInstanceManager(
-        config=config,
-        port_range_start=6510,
-        port_range_end=6530,
-    ) as mgr:
+    with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         print(f"VICE PID={inst.pid}, port={inst.port}")
         transport = inst.transport
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+        grid = binary_wait_for_text(transport, "Q=QUIT", timeout=60.0)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)

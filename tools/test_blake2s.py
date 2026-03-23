@@ -15,12 +15,11 @@ import os
 import random
 import subprocess
 import sys
-import time
-
 from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
-    read_bytes, write_bytes, jsr, wait_for_text,
+    read_bytes, write_bytes, jsr,
 )
+from vice_util import binary_wait_for_text
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "wireguard.prg")
@@ -28,18 +27,6 @@ LABELS_PATH = os.path.join(PROJECT_ROOT, "build", "labels.txt")
 VECTORS_PATH = os.path.join(PROJECT_ROOT, "test", "rfc7693_vectors.json")
 
 VERBOSE = False
-
-
-def robust_jsr(transport, addr, timeout=10.0, retries=3):
-    """jsr() with retry for transient VICE connection failures."""
-    for attempt in range(retries):
-        try:
-            return jsr(transport, addr, timeout=timeout)
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(0.3)
-                continue
-            raise
 
 
 def blake2s_ref(data, key=b"", digest_size=32):
@@ -65,7 +52,7 @@ def c64_blake2s_init(transport, labels, out_len=32, key=b""):
     # Set parameters in memory (blake2s_init reads from b2s_out_len/b2s_key_len)
     write_bytes(transport, labels["b2s_out_len"], bytes([out_len]))
     write_bytes(transport, labels["b2s_key_len"], bytes([len(key)]))
-    robust_jsr(transport, labels["blake2s_init"], timeout=10.0)
+    jsr(transport, labels["blake2s_init"], timeout=10.0)
 
 
 def c64_blake2s_update(transport, labels, data):
@@ -78,12 +65,12 @@ def c64_blake2s_update(transport, labels, data):
     write_bytes(transport, labels["b2s_data_ptr"],
                 bytes([buf_addr & 0xFF, buf_addr >> 8]))
     write_bytes(transport, labels["b2s_remain"], bytes([len(data)]))
-    robust_jsr(transport, labels["blake2s_update"], timeout=30.0)
+    jsr(transport, labels["blake2s_update"], timeout=30.0)
 
 
 def c64_blake2s_final(transport, labels):
     """Call blake2s_final and return the hash."""
-    robust_jsr(transport, labels["blake2s_final"], timeout=30.0)
+    jsr(transport, labels["blake2s_final"], timeout=30.0)
     return read_bytes(transport, labels["b2s_hash"], 32)
 
 
@@ -111,7 +98,7 @@ def c64_hmac_blake2s(transport, labels, key, data):
                 bytes([data_addr & 0xFF, data_addr >> 8]))
     write_bytes(transport, labels["hmac_data_len"], bytes([len(data)]))
 
-    robust_jsr(transport, labels["hmac_blake2s"], timeout=60.0)
+    jsr(transport, labels["hmac_blake2s"], timeout=60.0)
     return read_bytes(transport, labels["b2s_hash"], 32)
 
 
@@ -136,7 +123,7 @@ def c64_kdf(transport, labels, chaining_key, input_data, outputs=1):
     else:
         func = labels["kdf_3"]
 
-    robust_jsr(transport, func, timeout=120.0)
+    jsr(transport, func, timeout=120.0)
 
     result = [read_bytes(transport, labels["kdf_out1"], 32)]
     if outputs >= 2:
@@ -177,7 +164,7 @@ def test_word32_add(transport, labels):
         write_bytes(transport, labels["w32_dst"],
                     bytes([labels["b2s_tmp0"] & 0xFF, labels["b2s_tmp0"] >> 8]))
 
-        robust_jsr(transport, labels["add32"])
+        jsr(transport, labels["add32"])
         result = read_bytes(transport, labels["b2s_tmp0"], 4)
         result_val = int.from_bytes(result, "little")
 
@@ -216,7 +203,7 @@ def test_word32_xor(transport, labels):
         write_bytes(transport, labels["w32_dst"],
                     bytes([labels["b2s_tmp0"] & 0xFF, labels["b2s_tmp0"] >> 8]))
 
-        robust_jsr(transport, labels["xor32"])
+        jsr(transport, labels["xor32"])
         result = read_bytes(transport, labels["b2s_tmp0"], 4)
         result_val = int.from_bytes(result, "little")
 
@@ -254,7 +241,7 @@ def test_word32_rotations(transport, labels):
             write_bytes(transport, labels["w32_dst"],
                         bytes([labels["b2s_tmp0"] & 0xFF, labels["b2s_tmp0"] >> 8]))
 
-            robust_jsr(transport, labels[rot_label])
+            jsr(transport, labels[rot_label])
             result = read_bytes(transport, labels["b2s_tmp0"], 4)
             result_val = int.from_bytes(result, "little")
 
@@ -574,15 +561,11 @@ def main():
     # Launch VICE
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
 
-    with ViceInstanceManager(
-        config=config,
-        port_range_start=6510,
-        port_range_end=6530,
-    ) as mgr:
+    with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         print(f"VICE PID={inst.pid}, port={inst.port}")
         transport = inst.transport
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+        grid = binary_wait_for_text(transport, "Q=QUIT", timeout=60.0)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)
