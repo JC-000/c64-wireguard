@@ -14,13 +14,14 @@ import struct
 import subprocess
 import sys
 import tempfile
-import time
+
 
 from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
-    read_bytes, write_bytes, jsr, wait_for_text,
+    read_bytes, write_bytes, jsr,
 )
 from c64_test_harness.disk import DiskImage, FileType
+from vice_util import binary_wait_for_text
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "wireguard.prg")
@@ -28,17 +29,6 @@ LABELS_PATH = os.path.join(PROJECT_ROOT, "build", "labels.txt")
 
 VERBOSE = False
 
-
-def robust_jsr(transport, addr, timeout=30.0, retries=5):
-    """jsr() with retry for transient VICE connection failures."""
-    for attempt in range(retries):
-        try:
-            return jsr(transport, addr, timeout=timeout)
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(1.0 + attempt * 0.5)
-                continue
-            raise
 
 
 # ============================================================================
@@ -128,7 +118,7 @@ def call_config_read(transport, labels):
     """
     trampoline = build_read_trampoline(labels)
     write_bytes(transport, 0x0340, trampoline)
-    robust_jsr(transport, 0x0340, timeout=30.0)
+    jsr(transport, 0x0340, timeout=30.0)
     result = read_bytes(transport, 0x0360, 1)[0]
     return result
 
@@ -182,30 +172,22 @@ def verify_port(transport, labels, label_name, expected_port, test_name):
 # VICE launcher helper
 # ============================================================================
 
-def launch_vice_with_disk(disk, mgr):
-    """Launch VICE with the given DiskImage attached.
+def run_disk_test(disk, labels, test_fn):
+    """Launch VICE with a disk image and run test_fn(transport, labels).
 
-    Returns (inst, transport) -- caller must release inst via mgr.
+    Returns (passed, failed) from test_fn.
     """
-    inst = mgr.acquire(disk_image=disk)
-    transport = inst.transport
-    grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
-    if grid is None:
-        mgr.release(inst)
-        raise RuntimeError("Main menu did not appear")
-
-    # Safety loop
-    write_bytes(transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
-
-    return inst, transport
-
-
-def cleanup_vice(inst, mgr):
-    """Shut down VICE and release port."""
-    try:
-        mgr.release(inst)
-    except Exception:
-        pass
+    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
+                        disk_image=disk)
+    with ViceInstanceManager(config=config) as mgr:
+        inst = mgr.acquire()
+        print(f"VICE PID={inst.pid}, port={inst.port}")
+        transport = inst.transport
+        grid = binary_wait_for_text(transport, "Q=QUIT", timeout=60.0)
+        if grid is None:
+            raise RuntimeError("Main menu did not appear")
+        write_bytes(transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
+        return test_fn(transport, labels)
 
 
 # ============================================================================
@@ -577,164 +559,122 @@ def main():
     total_passed = 0
     total_failed = 0
 
-    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
-
-    with ViceInstanceManager(
-        config=config,
-        port_range_start=6510,
-        port_range_end=6560,
-    ) as mgr, tempfile.TemporaryDirectory() as tmpdir:
+    with tempfile.TemporaryDirectory() as tmpdir:
 
         # ==================================================================
         # Instance 1: Standard config
-        # Keys: static_priv=all-zeros, static_pub=all-FF, peer_pub=ascending
-        # IPs: endpoint=10.0.0.1, tunnel=10.7.0.2, target=1.2.3.4
-        # Port: 51820
         # ==================================================================
         print("\n=== Instance 1: Standard config ===")
 
-        static_priv_1 = bytes(32)                  # all zeros
-        static_pub_1 = bytes([0xFF] * 32)          # all FFs
-        peer_pub_1 = bytes(range(0, 32))            # ascending 0x00..0x1F
-        endpoint_ip_1 = [10, 0, 0, 1]
-        endpoint_port_1 = 51820
-        tunnel_ip_1 = [10, 7, 0, 2]
-        target_ip_1 = [1, 2, 3, 4]
-
         content_1 = make_config_content(
-            static_priv_1, static_pub_1, peer_pub_1,
-            endpoint_ip_1, endpoint_port_1,
-            tunnel_ip_1, target_ip_1,
+            bytes(32), bytes([0xFF] * 32), bytes(range(0, 32)),
+            [10, 0, 0, 1], 51820, [10, 7, 0, 2], [1, 2, 3, 4],
         )
         disk_1 = create_disk_with_config(tmpdir, content_1, "standard.d64")
 
-        inst_1, transport_1 = launch_vice_with_disk(disk_1, mgr)
-        try:
-            print(f"VICE PID={inst_1.pid}, port={inst_1.port}")
+        def instance_1_tests(transport, labels):
+            p_total = f_total = 0
 
-            # Call config_read_file
             print("\n--- config_read_file (standard) ---")
-            result = call_config_read(transport_1, labels)
+            result = call_config_read(transport, labels)
             if result == 0:
-                total_passed += 1
+                p_total += 1
                 if VERBOSE:
                     print("  PASS config_read_file returned success")
             else:
-                total_failed += 1
+                f_total += 1
                 print(f"  FAIL config_read_file returned {result}")
-            print(f"  1 passed, 0 failed" if result == 0
-                  else f"  0 passed, 1 failed")
+            print(f"  {p_total} passed, {f_total} failed")
 
-            # Hex parsing tests
             print("\n--- hex parsing ---")
-            p, f = test_hex_parsing(transport_1, labels, rng)
-            total_passed += p; total_failed += f
+            p, f = test_hex_parsing(transport, labels, rng)
+            p_total += p; f_total += f
             print(f"  {p} passed, {f} failed")
 
-            # IP parsing tests
             print("\n--- IP parsing ---")
-            p, f = test_ip_parsing(transport_1, labels)
-            total_passed += p; total_failed += f
+            p, f = test_ip_parsing(transport, labels)
+            p_total += p; f_total += f
             print(f"  {p} passed, {f} failed")
 
-            # Port parsing tests
             print("\n--- port parsing ---")
-            p, f = test_port_parsing(transport_1, labels)
-            total_passed += p; total_failed += f
+            p, f = test_port_parsing(transport, labels)
+            p_total += p; f_total += f
             print(f"  {p} passed, {f} failed")
 
-            time.sleep(1.0)
-        finally:
-            cleanup_vice(inst_1, mgr)
+            return p_total, f_total
+
+        p, f = run_disk_test(disk_1, labels, instance_1_tests)
+        total_passed += p; total_failed += f
 
         # ==================================================================
         # Instance 2: Edge case -- all max values
-        # Keys: all-FF for all three, IPs: 255.255.255.255, port: 65535
         # ==================================================================
         print("\n=== Instance 2: Edge max config ===")
 
-        static_priv_2 = bytes([0xFF] * 32)
-        static_pub_2 = bytes([0xFF] * 32)
-        peer_pub_2 = bytes([0xFF] * 32)
-        endpoint_ip_2 = [255, 255, 255, 255]
-        endpoint_port_2 = 65535
-        tunnel_ip_2 = [255, 255, 255, 255]
-        target_ip_2 = [255, 255, 255, 255]
-
         content_2 = make_config_content(
-            static_priv_2, static_pub_2, peer_pub_2,
-            endpoint_ip_2, endpoint_port_2,
-            tunnel_ip_2, target_ip_2,
+            bytes([0xFF] * 32), bytes([0xFF] * 32), bytes([0xFF] * 32),
+            [255, 255, 255, 255], 65535,
+            [255, 255, 255, 255], [255, 255, 255, 255],
         )
         disk_2 = create_disk_with_config(tmpdir, content_2, "maxvals.d64")
 
-        inst_2, transport_2 = launch_vice_with_disk(disk_2, mgr)
-        try:
-            print(f"VICE PID={inst_2.pid}, port={inst_2.port}")
+        def instance_2_tests(transport, labels):
+            p_total = f_total = 0
 
-            result = call_config_read(transport_2, labels)
+            result = call_config_read(transport, labels)
             if result != 0:
-                total_failed += 1
+                f_total += 1
                 print(f"  FAIL config_read_file returned {result} for max config")
             else:
                 if VERBOSE:
                     print("  PASS config_read_file success for max config")
 
             print("\n--- edge max ---")
-            p, f = test_edge_max(transport_2, labels)
-            total_passed += p; total_failed += f
+            p, f = test_edge_max(transport, labels)
+            p_total += p; f_total += f
             print(f"  {p} passed, {f} failed")
 
-            time.sleep(1.0)
-        finally:
-            cleanup_vice(inst_2, mgr)
+            return p_total, f_total
+
+        p, f = run_disk_test(disk_2, labels, instance_2_tests)
+        total_passed += p; total_failed += f
 
         # ==================================================================
         # Instance 3: Edge case -- all min values + random key + re-read
-        # Keys: all-zero, IPs: 0.0.0.0, port: 1
         # ==================================================================
         print("\n=== Instance 3: Edge min config + re-read ===")
 
-        static_priv_3 = bytes(32)
-        static_pub_3 = bytes(32)
-        peer_pub_3 = bytes(32)
-        endpoint_ip_3 = [0, 0, 0, 0]
-        endpoint_port_3 = 1
-        tunnel_ip_3 = [0, 0, 0, 0]
-        target_ip_3 = [0, 0, 0, 0]
-
         content_3 = make_config_content(
-            static_priv_3, static_pub_3, peer_pub_3,
-            endpoint_ip_3, endpoint_port_3,
-            tunnel_ip_3, target_ip_3,
+            bytes(32), bytes(32), bytes(32),
+            [0, 0, 0, 0], 1, [0, 0, 0, 0], [0, 0, 0, 0],
         )
         disk_3 = create_disk_with_config(tmpdir, content_3, "minvals.d64")
 
-        inst_3, transport_3 = launch_vice_with_disk(disk_3, mgr)
-        try:
-            print(f"VICE PID={inst_3.pid}, port={inst_3.port}")
+        def instance_3_tests(transport, labels):
+            p_total = f_total = 0
 
-            result = call_config_read(transport_3, labels)
+            result = call_config_read(transport, labels)
             if result != 0:
-                total_failed += 1
+                f_total += 1
                 print(f"  FAIL config_read_file returned {result} for min config")
             else:
                 if VERBOSE:
                     print("  PASS config_read_file success for min config")
 
             print("\n--- edge min ---")
-            p, f = test_edge_min(transport_3, labels)
-            total_passed += p; total_failed += f
+            p, f = test_edge_min(transport, labels)
+            p_total += p; f_total += f
             print(f"  {p} passed, {f} failed")
 
             print("\n--- full config extras (re-read) ---")
-            p, f = test_full_config_extras(transport_3, labels, rng)
-            total_passed += p; total_failed += f
+            p, f = test_full_config_extras(transport, labels, rng)
+            p_total += p; f_total += f
             print(f"  {p} passed, {f} failed")
 
-            time.sleep(1.0)
-        finally:
-            cleanup_vice(inst_3, mgr)
+            return p_total, f_total
+
+        p, f = run_disk_test(disk_3, labels, instance_3_tests)
+        total_passed += p; total_failed += f
 
     # ==================================================================
     # Summary

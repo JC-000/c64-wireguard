@@ -14,30 +14,17 @@ Usage:
 import os
 import random
 import sys
-import time
-
 from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
-    read_bytes, write_bytes, jsr, wait_for_text,
+    read_bytes, write_bytes, jsr,
 )
+from vice_util import binary_wait_for_text
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "wireguard.prg")
 LABELS_PATH = os.path.join(PROJECT_ROOT, "build", "labels.txt")
 
 VERBOSE = False
-
-
-def robust_jsr(transport, addr, timeout=10.0, retries=3):
-    """jsr() with retry for transient VICE connection failures."""
-    for attempt in range(retries):
-        try:
-            return jsr(transport, addr, timeout=timeout)
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(0.3)
-                continue
-            raise
 
 
 def print_pass(msg):
@@ -210,7 +197,7 @@ def test_zp_save_restore(transport, labels, rng):
 
         # Write to ZP and call save
         write_bytes(transport, zp_start, test_data)
-        robust_jsr(transport, labels["net_save_zp"])
+        jsr(transport, labels["net_save_zp"])
 
         # Read save buffer (not in ZP, so KERNAL won't clobber it)
         saved = read_bytes(transport, save_buf, zp_size)
@@ -236,7 +223,7 @@ def test_zp_save_restore(transport, labels, rng):
         write_bytes(transport, check_buf, bytes(zp_size))
 
         # Call trampoline: restore ZP + copy to check buffer atomically
-        robust_jsr(transport, trampoline_addr)
+        jsr(transport, trampoline_addr)
 
         # Read check buffer
         result = read_bytes(transport, check_buf, zp_size)
@@ -319,15 +306,11 @@ def main():
     print(f"\n=== ip65 blob + ZP save/restore (VICE) ===")
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
 
-    with ViceInstanceManager(
-        config=config,
-        port_range_start=6510,
-        port_range_end=6530,
-    ) as mgr:
+    with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         print(f"VICE PID={inst.pid}, port={inst.port}")
         transport = inst.transport
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+        grid = binary_wait_for_text(transport, "Q=QUIT", timeout=60.0)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)

@@ -18,12 +18,11 @@ import random
 import struct
 import subprocess
 import sys
-import time
-
 from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
-    read_bytes, write_bytes, jsr, wait_for_text,
+    read_bytes, write_bytes, jsr,
 )
+from vice_util import binary_wait_for_text
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "wireguard.prg")
@@ -36,18 +35,6 @@ SLOW = False
 WG_CONSTRUCTION = b"Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s"
 WG_IDENTIFIER = b"WireGuard v1 zx2c4 Jason@zx2c4.com"
 WG_LABEL_MAC1 = b"mac1----"
-
-
-def robust_jsr(transport, addr, timeout=30.0, retries=3):
-    """jsr() with retry for transient VICE connection failures."""
-    for attempt in range(retries):
-        try:
-            return jsr(transport, addr, timeout=timeout)
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(0.5)
-                continue
-            raise
 
 
 # ============================================================================
@@ -96,7 +83,7 @@ def py_hs_init(resp_pub):
 def c64_hs_init(transport, labels, resp_pub):
     """Call hs_init with given responder public key, return (C, H, mac1_key)."""
     write_bytes(transport, labels["hs_resp_pub"], resp_pub)
-    robust_jsr(transport, labels["hs_init"], timeout=30.0)
+    jsr(transport, labels["hs_init"], timeout=30.0)
     c = bytes(read_bytes(transport, labels["hs_c"], 32))
     h = bytes(read_bytes(transport, labels["hs_h"], 32))
     mac1_key = bytes(read_bytes(transport, labels["hs_mac1_key"], 32))
@@ -111,9 +98,9 @@ def c64_mix_hash(transport, labels, h, data):
     write_bytes(transport, labels["input_buffer"], data)
     # Set up zp_ptr1 and b2s_remain
     input_buf_addr = labels["input_buffer"]
-    transport.write_memory(labels["zp_ptr1"], [input_buf_addr & 0xFF, input_buf_addr >> 8])
-    transport.write_memory(labels["b2s_remain"], [len(data)])
-    robust_jsr(transport, labels["hs_mix_hash"], timeout=30.0)
+    write_bytes(transport, labels["zp_ptr1"], bytes([input_buf_addr & 0xFF, input_buf_addr >> 8]))
+    write_bytes(transport, labels["b2s_remain"], bytes([len(data)]))
+    jsr(transport, labels["hs_mix_hash"], timeout=30.0)
     return bytes(read_bytes(transport, labels["hs_h"], 32))
 
 
@@ -121,7 +108,7 @@ def c64_compute_mac1(transport, labels, mac1_key, packet_data_116):
     """Call hs_compute_mac1, return 16-byte MAC1."""
     write_bytes(transport, labels["hs_mac1_key"], mac1_key)
     write_bytes(transport, labels["hs_packet"], packet_data_116)
-    robust_jsr(transport, labels["hs_compute_mac1"], timeout=30.0)
+    jsr(transport, labels["hs_compute_mac1"], timeout=30.0)
     return bytes(read_bytes(transport, labels["b2s_hash"], 16))
 
 
@@ -296,7 +283,7 @@ def test_tai64n_increment(transport, labels):
 
     for i, (ts_in, expected) in enumerate(test_cases):
         write_bytes(transport, labels["hs_timestamp"], ts_in)
-        robust_jsr(transport, labels["tai64n_increment"], timeout=10.0)
+        jsr(transport, labels["tai64n_increment"], timeout=10.0)
         got = bytes(read_bytes(transport, labels["hs_timestamp"], 12))
 
         if got == expected:
@@ -408,15 +395,11 @@ def main():
     # Launch VICE
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
 
-    with ViceInstanceManager(
-        config=config,
-        port_range_start=6510,
-        port_range_end=6530,
-    ) as mgr:
+    with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         print(f"VICE PID={inst.pid}, port={inst.port}")
         transport = inst.transport
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+        grid = binary_wait_for_text(transport, "Q=QUIT", timeout=60.0)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)

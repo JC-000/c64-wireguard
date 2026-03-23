@@ -19,14 +19,15 @@ import struct
 import subprocess
 import sys
 import tempfile
-import time
+
 
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
-    read_bytes, write_bytes, jsr, wait_for_text,
+    read_bytes, write_bytes, jsr,
 )
+from vice_util import binary_wait_for_text
 from c64_test_harness.disk import DiskImage, FileType
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -35,17 +36,6 @@ LABELS_PATH = os.path.join(PROJECT_ROOT, "build", "labels.txt")
 
 VERBOSE = False
 
-
-def robust_jsr(transport, addr, timeout=30.0, retries=5):
-    """jsr() with retry for transient VICE connection failures."""
-    for attempt in range(retries):
-        try:
-            return jsr(transport, addr, timeout=timeout)
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(1.0 + attempt * 0.5)
-                continue
-            raise
 
 
 # ============================================================================
@@ -157,7 +147,7 @@ def test_psk_zeros(transport, labels, rng):
     write_bytes(transport, labels["hs_resp_packet"] + 44, tag)
 
     # Call hs_psk_mix (runs PSK mixing + AEAD verify + mix_hash(tag) + transport derivation)
-    robust_jsr(transport, labels["hs_psk_mix"], timeout=60.0)
+    jsr(transport, labels["hs_psk_mix"], timeout=60.0)
 
     # Check hs_c updated
     c64_c = bytes(read_bytes(transport, labels["hs_c"], 32))
@@ -218,7 +208,7 @@ def test_psk_random(transport, labels, rng):
         write_bytes(transport, labels["hs_preshared_key"], psk)
         write_bytes(transport, labels["hs_resp_packet"] + 44, tag)
 
-        robust_jsr(transport, labels["hs_psk_mix"], timeout=60.0)
+        jsr(transport, labels["hs_psk_mix"], timeout=60.0)
 
         c64_send = bytes(read_bytes(transport, labels["hs_transport_send"], 32))
         c64_recv = bytes(read_bytes(transport, labels["hs_transport_recv"], 32))
@@ -294,7 +284,7 @@ def test_aead_verification(transport, labels, rng):
         0x60,                                                     # RTS
     ])
     write_bytes(transport, 0x0340, trampoline)
-    robust_jsr(transport, 0x0340, timeout=60.0)
+    jsr(transport, 0x0340, timeout=60.0)
 
     result = read_bytes(transport, 0x0360, 1)[0]
     if result == 0:
@@ -313,7 +303,7 @@ def test_aead_verification(transport, labels, rng):
     write_bytes(transport, labels["hs_resp_packet"] + 44, correct_tag)
 
     write_bytes(transport, 0x0340, trampoline)
-    robust_jsr(transport, 0x0340, timeout=60.0)
+    jsr(transport, 0x0340, timeout=60.0)
 
     result = read_bytes(transport, 0x0360, 1)[0]
     if result != 0:
@@ -333,7 +323,7 @@ def test_aead_verification(transport, labels, rng):
     write_bytes(transport, labels["hs_resp_packet"] + 44, bytes(corrupted_tag))
 
     write_bytes(transport, 0x0340, trampoline)
-    robust_jsr(transport, 0x0340, timeout=60.0)
+    jsr(transport, 0x0340, timeout=60.0)
 
     result = read_bytes(transport, 0x0360, 1)[0]
     if result != 0:
@@ -397,29 +387,28 @@ def build_read_trampoline(labels):
 def call_config_read(transport, labels):
     trampoline = build_read_trampoline(labels)
     write_bytes(transport, 0x0340, trampoline)
-    robust_jsr(transport, 0x0340, timeout=30.0)
+    jsr(transport, 0x0340, timeout=30.0)
     return read_bytes(transport, 0x0360, 1)[0]
 
 
-def launch_vice_with_disk(disk, mgr):
-    inst = mgr.acquire(disk_image=disk)
-    transport = inst.transport
-    grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
-    if grid is None:
-        mgr.release(inst)
-        raise RuntimeError("Main menu did not appear")
-    write_bytes(transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
-    return inst, transport
+def run_disk_test(disk, labels, test_fn):
+    """Launch VICE with a disk image and run test_fn(transport, labels).
+
+    Returns (passed, failed) from test_fn.
+    """
+    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
+                        disk_image=disk)
+    with ViceInstanceManager(config=config) as mgr:
+        inst = mgr.acquire()
+        transport = inst.transport
+        grid = binary_wait_for_text(transport, "Q=QUIT", timeout=60.0)
+        if grid is None:
+            raise RuntimeError("Main menu did not appear")
+        write_bytes(transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
+        return test_fn(transport, labels)
 
 
-def cleanup_vice(inst, mgr):
-    try:
-        mgr.release(inst)
-    except Exception:
-        pass
-
-
-def test_config_parsing(labels, rng, mgr):
+def test_config_parsing(labels, rng, mgr=None):
     """Test PSK parsing from disk config files."""
     passed = failed = 0
 
@@ -432,167 +421,135 @@ def test_config_parsing(labels, rng, mgr):
     tunnel_ip = [10, 0, 0, 2]
     target_ip = [10, 0, 0, 3]
 
-    # Test 1: 7-line config (no PSK) → cfg_preshared_key should be zeros
-    with tempfile.TemporaryDirectory() as tmpdir:
+    def make_disk(tmpdir, psk=None, name="test.d64"):
         content = make_config_content(
             static_priv, static_pub, peer_pub,
             endpoint_ip, endpoint_port, tunnel_ip, target_ip,
-            psk=None)
-        disk = create_disk_with_config(tmpdir, content)
-        inst, transport = launch_vice_with_disk(disk, mgr)
-        try:
+            psk=psk)
+        return create_disk_with_config(tmpdir, content, name)
+
+    # Test 1: 7-line config (no PSK) → cfg_preshared_key should be zeros
+    with tempfile.TemporaryDirectory() as tmpdir:
+        disk = make_disk(tmpdir, psk=None, name="nopsk.d64")
+
+        def test_1(transport, labels):
             result = call_config_read(transport, labels)
             if result != 0:
-                failed += 1
                 print("  FAIL config_7line: config_read_file returned failure")
-                cleanup_vice(inst, mgr)
-                return passed, failed
-
+                return 0, 1
             got = bytes(read_bytes(transport, labels["cfg_preshared_key"], 32))
             if got == b'\x00' * 32:
-                passed += 1
                 if VERBOSE:
                     print("  PASS config_7line: no PSK → zeros")
-            else:
-                failed += 1
-                print(f"  FAIL config_7line: expected zeros, got {got.hex()}")
-        finally:
-            cleanup_vice(inst, mgr)
+                return 1, 0
+            print(f"  FAIL config_7line: expected zeros, got {got.hex()}")
+            return 0, 1
+
+        p, f = run_disk_test(disk, labels, test_1)
+        passed += p; failed += f
 
     # Test 2: 8-line config with all-zero PSK
     with tempfile.TemporaryDirectory() as tmpdir:
         psk_zeros = b'\x00' * 32
-        content = make_config_content(
-            static_priv, static_pub, peer_pub,
-            endpoint_ip, endpoint_port, tunnel_ip, target_ip,
-            psk=psk_zeros)
-        disk = create_disk_with_config(tmpdir, content)
-        inst, transport = launch_vice_with_disk(disk, mgr)
-        try:
+        disk = make_disk(tmpdir, psk=psk_zeros, name="psk_zeros.d64")
+
+        def test_2(transport, labels):
             result = call_config_read(transport, labels)
             if result != 0:
-                failed += 1
                 print("  FAIL config_psk_zeros: config_read_file returned failure")
-                cleanup_vice(inst, mgr)
-                return passed, failed
-
+                return 0, 1
             got = bytes(read_bytes(transport, labels["cfg_preshared_key"], 32))
             if got == psk_zeros:
-                passed += 1
                 if VERBOSE:
                     print("  PASS config_psk_zeros: all-zero PSK parsed")
-            else:
-                failed += 1
-                print(f"  FAIL config_psk_zeros: got {got.hex()}")
-        finally:
-            cleanup_vice(inst, mgr)
+                return 1, 0
+            print(f"  FAIL config_psk_zeros: got {got.hex()}")
+            return 0, 1
+
+        p, f = run_disk_test(disk, labels, test_2)
+        passed += p; failed += f
 
     # Test 3: 8-line config with all-FF PSK
     with tempfile.TemporaryDirectory() as tmpdir:
         psk_ff = b'\xFF' * 32
-        content = make_config_content(
-            static_priv, static_pub, peer_pub,
-            endpoint_ip, endpoint_port, tunnel_ip, target_ip,
-            psk=psk_ff)
-        disk = create_disk_with_config(tmpdir, content)
-        inst, transport = launch_vice_with_disk(disk, mgr)
-        try:
+        disk = make_disk(tmpdir, psk=psk_ff, name="psk_ff.d64")
+
+        def test_3(transport, labels):
             result = call_config_read(transport, labels)
             if result != 0:
-                failed += 1
                 print("  FAIL config_psk_ff: config_read_file returned failure")
-                cleanup_vice(inst, mgr)
-                return passed, failed
-
+                return 0, 1
             got = bytes(read_bytes(transport, labels["cfg_preshared_key"], 32))
             if got == psk_ff:
-                passed += 1
                 if VERBOSE:
                     print("  PASS config_psk_ff: all-FF PSK parsed")
-            else:
-                failed += 1
-                print(f"  FAIL config_psk_ff: got {got.hex()}")
-        finally:
-            cleanup_vice(inst, mgr)
+                return 1, 0
+            print(f"  FAIL config_psk_ff: got {got.hex()}")
+            return 0, 1
+
+        p, f = run_disk_test(disk, labels, test_3)
+        passed += p; failed += f
 
     # Test 4: 8-line config with random PSK
     with tempfile.TemporaryDirectory() as tmpdir:
         psk_rand = bytes(rng.randint(0, 255) for _ in range(32))
-        content = make_config_content(
-            static_priv, static_pub, peer_pub,
-            endpoint_ip, endpoint_port, tunnel_ip, target_ip,
-            psk=psk_rand)
-        disk = create_disk_with_config(tmpdir, content)
-        inst, transport = launch_vice_with_disk(disk, mgr)
-        try:
+        disk = make_disk(tmpdir, psk=psk_rand, name="psk_rand.d64")
+
+        def test_4(transport, labels):
             result = call_config_read(transport, labels)
             if result != 0:
-                failed += 1
                 print("  FAIL config_psk_random: config_read_file returned failure")
-                cleanup_vice(inst, mgr)
-                return passed, failed
-
+                return 0, 1
             got = bytes(read_bytes(transport, labels["cfg_preshared_key"], 32))
             if got == psk_rand:
-                passed += 1
                 if VERBOSE:
                     print("  PASS config_psk_random: random PSK parsed")
-            else:
-                failed += 1
-                print(f"  FAIL config_psk_random: expected {psk_rand.hex()}, got {got.hex()}")
-        finally:
-            cleanup_vice(inst, mgr)
+                return 1, 0
+            print(f"  FAIL config_psk_random: expected {psk_rand.hex()}, got {got.hex()}")
+            return 0, 1
+
+        p, f = run_disk_test(disk, labels, test_4)
+        passed += p; failed += f
 
     # Test 5: config_load copies PSK from cfg → hs
     with tempfile.TemporaryDirectory() as tmpdir:
         psk_copy = bytes(rng.randint(0, 255) for _ in range(32))
-        content = make_config_content(
-            static_priv, static_pub, peer_pub,
-            endpoint_ip, endpoint_port, tunnel_ip, target_ip,
-            psk=psk_copy)
-        disk = create_disk_with_config(tmpdir, content)
-        inst, transport = launch_vice_with_disk(disk, mgr)
-        try:
-            call_config_read(transport, labels)
-            robust_jsr(transport, labels["config_load"])
+        disk = make_disk(tmpdir, psk=psk_copy, name="psk_copy.d64")
 
+        def test_5(transport, labels):
+            call_config_read(transport, labels)
+            jsr(transport, labels["config_load"])
             got = bytes(read_bytes(transport, labels["hs_preshared_key"], 32))
             if got == psk_copy:
-                passed += 1
                 if VERBOSE:
                     print("  PASS config_load: PSK copied to hs_preshared_key")
-            else:
-                failed += 1
-                print(f"  FAIL config_load: PSK copy mismatch")
-                print(f"    expected: {psk_copy.hex()}")
-                print(f"    got:      {got.hex()}")
-        finally:
-            cleanup_vice(inst, mgr)
+                return 1, 0
+            print(f"  FAIL config_load: PSK copy mismatch")
+            print(f"    expected: {psk_copy.hex()}")
+            print(f"    got:      {got.hex()}")
+            return 0, 1
+
+        p, f = run_disk_test(disk, labels, test_5)
+        passed += p; failed += f
 
     # Test 6: 7-line config + config_load → hs_preshared_key = zeros
     with tempfile.TemporaryDirectory() as tmpdir:
-        content = make_config_content(
-            static_priv, static_pub, peer_pub,
-            endpoint_ip, endpoint_port, tunnel_ip, target_ip,
-            psk=None)
-        disk = create_disk_with_config(tmpdir, content)
-        inst, transport = launch_vice_with_disk(disk, mgr)
-        try:
-            # Pre-fill hs_preshared_key with garbage to ensure config_load clears it
+        disk = make_disk(tmpdir, psk=None, name="nopsk_load.d64")
+
+        def test_6(transport, labels):
             write_bytes(transport, labels["hs_preshared_key"], b'\xAA' * 32)
             call_config_read(transport, labels)
-            robust_jsr(transport, labels["config_load"])
-
+            jsr(transport, labels["config_load"])
             got = bytes(read_bytes(transport, labels["hs_preshared_key"], 32))
             if got == b'\x00' * 32:
-                passed += 1
                 if VERBOSE:
                     print("  PASS config_load: no PSK → hs_preshared_key = zeros")
-            else:
-                failed += 1
-                print(f"  FAIL config_load: expected zeros, got {got.hex()}")
-        finally:
-            cleanup_vice(inst, mgr)
+                return 1, 0
+            print(f"  FAIL config_load: expected zeros, got {got.hex()}")
+            return 0, 1
+
+        p, f = run_disk_test(disk, labels, test_6)
+        passed += p; failed += f
 
     return passed, failed
 
@@ -617,7 +574,7 @@ def test_backward_compat(transport, labels, rng):
     write_bytes(transport, labels["hs_preshared_key"], psk_zero)
     write_bytes(transport, labels["hs_resp_packet"] + 44, tag)
 
-    robust_jsr(transport, labels["hs_psk_mix"], timeout=60.0)
+    jsr(transport, labels["hs_psk_mix"], timeout=60.0)
 
     c64_send = bytes(read_bytes(transport, labels["hs_transport_send"], 32))
     c64_recv = bytes(read_bytes(transport, labels["hs_transport_recv"], 32))
@@ -639,7 +596,7 @@ def test_backward_compat(transport, labels, rng):
     write_bytes(transport, labels["hs_h"], h)
     write_bytes(transport, labels["hs_preshared_key"], psk_a)
     write_bytes(transport, labels["hs_resp_packet"] + 44, tag_a)
-    robust_jsr(transport, labels["hs_psk_mix"], timeout=60.0)
+    jsr(transport, labels["hs_psk_mix"], timeout=60.0)
     send_a = bytes(read_bytes(transport, labels["hs_transport_send"], 32))
 
     _, _, _, tag_b, _, _, _ = py_psk_mix_and_transport(c, h, psk_b)
@@ -647,7 +604,7 @@ def test_backward_compat(transport, labels, rng):
     write_bytes(transport, labels["hs_h"], h)
     write_bytes(transport, labels["hs_preshared_key"], psk_b)
     write_bytes(transport, labels["hs_resp_packet"] + 44, tag_b)
-    robust_jsr(transport, labels["hs_psk_mix"], timeout=60.0)
+    jsr(transport, labels["hs_psk_mix"], timeout=60.0)
     send_b = bytes(read_bytes(transport, labels["hs_transport_send"], 32))
 
     if send_a != send_b:
@@ -670,7 +627,7 @@ def test_backward_compat(transport, labels, rng):
     write_bytes(transport, labels["hs_preshared_key"], psk2)
     write_bytes(transport, labels["hs_resp_packet"] + 44, tag2)
 
-    robust_jsr(transport, labels["hs_psk_mix"], timeout=60.0)
+    jsr(transport, labels["hs_psk_mix"], timeout=60.0)
 
     # After PSK mixing + AEAD verify, H has been updated twice:
     # once for tau, once for the AEAD tag. Read final H.
@@ -731,7 +688,6 @@ def run_tests(transport, labels, seed):
             import traceback
             traceback.print_exc()
             total_failed += 1
-        time.sleep(1.0)
 
     return total_passed, total_failed
 
@@ -792,15 +748,11 @@ def main():
     # Launch VICE for non-disk tests
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
 
-    with ViceInstanceManager(
-        config=config,
-        port_range_start=6510,
-        port_range_end=6530,
-    ) as mgr:
+    with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         print(f"VICE PID={inst.pid}, port={inst.port}")
         transport = inst.transport
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+        grid = binary_wait_for_text(transport, "Q=QUIT", timeout=60.0)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)
