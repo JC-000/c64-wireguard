@@ -6,7 +6,7 @@
 ;   $0801-$1FFF: boot, net wrapper (~6KB available)
 ;   $2000-$32EF: ip65 binary blob (UDP-only, ~4.8KB)
 ;   $32F0+:      crypto code + data + strings
-;   $7800-$7BFF: sqtab (quarter-square multiply tables)
+;   $8000-$83FF: sqtab (quarter-square multiply tables)
 ; =============================================================================
 
 !cpu 6502

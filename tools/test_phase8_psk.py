@@ -107,17 +107,17 @@ def test_build_verification(labels):
             failed += 1
             print(f"  FAIL label '{name}' not found")
 
-    # All addresses below $7800
+    # All addresses below $8000
     all_ok = True
     for name in required:
         addr = labels.address(name)
-        if addr is not None and addr >= 0x7800:
+        if addr is not None and addr >= 0x8000:
             all_ok = False
-            print(f"  FAIL {name} ${addr:04X} >= $7800")
+            print(f"  FAIL {name} ${addr:04X} >= $8000")
     if all_ok:
         passed += 1
         if VERBOSE:
-            print("  PASS all PSK labels < $7800")
+            print("  PASS all PSK labels < $8000")
     else:
         failed += 1
 
