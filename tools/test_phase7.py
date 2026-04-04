@@ -159,7 +159,7 @@ def py_build_udp_packet(src_ip, dst_ip, port, payload):
 # ============================================================================
 
 def test_build_verification(labels):
-    """Verify Phase 7 labels exist and addresses < $7800."""
+    """Verify Phase 7 labels exist and addresses < $8000."""
     passed = failed = 0
 
     required_labels = [

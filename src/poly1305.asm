@@ -8,13 +8,13 @@
 ; Key r: 16 bytes (clamped per RFC 7539)
 ; Key s: 16 bytes (added to final result)
 ;
-; Quarter-square table: sqtab_lo/hi at $7800-$7BFF (1024 bytes)
+; Quarter-square table: sqtab_lo/hi at $8000-$83FF (1024 bytes)
 ; Identity: a*b = floor((a+b)^2/4) - floor((a-b)^2/4)
 ; =============================================================================
 
 ; Quarter-square table addresses (page-aligned for speed)
-sqtab_lo        = $7800         ; 512 bytes: low bytes of floor(n^2/4)
-sqtab_hi        = $7a00         ; 512 bytes: high bytes of floor(n^2/4)
+sqtab_lo        = $8000         ; 512 bytes: low bytes of floor(n^2/4)
+sqtab_hi        = $8200         ; 512 bytes: high bytes of floor(n^2/4)
 
 ; =============================================================================
 ; poly1305_init - Initialize Poly1305 state

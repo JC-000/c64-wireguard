@@ -180,6 +180,50 @@ fe_p:
         !fill 30, $ff
         !byte $7f
 
+; --- Squaring support buffers ---
+mul_src2_buf:
+        !fill 32, 0           ; absolute copy of src for fast indexed access
+mul_cached_a:
+        !byte 0               ; cached a[i] for inner loop
+
+; --- REU DMA target buffers (page-aligned for LDA abs,Y without penalty) ---
+        !align 255, 0          ; align to next page boundary
+mul_dma_lo:
+        !fill 256, 0           ; DMA target: lo bytes of a*b for current a
+mul_dma_hi:
+        !fill 256, 0           ; DMA target: hi bytes of a*b for current a
+
+; --- mult66 second quarter-square table ---
+; sqtab2[0] = 0
+; sqtab2[n] = floor((256-n)^2 / 4) - 1  for n=1..255
+; The -1 compensates for carry being clear in the negative-difference path
+sqtab2_lo:
+        !byte 0
+        !for i, 1, 255 {
+                !byte <(((256-i)*(256-i))/4 - 1)
+        }
+
+sqtab2_hi:
+        !byte 0
+        !for i, 1, 255 {
+                !byte >(((256-i)*(256-i))/4 - 1)
+        }
+
+; --- mul_by_38 lookup tables ---
+; mul38_lo_tab[i] = low byte of (i * 38)
+; mul38_hi_tab[i] = high byte of (i * 38)
+mul38_lo_tab:
+        !byte 0
+        !for i, 1, 255 {
+                !byte <(i * 38)
+        }
+
+mul38_hi_tab:
+        !byte 0
+        !for i, 1, 255 {
+                !byte >(i * 38)
+        }
+
 ; --- X25519 state ---
 x25_scalar:
         !fill 32, 0            ; clamped scalar

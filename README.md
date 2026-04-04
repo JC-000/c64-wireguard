@@ -19,7 +19,8 @@ WireGuard Noise protocol implementation for the Commodore 64, written in 6502 as
 | MTU | 16-bit payload transport encrypt/decrypt/round-trip (0–1468 bytes) | 37 |
 | TAI64N | Real-time timestamp init, elapsed seconds, monotonic sequence | 19 |
 | MAC2 | Cookie decryption → MAC2 integration end-to-end flow | 6 |
-| **Total** | | **571** |
+| Replay | 2048-bit sliding window, key rotation limits, endpoint update | 67 |
+| **Total** | | **642** |
 
 ## Building
 
@@ -39,8 +40,8 @@ make clean
 ```
 $0801-$0A72  Boot stub, main loop, network wrapper (net.asm)
 $2000-$32EF  ip65 binary blob (UDP-only, 4,847 bytes)
-$32F0-$65BF  Crypto + transport + session + application + data buffers + strings
-$7800-$7BFF  Quarter-square multiply tables (page-aligned)
+$32F0-$7CFF  Crypto + transport + session + application + data buffers + strings
+$8000-$83FF  Quarter-square multiply tables (page-aligned, BASIC ROM banked out)
 ```
 
 ip65 uses zero page $02-$1B (cc65 standard). These overlap our crypto ZP variables. The `net.asm` wrapper saves and restores $02-$1B around every ip65 call (~60 cycles overhead, negligible vs network latency).
@@ -59,7 +60,7 @@ ip65 uses zero page $02-$1B (cc65 standard). These overlap our crypto ZP variabl
 | `src/chacha20.asm` | ChaCha20 stream cipher (RFC 7539) |
 | `src/poly1305.asm` | Poly1305 MAC (130-bit modular arithmetic, quarter-square multiply) |
 | `src/aead.asm` | ChaCha20-Poly1305 AEAD encrypt/decrypt |
-| `src/fe25519.asm` | Field arithmetic mod 2^255-19 (add, sub, mul, sqr, inv, cswap) |
+| `src/fe25519.asm` | Field arithmetic mod 2^255-19 (add, sub, mul, sqr, inv, cswap, REU DMA) |
 | `src/x25519.asm` | X25519 scalar multiplication (Montgomery ladder, RFC 7748) |
 | `src/tai64n.asm` | TAI64N timestamp increment |
 | `src/handshake.asm` | WireGuard IKpsk2 Noise handshake (Type 1/Type 2 packets) |
@@ -88,7 +89,7 @@ ip65 uses zero page $02-$1B (cc65 standard). These overlap our crypto ZP variabl
 | $02-$03 | zp_tmp1/2 | Temporary bytes |
 | $04-$09 | w32_src1/src2/dst | Word32 operand pointers |
 | $0A-$13 | b2s_* | BLAKE2s working variables |
-| $14-$1D | cc20_*/poly_* | ChaCha20 and Poly1305 |
+| $14-$1D | cc20_*/lmul*/poly_* | ChaCha20, mult66 pointers (aliased), Poly1305 |
 | $1E-$29 | fe_* | Field element arithmetic |
 | $2A-$2D | x25_* | X25519 ladder state |
 | $FB-$FE | zp_ptr1/2 | General-purpose pointers |
@@ -149,13 +150,20 @@ All tests use the direct-memory `jsr()` pattern. Use `--seed N` to reproduce spe
 
 ### Performance
 
-On real C64 hardware (~1 MHz):
+On real C64 hardware (~1 MHz), with REU-accelerated field arithmetic:
 - BLAKE2s compress: ~22 ms
 - ChaCha20 block: ~65 ms
 - Poly1305 block: ~110 ms
-- Field multiply (fe_mul): ~170 ms
-- X25519 scalar multiply: ~7-8 minutes (255 ladder steps)
-- Full handshake (3 X25519 ops): ~25 minutes
+- Field multiply (fe_mul): ~110 ms (REU DMA table lookup)
+- Field square (fe_sqr): ~83 ms (dedicated squaring with symmetry)
+- X25519 scalar multiply: ~3 minutes (255 ladder steps)
+- Full handshake (3 X25519 ops): ~9 minutes
+
+Optimizations imported from the [c64-x25519](https://github.com/JC-000/c64-x25519) project:
+- **REU DMA fe_mul**: Precomputed 128KB multiplication tables in REU expansion memory, fetched via DMA per outer loop iteration. Self-modifying accumulation addresses, 2x inner loop unroll.
+- **Dedicated fe_sqr**: Exploits a[i]*a[j] = a[j]*a[i] symmetry to halve cross-term multiplies. Uses mult66 indirect-indexed quarter-square multiply with shift-before-accumulate for implicit doubling.
+- **Self-modifying fe_cswap**: Patches absolute,Y addresses at entry to replace indirect-indexed loads. 4x loop unroll. 38 cycles/byte vs 49 cycles/byte.
+- **mul38 lookup tables**: 512-byte compile-time tables replace `jsr mul_8x8` in fe_reduce_wide. 8 cycles vs 58 cycles per byte (7x speedup, called ~720 times per scalarmult).
 
 ## Architecture
 
