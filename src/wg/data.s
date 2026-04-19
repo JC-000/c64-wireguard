@@ -350,11 +350,15 @@ b2s_f:
 b2s_buf_len:
         .res 1
 
-; output hash length (1-32); default 32, may be modified at runtime.
-; Although this has a default, we keep it in BSS and rely on callers to
-; initialise it (matches existing usage; blake2s_init writes it).
+; output hash length (1-32); default 32. MUST be initialised because
+; blake2s_init XORs this value into h[0] without writing it first, and
+; hs_mix_hash calls blake2s_init without setting b2s_out_len. The ACME
+; build declared this as `!byte 32` and relied on the PRG emitting the
+; default byte. We replicate that here via `.byte 32` in APP_DATA.
+.segment "APP_DATA"
 b2s_out_len:
-        .res 1
+        .byte 32
+.segment "CRYPTO_BSS"
 
 ; BLAKE2s output buffer (32 bytes)
 b2s_hash:
