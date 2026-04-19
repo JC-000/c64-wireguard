@@ -3,20 +3,39 @@ CA65 = ca65
 LD65 = ld65
 VICE = x64sc
 
-SRC_DIR = src
-BUILD_DIR = build
+SRC_DIR    = src
+BUILD_DIR  = build
 IP65_BUILD = ip65-build
-IP65_DIR = ip65
+IP65_DIR   = ip65
+CFG_DIR    = cfg
 
-PRG = $(BUILD_DIR)/wireguard.prg
-LABELS = $(BUILD_DIR)/labels.txt
+# ACME (current / default) build output
+PRG     = $(BUILD_DIR)/wireguard.prg
+LABELS  = $(BUILD_DIR)/labels.txt
 IP65_BIN = $(IP65_BUILD)/ip65-c64.bin
 
-# ACME sources
+# ca65 (Phase 1+ scaffolding) build output — separate name so it can
+# coexist with the ACME PRG during the dual-build period.
+CA65_PRG    = $(BUILD_DIR)/wireguard-ca65.prg
+CA65_LABELS = $(BUILD_DIR)/labels-ca65.txt
+CA65_MAP    = $(BUILD_DIR)/wireguard-ca65.map
+CA65_CFG    = $(CFG_DIR)/c64-wireguard-ip65.cfg
+
+CA65FLAGS = -I $(SRC_DIR) -I $(SRC_DIR)/net/ip65 --debug-info
+LD65FLAGS = -C $(CA65_CFG) -Ln $(CA65_LABELS) -m $(CA65_MAP)
+
+# ACME sources (current build)
 ASM_SRCS = $(wildcard $(SRC_DIR)/*.asm)
 
-.PHONY: all clean run ip65-libs
+# ca65 sources for Phase 1 scaffolding — expand in subsequent phases.
+CA65_SRCS = $(SRC_DIR)/loadaddr.s \
+            $(SRC_DIR)/main.s \
+            $(SRC_DIR)/net/ip65/ip65_blob.s
+CA65_OBJS = $(patsubst $(SRC_DIR)/%.s,$(BUILD_DIR)/%.o,$(CA65_SRCS))
 
+.PHONY: all clean run ip65-libs ca65-build ca65-clean ca65-run
+
+# Default build stays ACME through Phase 5. Phase 6 flips `all` to ca65.
 all: $(PRG)
 
 $(PRG): $(ASM_SRCS) $(IP65_BIN) | $(BUILD_DIR)
@@ -42,3 +61,27 @@ run: $(PRG)
 clean:
 	rm -f $(BUILD_DIR)/wireguard.prg $(BUILD_DIR)/labels.txt
 	rm -f $(IP65_BUILD)/ip65_stub.o $(IP65_BUILD)/ip65-c64.bin $(IP65_BUILD)/ip65-c64.map
+
+# =============================================================================
+# Phase 1: ca65 scaffolding build (dual-build alongside ACME)
+# =============================================================================
+
+ca65-build: $(CA65_PRG)
+
+$(CA65_PRG): $(CA65_OBJS) $(IP65_BIN) | $(BUILD_DIR)
+	$(LD65) $(LD65FLAGS) -o $@ $(CA65_OBJS)
+	# Rewrite ca65 label format `al XXXXXX .name` -> VICE format
+	# `al C:XXXX .name` so c64-test-harness Labels.from_file() can parse.
+	sed -i 's/^al 00\([0-9a-fA-F]\{4\}\) /al C:\1 /' $(CA65_LABELS)
+
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.s $(IP65_BIN) | $(BUILD_DIR)
+	mkdir -p $(dir $@)
+	$(CA65) $(CA65FLAGS) -o $@ $<
+
+ca65-run: $(CA65_PRG)
+	$(VICE) -autostart $(CA65_PRG)
+
+ca65-clean:
+	rm -f $(CA65_PRG) $(CA65_LABELS) $(CA65_MAP)
+	rm -rf $(BUILD_DIR)/net
+	rm -f $(BUILD_DIR)/*.o
