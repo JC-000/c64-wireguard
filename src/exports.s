@@ -37,6 +37,12 @@
 .exportzp fe_src1, fe_src2, fe_dst, fe_misc, fe_carry, fe_loop
 .exportzp fe_mul_i, fe_mul_j
 
+; --- fe25519 ZP ABI-aligned aliases (match c64-x25519 library naming) ---
+fe25519_src1 = fe_src1
+fe25519_src2 = fe_src2
+fe25519_dst  = fe_dst
+.exportzp fe25519_src1, fe25519_src2, fe25519_dst
+
 ; --- X25519 ZP ---
 .exportzp x25_prev_bit, x25_bit_ctr, x25_byte_idx, x25_bit_mask
 

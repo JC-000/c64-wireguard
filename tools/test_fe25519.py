@@ -582,10 +582,10 @@ def main():
     # Load labels
     labels = Labels.from_file(LABELS_PATH)
     required = [
-        "fe_src1", "fe_src2", "fe_dst",
-        "fe_copy", "fe_zero", "fe_one",
-        "fe_add", "fe_sub", "fe_mul", "fe_sqr", "fe_inv",
-        "fe_cswap", "fe_mul_a24", "fe_reduce_final",
+        "fe25519_src1", "fe25519_src2", "fe25519_dst",
+        "fe25519_copy", "fe25519_zero", "fe25519_one",
+        "fe25519_add", "fe25519_sub", "fe25519_mul", "fe25519_sqr", "fe25519_inv",
+        "fe25519_cswap", "fe25519_mul_a24", "fe25519_reduce_final",
         "fe_tmp1", "fe_tmp2", "fe_tmp3", "fe_tmp4",
         "fe_wide", "fe_p",
         "cassette_buf",

@@ -16,11 +16,8 @@
 
 ; --- Public ABI aliases for fe25519 ZP pointer slots ---
 ; The underlying ZP addresses are defined in constants.inc as fe_src1/fe_src2/fe_dst.
-; Expose the sibling-library spelling here so this file (and later x25519.s)
-; can use the fe25519_* names interchangeably.
-fe25519_src1 = fe_src1
-fe25519_src2 = fe_src2
-fe25519_dst  = fe_dst
+; The fe25519_src1/src2/dst ABI-aligned aliases live in src/exports.s
+; so they're also emitted to labels.txt for the test harness.
 
 ; --- Public entry points ---
 .export fe25519_copy

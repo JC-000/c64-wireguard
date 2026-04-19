@@ -57,11 +57,23 @@ CA65_OBJS = $(patsubst $(SRC_DIR)/%.s,$(BUILD_DIR)/%.o,$(CA65_SRCS))
 
 .PHONY: all clean run ip65-libs ca65-build ca65-clean ca65-run
 
-# Default build stays ACME through Phase 5. Phase 6 flips `all` to ca65.
+# Default build is ca65 (Phase 6 onwards). `make` produces
+# build/wireguard.prg + build/labels.txt via the ca65/ld65 pipeline.
+# The legacy ACME recipe is retained as `make acme-build` for emergency
+# fallback only; Phase 6 cleanup deletes the .asm sources after the
+# final v2.0.0-ca65 tag.
 all: $(PRG)
 
-$(PRG): $(ASM_SRCS) $(IP65_BIN) | $(BUILD_DIR)
-	cd $(SRC_DIR) && $(ACME) -f cbm -o ../$(PRG) --vicelabels ../$(LABELS) main.asm
+$(PRG): $(CA65_OBJS) | $(BUILD_DIR)
+	$(LD65) -C $(CA65_CFG) -Ln $(LABELS) -m $(CA65_MAP) -o $@ $(CA65_OBJS)
+	sed -i 's/^al 00\([0-9a-fA-F]\{4\}\) /al C:\1 /' $(LABELS)
+
+# Emergency fallback: build via ACME. Kept until Phase 6 cleanup removes
+# the .asm files and this target.
+.PHONY: acme-build
+acme-build: $(ASM_SRCS) $(IP65_BIN) | $(BUILD_DIR)
+	cd $(SRC_DIR) && $(ACME) -f cbm -o ../$(BUILD_DIR)/wireguard-acme.prg \
+	    --vicelabels ../$(BUILD_DIR)/labels-acme.txt main.asm
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -81,7 +93,11 @@ run: $(PRG)
 	$(VICE) -autostart $(PRG)
 
 clean:
-	rm -f $(BUILD_DIR)/wireguard.prg $(BUILD_DIR)/labels.txt
+	rm -f $(BUILD_DIR)/wireguard.prg $(BUILD_DIR)/labels.txt $(BUILD_DIR)/*.map
+	rm -f $(BUILD_DIR)/wireguard-acme.prg $(BUILD_DIR)/labels-acme.txt
+	rm -f $(BUILD_DIR)/wireguard-ca65.prg $(BUILD_DIR)/labels-ca65.txt
+	rm -rf $(BUILD_DIR)/net $(BUILD_DIR)/crypto $(BUILD_DIR)/wg
+	rm -f $(BUILD_DIR)/*.o
 	rm -f $(IP65_BUILD)/ip65_stub.o $(IP65_BUILD)/ip65-c64.bin $(IP65_BUILD)/ip65-c64.map
 
 # =============================================================================

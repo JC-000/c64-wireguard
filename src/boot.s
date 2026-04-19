@@ -94,6 +94,25 @@ start:
         and     #$fe                    ; clear bit 0 (LORAM) -- bank out BASIC ROM
         sta     proc_port
 
+        ; BSS is now below $8000 and emitted as zero bytes in the PRG
+        ; file, so LOAD stamps zeros into RAM for us. Additionally zero
+        ; $A000-$BFFF (where ip65's own BSS lives) as a defensive
+        ; measure — some WG tests rely on these pages being clean even
+        ; though WG doesn't own them directly.
+        ldy     #$00
+        ldx     #$20                    ; 32 pages = $2000 bytes
+        lda     #$A0
+        sta     @zbss_store+2
+        lda     #$00
+@zbss_page:
+@zbss_store:
+        sta     $A000,y                 ; self-modified high byte walks $A0..$BF
+        iny
+        bne     @zbss_store
+        inc     @zbss_store+2
+        dex
+        bne     @zbss_page
+
         ; clear screen
         jsr     clrscr
 
