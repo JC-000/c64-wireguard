@@ -1,13 +1,23 @@
 #!/usr/bin/env python3
-"""Run all regression test suites in parallel.
+"""Run all regression test suites with bounded parallelism.
 
-Builds once before launching tests. Sets C64_SKIP_BUILD=1 so individual
+Builds once up front. Launches up to MAX_PARALLEL test processes at a
+time, staggered so VICE boots don't stampede each other, and refills
+the pool as each suite finishes. Sets C64_SKIP_BUILD=1 so individual
 test scripts skip their own make clean && make.
+
+Parallelism cap rationale: the c64-test-harness allocates VICE ports
+from a 10-slot pool, so we cap at 5 to leave half the pool free for
+other agents that may be running concurrently. Raising the cap past 10
+causes port-allocation collisions; past ~8 the wall-clock win gets
+eaten by sporadic "Main menu did not appear" timeouts as too many
+VICE instances compete for CPU during boot.
 """
 
 import os
 import subprocess
 import sys
+import time
 
 TESTS = [
     ("session",    ["tools/test_session.py", "--seed", "51820", "--verbose"]),
@@ -27,6 +37,48 @@ TESTS = [
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 
+# Max concurrent VICE instances from this runner. The harness port pool
+# holds 10 slots; keep headroom for concurrent agents.
+MAX_PARALLEL = 5
+
+# Seconds between launches even when under the concurrency cap. Lets
+# the first VICE instance get past its initial port bind + LOAD + RUN
+# burst before the next one starts competing for CPU.
+STAGGER_SECONDS = 2.0
+
+# Poll interval while waiting for a slot to free up.
+POLL_SECONDS = 1.0
+
+# Per-suite subprocess timeout (seconds).
+SUITE_TIMEOUT = 1800
+
+
+def launch(name, cmd, env):
+    p = subprocess.Popen(
+        ["python3"] + cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=env,
+    )
+    print(f"  → launch {name:15s} (PID {p.pid})")
+    return p
+
+
+def reap(running, results):
+    """Move any finished processes out of `running` into `results`."""
+    still_running = []
+    for name, proc, started in running:
+        rc = proc.poll()
+        if rc is None:
+            still_running.append((name, proc, started))
+        else:
+            out = proc.communicate(timeout=5)[0].decode(errors="replace")
+            elapsed = time.monotonic() - started
+            results[name] = (rc, out)
+            status = "PASS" if rc == 0 else "FAIL"
+            print(f"  ← {status:4s} {name:15s}  ({elapsed:.0f}s)")
+    return still_running
+
 
 def main():
     os.chdir(PROJECT_ROOT)
@@ -40,25 +92,32 @@ def main():
         sys.exit(1)
     print("Build OK\n")
 
-    # Set env var so test scripts skip their own build
     env = os.environ.copy()
     env["C64_SKIP_BUILD"] = "1"
 
-    procs = []
-    for name, cmd in TESTS:
-        p = subprocess.Popen(
-            ["python3"] + cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            env=env,
-        )
-        procs.append((name, p))
-        print(f"Launched {name} (PID {p.pid})")
+    print(f"Running {len(TESTS)} suites  "
+          f"(max {MAX_PARALLEL} concurrent, {STAGGER_SECONDS:.0f}s stagger)\n")
 
+    pending = list(TESTS)
+    running = []
     results = {}
-    for name, p in procs:
-        out = p.communicate(timeout=600)[0].decode()
-        results[name] = (p.returncode, out)
+
+    while pending or running:
+        running = reap(running, results)
+        while pending and len(running) < MAX_PARALLEL:
+            name, cmd = pending.pop(0)
+            running.append((name, launch(name, cmd, env), time.monotonic()))
+            time.sleep(STAGGER_SECONDS)
+        if running:
+            time.sleep(POLL_SECONDS)
+
+    # Hard timeout safety-net for any straggler that somehow deadlocked
+    # (shouldn't fire in practice — reap() completes processes as they
+    # exit — but bounds total wall-clock if a test hangs).
+    start = time.monotonic()
+    while running and time.monotonic() - start < SUITE_TIMEOUT:
+        running = reap(running, results)
+        time.sleep(POLL_SECONDS)
 
     print("\n" + "=" * 70)
     all_ok = True
@@ -67,7 +126,8 @@ def main():
         pid_line = [l for l in lines if "VICE PID=" in l]
         pid_info = pid_line[0].strip() if pid_line else "no PID info"
         result_line = [l for l in lines if "Results:" in l or "All tests passed" in l]
-        summary = result_line[-1].strip() if result_line else (lines[-1].strip() if lines else "(no output)")
+        summary = (result_line[-1].strip() if result_line
+                   else (lines[-1].strip() if lines else "(no output)"))
         status = "PASS" if rc == 0 else "FAIL"
         if rc != 0:
             all_ok = False
