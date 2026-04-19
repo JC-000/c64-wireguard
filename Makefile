@@ -97,6 +97,13 @@ ca65-clean:
 
 CA65_MODULE_SRCS = $(SRC_DIR)/crypto/word32.s \
                    $(SRC_DIR)/crypto/entropy.s \
+                   $(SRC_DIR)/crypto/blake2s.s \
+                   $(SRC_DIR)/crypto/blake2s_kdf.s \
+                   $(SRC_DIR)/crypto/chacha20.s \
+                   $(SRC_DIR)/crypto/poly1305.s \
+                   $(SRC_DIR)/crypto/aead.s \
+                   $(SRC_DIR)/crypto/fe25519.s \
+                   $(SRC_DIR)/crypto/x25519.s \
                    $(SRC_DIR)/wg/timer.s \
                    $(SRC_DIR)/wg/tai64n.s \
                    $(SRC_DIR)/wg/cookie.s \
