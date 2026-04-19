@@ -1,4 +1,3 @@
-ACME = acme
 CA65 = ca65
 LD65 = ld65
 VICE = x64sc
@@ -9,23 +8,14 @@ IP65_BUILD = ip65-build
 IP65_DIR   = ip65
 CFG_DIR    = cfg
 
-# ACME (current / default) build output
 PRG     = $(BUILD_DIR)/wireguard.prg
 LABELS  = $(BUILD_DIR)/labels.txt
+MAP     = $(BUILD_DIR)/wireguard.map
 IP65_BIN = $(IP65_BUILD)/ip65-c64.bin
-
-# ca65 (Phase 1+ scaffolding) build output — separate name so it can
-# coexist with the ACME PRG during the dual-build period.
-CA65_PRG    = $(BUILD_DIR)/wireguard-ca65.prg
-CA65_LABELS = $(BUILD_DIR)/labels-ca65.txt
-CA65_MAP    = $(BUILD_DIR)/wireguard-ca65.map
-CA65_CFG    = $(CFG_DIR)/c64-wireguard-ip65.cfg
+CA65_CFG = $(CFG_DIR)/c64-wireguard-ip65.cfg
 
 CA65FLAGS = -I $(SRC_DIR) -I $(SRC_DIR)/net/ip65 --debug-info
-LD65FLAGS = -C $(CA65_CFG) -Ln $(CA65_LABELS) -m $(CA65_MAP)
-
-# ACME sources (current build)
-ASM_SRCS = $(wildcard $(SRC_DIR)/*.asm)
+LD65FLAGS = -C $(CA65_CFG) -Ln $(LABELS) -m $(MAP)
 
 # Full ca65 source set — all modules linked into the final PRG.
 CA65_SRCS = $(SRC_DIR)/loadaddr.s \
@@ -55,25 +45,18 @@ CA65_SRCS = $(SRC_DIR)/loadaddr.s \
             $(SRC_DIR)/net/ip65/ip65_blob.s
 CA65_OBJS = $(patsubst $(SRC_DIR)/%.s,$(BUILD_DIR)/%.o,$(CA65_SRCS))
 
-.PHONY: all clean run ip65-libs ca65-build ca65-clean ca65-run
+.PHONY: all clean run ip65-libs
 
-# Default build is ca65 (Phase 6 onwards). `make` produces
-# build/wireguard.prg + build/labels.txt via the ca65/ld65 pipeline.
-# The legacy ACME recipe is retained as `make acme-build` for emergency
-# fallback only; Phase 6 cleanup deletes the .asm sources after the
-# final v2.0.0-ca65 tag.
+# `make` produces build/wireguard.prg + build/labels.txt via ca65/ld65.
+# The legacy ACME pipeline was retired after Phase 6 (see git log for
+# the migration history).
 all: $(PRG)
 
-$(PRG): $(CA65_OBJS) | $(BUILD_DIR)
-	$(LD65) -C $(CA65_CFG) -Ln $(LABELS) -m $(CA65_MAP) -o $@ $(CA65_OBJS)
+$(PRG): $(CA65_OBJS) $(IP65_BIN) | $(BUILD_DIR)
+	$(LD65) $(LD65FLAGS) -o $@ $(CA65_OBJS)
+	# Rewrite ca65 label format `al XXXXXX .name` -> VICE format
+	# `al C:XXXX .name` so c64-test-harness Labels.from_file() can parse.
 	sed -i 's/^al 00\([0-9a-fA-F]\{4\}\) /al C:\1 /' $(LABELS)
-
-# Emergency fallback: build via ACME. Kept until Phase 6 cleanup removes
-# the .asm files and this target.
-.PHONY: acme-build
-acme-build: $(ASM_SRCS) $(IP65_BIN) | $(BUILD_DIR)
-	cd $(SRC_DIR) && $(ACME) -f cbm -o ../$(BUILD_DIR)/wireguard-acme.prg \
-	    --vicelabels ../$(BUILD_DIR)/labels-acme.txt main.asm
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -93,70 +76,12 @@ run: $(PRG)
 	$(VICE) -autostart $(PRG)
 
 clean:
-	rm -f $(BUILD_DIR)/wireguard.prg $(BUILD_DIR)/labels.txt $(BUILD_DIR)/*.map
-	rm -f $(BUILD_DIR)/wireguard-acme.prg $(BUILD_DIR)/labels-acme.txt
-	rm -f $(BUILD_DIR)/wireguard-ca65.prg $(BUILD_DIR)/labels-ca65.txt
+	rm -f $(PRG) $(LABELS) $(MAP)
 	rm -rf $(BUILD_DIR)/net $(BUILD_DIR)/crypto $(BUILD_DIR)/wg
 	rm -f $(BUILD_DIR)/*.o
 	rm -f $(IP65_BUILD)/ip65_stub.o $(IP65_BUILD)/ip65-c64.bin $(IP65_BUILD)/ip65-c64.map
-
-# =============================================================================
-# Phase 1: ca65 scaffolding build (dual-build alongside ACME)
-# =============================================================================
-
-ca65-build: $(CA65_PRG)
-
-$(CA65_PRG): $(CA65_OBJS) $(IP65_BIN) | $(BUILD_DIR)
-	$(LD65) $(LD65FLAGS) -o $@ $(CA65_OBJS)
-	# Rewrite ca65 label format `al XXXXXX .name` -> VICE format
-	# `al C:XXXX .name` so c64-test-harness Labels.from_file() can parse.
-	sed -i 's/^al 00\([0-9a-fA-F]\{4\}\) /al C:\1 /' $(CA65_LABELS)
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.s $(IP65_BIN) | $(BUILD_DIR)
 	mkdir -p $(dir $@)
 	$(CA65) $(CA65FLAGS) -o $@ $<
 
-ca65-run: $(CA65_PRG)
-	$(VICE) -autostart $(CA65_PRG)
-
-ca65-clean:
-	rm -f $(CA65_PRG) $(CA65_LABELS) $(CA65_MAP)
-	rm -rf $(BUILD_DIR)/net $(BUILD_DIR)/crypto $(BUILD_DIR)/wg
-	rm -f $(BUILD_DIR)/*.o
-
-# =============================================================================
-# Phase 2+: compile-check for migrated modules (syntax validation).
-#
-# These targets build each migrated .s to a .o. They do NOT link the
-# modules into ca65-build (the full link pulls in all modules at Phase 3+).
-# `make ca65-modules-check` verifies that every module migrated so far
-# still assembles cleanly under ca65 after unrelated edits.
-# =============================================================================
-
-CA65_MODULE_SRCS = $(SRC_DIR)/crypto/word32.s \
-                   $(SRC_DIR)/crypto/entropy.s \
-                   $(SRC_DIR)/crypto/blake2s.s \
-                   $(SRC_DIR)/crypto/blake2s_kdf.s \
-                   $(SRC_DIR)/crypto/chacha20.s \
-                   $(SRC_DIR)/crypto/poly1305.s \
-                   $(SRC_DIR)/crypto/aead.s \
-                   $(SRC_DIR)/crypto/fe25519.s \
-                   $(SRC_DIR)/crypto/x25519.s \
-                   $(SRC_DIR)/wg/timer.s \
-                   $(SRC_DIR)/wg/tai64n.s \
-                   $(SRC_DIR)/wg/cookie.s \
-                   $(SRC_DIR)/wg/config.s \
-                   $(SRC_DIR)/wg/data.s \
-                   $(SRC_DIR)/wg/strings.s \
-                   $(SRC_DIR)/wg/handshake.s \
-                   $(SRC_DIR)/wg/transport.s \
-                   $(SRC_DIR)/wg/session.s \
-                   $(SRC_DIR)/wg/ip_build.s \
-                   $(SRC_DIR)/wg/disk_config.s \
-                   $(SRC_DIR)/net/ip65/net.s
-
-CA65_MODULE_OBJS = $(patsubst $(SRC_DIR)/%.s,$(BUILD_DIR)/%.o,$(CA65_MODULE_SRCS))
-
-.PHONY: ca65-modules-check
-ca65-modules-check: $(CA65_MODULE_OBJS)
-	@echo "Phase 2 modules compile-clean: $(words $(CA65_MODULE_SRCS)) files."

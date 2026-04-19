@@ -25,8 +25,7 @@ WireGuard Noise protocol implementation for the Commodore 64, written in 6502 as
 ## Building
 
 Requires:
-- [ACME](https://sourceforge.net/projects/acme-crossass/) cross-assembler
-- [cc65](https://cc65.github.io/) toolchain (ca65 + ld65) — for building the ip65 binary blob
+- [cc65](https://cc65.github.io/) toolchain (ca65 + ld65) — assembles WG and the ip65 binary blob
 - [ip65](https://github.com/cc65/ip65) source tree — symlinked at `ip65/`
 
 ```bash
@@ -34,6 +33,8 @@ make            # build ip65 blob + build/wireguard.prg + build/labels.txt
 make run        # build and launch in VICE (x64sc)
 make clean
 ```
+
+The project was originally written in ACME syntax; a migration to ca65/ld65 (see git log for phases 0-6) aligned the crypto public ABI with the sibling libraries `c64-x25519` and `c64-ChaCha20-Poly1305` so those libraries can be dropped in later as a link-line-only change. The networking layer sits behind `src/net_abi.inc`, mirroring the `c64-https` pattern — the `c64-https` ip65/UCI backends (proven on Ultimate 64 at 48 MHz / 1 MHz and on VICE) can be swapped in the same way.
 
 ## Memory Layout
 
