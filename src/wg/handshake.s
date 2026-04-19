@@ -55,9 +55,9 @@
 .import blake2s_init
 .import blake2s_update
 .import blake2s_final
-.import blake2s_kdf_1
-.import blake2s_kdf_2
-.import blake2s_kdf_3
+.import kdf_1
+.import kdf_2
+.import kdf_3
 
 ; X25519
 .import x25519_clamp
@@ -383,7 +383,7 @@ hs_create_initiation:
         sta kdf_input_ptr+1
         lda #32
         sta kdf_input_len
-        jsr blake2s_kdf_1
+        jsr kdf_1
 
         ; Update C from kdf_out1
         ldx #31
@@ -427,7 +427,7 @@ hs_create_initiation:
         sta kdf_input_ptr+1
         lda #32
         sta kdf_input_len
-        jsr blake2s_kdf_2
+        jsr kdf_2
 
         ; C = kdf_out1
         ldx #31
@@ -533,7 +533,7 @@ hs_create_initiation:
         sta kdf_input_ptr+1
         lda #32
         sta kdf_input_len
-        jsr blake2s_kdf_2
+        jsr kdf_2
 
         ldx #31
 @upd_c3:
@@ -707,7 +707,7 @@ hs_process_response:
         sta kdf_input_ptr+1
         lda #32
         sta kdf_input_len
-        jsr blake2s_kdf_1
+        jsr kdf_1
 
         ldx #31
 @upd_c1:
@@ -744,7 +744,7 @@ hs_process_response:
         sta kdf_input_ptr+1
         lda #32
         sta kdf_input_len
-        jsr blake2s_kdf_1
+        jsr kdf_1
 
         ldx #31
 @upd_c2:
@@ -781,7 +781,7 @@ hs_process_response:
         sta kdf_input_ptr+1
         lda #32
         sta kdf_input_len
-        jsr blake2s_kdf_1
+        jsr kdf_1
 
         ldx #31
 @upd_c3:
@@ -806,7 +806,7 @@ hs_psk_mix:
         sta kdf_input_ptr+1
         lda #32
         sta kdf_input_len
-        jsr blake2s_kdf_3
+        jsr kdf_3
 
         ldx #31
 @upd_c4:
@@ -891,7 +891,7 @@ hs_psk_mix:
         sta kdf_input_ptr+1
         lda #0
         sta kdf_input_len
-        jsr blake2s_kdf_2
+        jsr kdf_2
 
         ; Transport send key = kdf_out1, recv key = kdf_out2
         ldx #31

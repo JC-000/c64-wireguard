@@ -27,9 +27,31 @@ LD65FLAGS = -C $(CA65_CFG) -Ln $(CA65_LABELS) -m $(CA65_MAP)
 # ACME sources (current build)
 ASM_SRCS = $(wildcard $(SRC_DIR)/*.asm)
 
-# ca65 sources for Phase 1 scaffolding — expand in subsequent phases.
+# Full ca65 source set — all modules linked into the final PRG.
 CA65_SRCS = $(SRC_DIR)/loadaddr.s \
-            $(SRC_DIR)/main.s \
+            $(SRC_DIR)/boot.s \
+            $(SRC_DIR)/exports.s \
+            $(SRC_DIR)/crypto/word32.s \
+            $(SRC_DIR)/crypto/entropy.s \
+            $(SRC_DIR)/crypto/blake2s.s \
+            $(SRC_DIR)/crypto/blake2s_kdf.s \
+            $(SRC_DIR)/crypto/chacha20.s \
+            $(SRC_DIR)/crypto/poly1305.s \
+            $(SRC_DIR)/crypto/aead.s \
+            $(SRC_DIR)/crypto/fe25519.s \
+            $(SRC_DIR)/crypto/x25519.s \
+            $(SRC_DIR)/wg/timer.s \
+            $(SRC_DIR)/wg/tai64n.s \
+            $(SRC_DIR)/wg/cookie.s \
+            $(SRC_DIR)/wg/config.s \
+            $(SRC_DIR)/wg/data.s \
+            $(SRC_DIR)/wg/strings.s \
+            $(SRC_DIR)/wg/handshake.s \
+            $(SRC_DIR)/wg/transport.s \
+            $(SRC_DIR)/wg/session.s \
+            $(SRC_DIR)/wg/ip_build.s \
+            $(SRC_DIR)/wg/disk_config.s \
+            $(SRC_DIR)/net/ip65/net.s \
             $(SRC_DIR)/net/ip65/ip65_blob.s
 CA65_OBJS = $(patsubst $(SRC_DIR)/%.s,$(BUILD_DIR)/%.o,$(CA65_SRCS))
 

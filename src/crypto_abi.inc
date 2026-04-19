@@ -55,9 +55,9 @@
 .import blake2s_final
 .import blake2s_hash_oneshot
 .import hmac_blake2s
-.import blake2s_kdf_1
-.import blake2s_kdf_2
-.import blake2s_kdf_3
+.import kdf_1
+.import kdf_2
+.import kdf_3
 
 ; --- One-off helpers that are NOT part of any sibling-lib ABI but are
 ;     currently WG-internal. Group separately so future ABI-drift

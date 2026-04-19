@@ -28,8 +28,8 @@
 
 ; --- External symbols ---
 ; SESSION_ACTIVE, SESSION_IDLE : session state constants (src/session.asm)
-.import SESSION_ACTIVE
-.import SESSION_IDLE
+.importzp SESSION_ACTIVE
+.importzp SESSION_IDLE
 ; wg_state, rekey_pending, session_start_jiffy, last_send_jiffy,
 ; tp_payload_len : mutable globals (src/data.asm)
 .import wg_state

@@ -100,15 +100,15 @@ def bench_fe_mul(transport, labels, a, b):
     """Time a single fe_mul call in jiffy ticks."""
     write_bytes(transport, labels["fe_tmp1"], int_to_le32(a))
     write_bytes(transport, labels["fe_tmp2"], int_to_le32(b))
-    write_bytes(transport, labels["fe_src1"],
+    write_bytes(transport, labels["fe25519_src1"],
                 bytes([labels["fe_tmp1"] & 0xFF, (labels["fe_tmp1"] >> 8) & 0xFF]))
-    write_bytes(transport, labels["fe_src2"],
+    write_bytes(transport, labels["fe25519_src2"],
                 bytes([labels["fe_tmp2"] & 0xFF, (labels["fe_tmp2"] >> 8) & 0xFF]))
-    write_bytes(transport, labels["fe_dst"],
+    write_bytes(transport, labels["fe25519_dst"],
                 bytes([labels["fe_tmp3"] & 0xFF, (labels["fe_tmp3"] >> 8) & 0xFF]))
 
     # Load and run timer subroutine for fe_mul
-    code = build_timer_subroutine(labels["fe_mul"])
+    code = build_timer_subroutine(labels["fe25519_mul"])
     load_code(transport, TIMER_ADDR, code)
     jsr(transport, TIMER_ADDR, timeout=120.0)
     return read_result_ticks(transport)
@@ -117,12 +117,12 @@ def bench_fe_mul(transport, labels, a, b):
 def bench_fe_sqr(transport, labels, a):
     """Time a single fe_sqr call in jiffy ticks."""
     write_bytes(transport, labels["fe_tmp1"], int_to_le32(a))
-    write_bytes(transport, labels["fe_src1"],
+    write_bytes(transport, labels["fe25519_src1"],
                 bytes([labels["fe_tmp1"] & 0xFF, (labels["fe_tmp1"] >> 8) & 0xFF]))
-    write_bytes(transport, labels["fe_dst"],
+    write_bytes(transport, labels["fe25519_dst"],
                 bytes([labels["fe_tmp3"] & 0xFF, (labels["fe_tmp3"] >> 8) & 0xFF]))
 
-    code = build_timer_subroutine(labels["fe_sqr"])
+    code = build_timer_subroutine(labels["fe25519_sqr"])
     load_code(transport, TIMER_ADDR, code)
     jsr(transport, TIMER_ADDR, timeout=120.0)
     return read_result_ticks(transport)
@@ -154,8 +154,8 @@ def main():
             print(f"FATAL: label '{name}' not found in {LABELS_PATH}")
             sys.exit(1)
 
-    print(f"fe_mul = ${labels['fe_mul']:04X}")
-    print(f"fe_sqr = ${labels['fe_sqr']:04X}")
+    print(f"fe_mul = ${labels['fe25519_mul']:04X}")
+    print(f"fe_sqr = ${labels['fe25519_sqr']:04X}")
 
     # Launch VICE
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,

@@ -30,9 +30,11 @@ SESSION_ACTIVE  = 2
 .export endpoint_update
 
 ; ---- Exported session-state constants (referenced by timer.s, etc.) --------
-.export SESSION_IDLE
-.export SESSION_HS_SENT
-.export SESSION_ACTIVE
+; Using .exportzp because ca65 treats small numeric equates as zeropage-sized
+; by default, and importers use them with #<immediate addressing.
+.exportzp SESSION_IDLE
+.exportzp SESSION_HS_SENT
+.exportzp SESSION_ACTIVE
 
 ; ---- External subroutines ---------------------------------------------------
 ; Config / entropy / timestamp

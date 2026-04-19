@@ -6,9 +6,9 @@
 ;         opad = key XOR 0x5c (padded to 64 bytes)
 ;
 ; WireGuard KDF (HKDF-like):
-;   blake2s_kdf_1(C, input) -> T1
-;   blake2s_kdf_2(C, input) -> T1, T2
-;   blake2s_kdf_3(C, input) -> T1, T2, T3
+;   kdf_1(C, input) -> T1
+;   kdf_2(C, input) -> T1, T2
+;   kdf_3(C, input) -> T1, T2, T3
 ;
 ; where:
 ;   PRK = HMAC(C, input)
@@ -20,9 +20,9 @@
 .include "constants.inc"
 
 .export hmac_blake2s
-.export blake2s_kdf_1
-.export blake2s_kdf_2
-.export blake2s_kdf_3
+.export kdf_1
+.export kdf_2
+.export kdf_3
 
 .import blake2s_init
 .import blake2s_update
@@ -156,7 +156,7 @@ hmac_blake2s:
         rts
 
 ; =============================================================================
-; blake2s_kdf_1 - WireGuard KDF with 1 output
+; kdf_1 - WireGuard KDF with 1 output
 ;
 ; Input: kdf_input_ptr/kdf_input_len = input data
 ;        b2s_hash (on entry) = chaining key C (32 bytes)
@@ -179,12 +179,12 @@ kdf_set_hmac_key_prk:
         rts
 
 ; =============================================================================
-; blake2s_kdf_1 - KDF producing 1 output
+; kdf_1 - KDF producing 1 output
 ; Input: kdf_prk = chaining key C (32 bytes)
 ;        kdf_input_ptr/kdf_input_len = input
 ; Output: kdf_out1 = T1, kdf_prk = new PRK
 ; =============================================================================
-blake2s_kdf_1:
+kdf_1:
         ; PRK = HMAC(C, input)
         jsr kdf_set_hmac_key_prk
         lda kdf_input_ptr
@@ -222,13 +222,13 @@ blake2s_kdf_1:
         rts
 
 ; =============================================================================
-; blake2s_kdf_2 - KDF producing 2 outputs
-; Input: same as blake2s_kdf_1
+; kdf_2 - KDF producing 2 outputs
+; Input: same as kdf_1
 ; Output: kdf_out1 = T1, kdf_out2 = T2, kdf_prk = new PRK
 ; =============================================================================
-blake2s_kdf_2:
+kdf_2:
         ; get T1 first
-        jsr blake2s_kdf_1
+        jsr kdf_1
 
         ; T2 = HMAC(PRK, T1 || 0x02)
         ; Build T1 || 0x02 in kdf_hmac_buf (33 bytes)
@@ -258,13 +258,13 @@ blake2s_kdf_2:
         rts
 
 ; =============================================================================
-; blake2s_kdf_3 - KDF producing 3 outputs
-; Input: same as blake2s_kdf_1
+; kdf_3 - KDF producing 3 outputs
+; Input: same as kdf_1
 ; Output: kdf_out1 = T1, kdf_out2 = T2, kdf_out3 = T3, kdf_prk = new PRK
 ; =============================================================================
-blake2s_kdf_3:
+kdf_3:
         ; get T1 and T2 first
-        jsr blake2s_kdf_2
+        jsr kdf_2
 
         ; T3 = HMAC(PRK, T2 || 0x03)
         ldx #31
