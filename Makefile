@@ -107,7 +107,14 @@ CA65_MODULE_SRCS = $(SRC_DIR)/crypto/word32.s \
                    $(SRC_DIR)/wg/timer.s \
                    $(SRC_DIR)/wg/tai64n.s \
                    $(SRC_DIR)/wg/cookie.s \
-                   $(SRC_DIR)/wg/config.s
+                   $(SRC_DIR)/wg/config.s \
+                   $(SRC_DIR)/wg/data.s \
+                   $(SRC_DIR)/wg/strings.s \
+                   $(SRC_DIR)/wg/handshake.s \
+                   $(SRC_DIR)/wg/transport.s \
+                   $(SRC_DIR)/wg/session.s \
+                   $(SRC_DIR)/wg/ip_build.s \
+                   $(SRC_DIR)/wg/disk_config.s
 
 CA65_MODULE_OBJS = $(patsubst $(SRC_DIR)/%.s,$(BUILD_DIR)/%.o,$(CA65_MODULE_SRCS))
 

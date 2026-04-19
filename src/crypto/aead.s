@@ -23,15 +23,16 @@
 .export aead_encrypt
 .export aead_decrypt
 
-; Configuration buffers (callers write these before invoking aead_encrypt/decrypt)
-.export aead_key
-.export aead_nonce
-.export aead_aad_ptr
-.export aead_aad_len
-.export aead_data_ptr
-.export aead_data_len
-.export aead_tag
-.export aead_scratch
+; Configuration buffers (defined in data module alongside all other WG
+; mutable state; imported here so aead code can reference them).
+.import aead_key
+.import aead_nonce
+.import aead_aad_ptr
+.import aead_aad_len
+.import aead_data_ptr
+.import aead_data_len
+.import aead_tag
+.import aead_scratch
 
 ; ChaCha20 primitives
 .import chacha20_init
@@ -374,26 +375,7 @@ aead_verify_tag:
         lda poly_carry          ; 0 = match, nonzero = mismatch
         rts
 
-; =============================================================================
-; Mutable state buffers (callers configure these before aead_encrypt/decrypt)
-; =============================================================================
-.segment "CRYPTO_BSS"
-
-aead_key:
-        .res 32, 0
-aead_nonce:
-        .res 12, 0
-aead_aad_ptr:
-        .res 2, 0
-aead_aad_len:
-        .res 1, 0
-aead_data_ptr:
-        .res 2, 0
-aead_data_len:
-        .res 2, 0               ; 16-bit data length for MTU up to 1500
-aead_tag:
-        .res 16, 0
-
-; Poly1305 padding/length block scratch (16 bytes)
-aead_scratch:
-        .res 16, 0
+; Mutable state buffers (aead_key/nonce/aad_ptr/aad_len/data_ptr/
+; data_len/tag/scratch) are defined in the shared data module alongside
+; all other WG mutable state — see src/wg/data.s (Phase 4 migration of
+; src/data.asm).
