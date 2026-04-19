@@ -114,13 +114,10 @@ blake2s_rounds     = 10
 ; --- General constants ---
 max_input_len   = 255
 
-; --- ip65 ZP overlap zone ---
-ip65_zp_start   = $02
-ip65_zp_end     = $1b
-ip65_zp_size    = ip65_zp_end - ip65_zp_start + 1
-
-; --- ip65 jump table and variable pointers are defined in
-;     src/net/ip65/ip65_symbols.inc ---
+; --- ip65 ZP overlap zone and jump-table equates live in
+;     src/net/ip65/ip65_symbols.inc. Do NOT define them here too — ca65
+;     rejects duplicate equates. Modules that need those symbols should
+;     .include "net/ip65/ip65_symbols.inc" (in addition to constants.inc).
 
 ; --- WireGuard protocol constants ---
 wg_default_port     = 51820

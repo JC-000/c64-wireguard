@@ -114,7 +114,8 @@ CA65_MODULE_SRCS = $(SRC_DIR)/crypto/word32.s \
                    $(SRC_DIR)/wg/transport.s \
                    $(SRC_DIR)/wg/session.s \
                    $(SRC_DIR)/wg/ip_build.s \
-                   $(SRC_DIR)/wg/disk_config.s
+                   $(SRC_DIR)/wg/disk_config.s \
+                   $(SRC_DIR)/net/ip65/net.s
 
 CA65_MODULE_OBJS = $(patsubst $(SRC_DIR)/%.s,$(BUILD_DIR)/%.o,$(CA65_MODULE_SRCS))
 
