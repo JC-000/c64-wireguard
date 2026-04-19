@@ -83,5 +83,27 @@ ca65-run: $(CA65_PRG)
 
 ca65-clean:
 	rm -f $(CA65_PRG) $(CA65_LABELS) $(CA65_MAP)
-	rm -rf $(BUILD_DIR)/net
+	rm -rf $(BUILD_DIR)/net $(BUILD_DIR)/crypto $(BUILD_DIR)/wg
 	rm -f $(BUILD_DIR)/*.o
+
+# =============================================================================
+# Phase 2+: compile-check for migrated modules (syntax validation).
+#
+# These targets build each migrated .s to a .o. They do NOT link the
+# modules into ca65-build (the full link pulls in all modules at Phase 3+).
+# `make ca65-modules-check` verifies that every module migrated so far
+# still assembles cleanly under ca65 after unrelated edits.
+# =============================================================================
+
+CA65_MODULE_SRCS = $(SRC_DIR)/crypto/word32.s \
+                   $(SRC_DIR)/crypto/entropy.s \
+                   $(SRC_DIR)/wg/timer.s \
+                   $(SRC_DIR)/wg/tai64n.s \
+                   $(SRC_DIR)/wg/cookie.s \
+                   $(SRC_DIR)/wg/config.s
+
+CA65_MODULE_OBJS = $(patsubst $(SRC_DIR)/%.s,$(BUILD_DIR)/%.o,$(CA65_MODULE_SRCS))
+
+.PHONY: ca65-modules-check
+ca65-modules-check: $(CA65_MODULE_OBJS)
+	@echo "Phase 2 modules compile-clean: $(words $(CA65_MODULE_SRCS)) files."
