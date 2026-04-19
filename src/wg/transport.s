@@ -1,5 +1,5 @@
 ; =============================================================================
-; transport.asm - WireGuard Type 4 transport data packets
+; transport.s - WireGuard Type 4 transport data packets
 ;
 ; Encrypt outgoing payloads and decrypt incoming payloads using transport
 ; keys derived during Noise handshake.
@@ -14,6 +14,71 @@
 ; AEAD AAD: empty (0 bytes) for transport
 ; AEAD key: hs_transport_send (encrypt) or hs_transport_recv (decrypt)
 ; =============================================================================
+
+.include "constants.inc"
+
+; ---- Public entry points -----------------------------------------------------
+.export transport_init
+.export counter_inc64
+.export transport_build_nonce
+.export transport_encrypt
+.export transport_decrypt
+.export transport_send
+
+; ---- External symbols (defined in other modules) ----------------------------
+; Subroutines
+.import aead_encrypt
+.import aead_decrypt
+.import net_udp_send
+
+; AEAD state
+.import aead_key
+.import aead_nonce
+.import aead_aad_len
+.import aead_aad_ptr
+.import aead_data_ptr
+.import aead_data_len
+.import aead_tag
+
+; Poly1305 tag output
+.import poly1305_tag
+
+; Handshake buffers
+.import hs_resp_packet
+.import hs_transport_send
+.import hs_transport_recv
+
+; UDP buffers
+.import udp_recv_buf
+.import udp_recv_len
+.import udp_send_len_local
+
+; Transport state (data.asm)
+.import tp_send_counter
+.import tp_recv_counter
+.import tp_recv_counter_tmp
+.import tp_peer_recv_idx
+.import tp_payload_ptr
+.import tp_payload_len
+.import tp_packet
+.import tp_packet_len
+.import tp_encrypt_error
+
+; Replay window state (data.asm)
+.import rw_bitmap
+.import rw_counter_max
+.import rw_bit_mask
+.import rw_shift_lo
+.import rw_shift_hi
+.import rw_new_counter
+
+; Rekey flag
+.import rekey_pending
+
+; =============================================================================
+; Code
+; =============================================================================
+.segment "APP_CODE"
 
 ; =============================================================================
 ; transport_init - Initialize transport state from handshake

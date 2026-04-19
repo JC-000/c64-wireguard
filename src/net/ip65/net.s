@@ -1,5 +1,6 @@
 ; =============================================================================
-; net.asm - ip65 network wrapper with zero page time-sharing
+; net/ip65/net.s - ip65 network wrapper with zero page time-sharing
+;                  (ca65 port of src/net.asm)
 ;
 ; All ip65 calls go through this wrapper. Before each call:
 ;   1. Save crypto ZP ($02-$1B) to zp_save_buf
@@ -9,7 +10,42 @@
 ; The UDP receive callback fires DURING ip65_process, while ip65's ZP is
 ; active. The callback must NOT touch crypto state — it only copies received
 ; data into udp_recv_buf for later processing by the main loop.
+;
+; This module ships in LOADER (CODE segment) — it is called during boot
+; before crypto goes live, and by the main loop from then on.
 ; =============================================================================
+
+.include "constants.inc"
+.include "net/ip65/ip65_symbols.inc"
+
+; ---- Public entry points -----------------------------------------------------
+.export net_init
+.export net_dhcp
+.export net_poll
+.export net_udp_listen
+.export net_udp_send
+.export net_udp_recv_cb
+.export net_print_ip
+.export net_save_zp
+.export net_restore_zp
+
+; ---- Public data labels (defined in this module) -----------------------------
+.export net_send_ptr
+.export udp_send_len_local
+
+; ---- External data symbols (defined in wg/data.s) ----------------------------
+.import udp_recv_buf
+.import udp_recv_len
+.import udp_recv_ready
+.import udp_recv_src_ip
+.import udp_recv_src_port
+.import wg_local_port
+.import wg_peer_ip
+.import wg_peer_port
+.import zp_save_buf
+
+; =============================================================================
+.segment "CODE"
 
 ; =============================================================================
 ; net_init - initialize ip65 + ethernet (RR-Net CS8900a)
@@ -123,9 +159,9 @@ net_udp_recv_cb:
         sec
         sbc #8                  ; subtract UDP header
         sta udp_recv_len
-        bcs +
+        bcs :+
         dec udp_recv_len+1
-+
+:
         ; cap at 1500 bytes (our buffer size)
         lda udp_recv_len+1
         cmp #>(1500)            ; = $05
@@ -278,29 +314,31 @@ net_print_ip:
         ora #$30
         jsr chrout
         rts
-@pb_val: !byte 0
+@pb_val: .byte 0
 
 ; =============================================================================
 ; ZP save/restore — 26 bytes ($02-$1B)
 ; =============================================================================
 net_save_zp:
         ldx #ip65_zp_size - 1
--       lda ip65_zp_start,x
+:       lda ip65_zp_start,x
         sta zp_save_buf,x
         dex
-        bpl -
+        bpl :-
         rts
 
 net_restore_zp:
         ldx #ip65_zp_size - 1
--       lda zp_save_buf,x
+:       lda zp_save_buf,x
         sta ip65_zp_start,x
         dex
-        bpl -
+        bpl :-
         rts
 
 ; =============================================================================
 ; net module data
 ; =============================================================================
-net_send_ptr:       !word 0     ; pointer for udp_send wrapper
-udp_send_len_local: !word 0     ; length for udp_send wrapper
+.segment "BSS"
+
+net_send_ptr:       .res 2      ; pointer for udp_send wrapper
+udp_send_len_local: .res 2      ; length for udp_send wrapper

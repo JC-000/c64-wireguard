@@ -72,13 +72,13 @@ def rand_fe(rng):
 def set_fe_ptrs(transport, labels, src1=None, src2=None, dst=None):
     """Set fe_src1, fe_src2, fe_dst zero-page pointers."""
     if src1 is not None:
-        write_bytes(transport, labels["fe_src1"],
+        write_bytes(transport, labels["fe25519_src1"],
                     bytes([src1 & 0xFF, src1 >> 8]))
     if src2 is not None:
-        write_bytes(transport, labels["fe_src2"],
+        write_bytes(transport, labels["fe25519_src2"],
                     bytes([src2 & 0xFF, src2 >> 8]))
     if dst is not None:
-        write_bytes(transport, labels["fe_dst"],
+        write_bytes(transport, labels["fe25519_dst"],
                     bytes([dst & 0xFF, dst >> 8]))
 
 
@@ -100,7 +100,7 @@ def c64_fe_add(transport, labels, a, b):
                 src1=labels["fe_tmp1"],
                 src2=labels["fe_tmp2"],
                 dst=labels["fe_tmp3"])
-    jsr(transport, labels["fe_add"])
+    jsr(transport, labels["fe25519_add"])
     return read_fe(transport, labels["fe_tmp3"])
 
 
@@ -112,7 +112,7 @@ def c64_fe_sub(transport, labels, a, b):
                 src1=labels["fe_tmp1"],
                 src2=labels["fe_tmp2"],
                 dst=labels["fe_tmp3"])
-    jsr(transport, labels["fe_sub"])
+    jsr(transport, labels["fe25519_sub"])
     return read_fe(transport, labels["fe_tmp3"])
 
 
@@ -124,7 +124,7 @@ def c64_fe_mul(transport, labels, a, b):
                 src1=labels["fe_tmp1"],
                 src2=labels["fe_tmp2"],
                 dst=labels["fe_tmp3"])
-    jsr(transport, labels["fe_mul"], timeout=120.0)
+    jsr(transport, labels["fe25519_mul"], timeout=120.0)
     return read_fe(transport, labels["fe_tmp3"])
 
 
@@ -134,7 +134,7 @@ def c64_fe_sqr(transport, labels, a):
     set_fe_ptrs(transport, labels,
                 src1=labels["fe_tmp1"],
                 dst=labels["fe_tmp3"])
-    jsr(transport, labels["fe_sqr"], timeout=120.0)
+    jsr(transport, labels["fe25519_sqr"], timeout=120.0)
     return read_fe(transport, labels["fe_tmp3"])
 
 
@@ -145,7 +145,7 @@ def c64_fe_inv(transport, labels, a):
                 src1=labels["fe_tmp1"],
                 dst=labels["fe_tmp3"])
     # fe_inv takes ~253 squarings + 11 muls — very slow
-    jsr(transport, labels["fe_inv"], timeout=600.0)
+    jsr(transport, labels["fe25519_inv"], timeout=600.0)
     return read_fe(transport, labels["fe_tmp3"])
 
 
@@ -155,7 +155,7 @@ def c64_fe_mul_a24(transport, labels, a):
     set_fe_ptrs(transport, labels,
                 src1=labels["fe_tmp1"],
                 dst=labels["fe_tmp3"])
-    jsr(transport, labels["fe_mul_a24"], timeout=60.0)
+    jsr(transport, labels["fe25519_mul_a24"], timeout=60.0)
     return read_fe(transport, labels["fe_tmp3"])
 
 
@@ -165,7 +165,7 @@ def c64_fe_copy(transport, labels, a):
     set_fe_ptrs(transport, labels,
                 src1=labels["fe_tmp1"],
                 dst=labels["fe_tmp3"])
-    jsr(transport, labels["fe_copy"])
+    jsr(transport, labels["fe25519_copy"])
     return read_fe(transport, labels["fe_tmp3"])
 
 
@@ -174,7 +174,7 @@ def c64_fe_zero(transport, labels):
     # Write nonzero first to prove it gets zeroed
     write_fe(transport, labels["fe_tmp3"], P - 1)
     set_fe_ptrs(transport, labels, dst=labels["fe_tmp3"])
-    jsr(transport, labels["fe_zero"])
+    jsr(transport, labels["fe25519_zero"])
     return read_fe(transport, labels["fe_tmp3"])
 
 
@@ -182,7 +182,7 @@ def c64_fe_one(transport, labels):
     """Set a field element to 1 via fe_one."""
     write_fe(transport, labels["fe_tmp3"], P - 1)
     set_fe_ptrs(transport, labels, dst=labels["fe_tmp3"])
-    jsr(transport, labels["fe_one"])
+    jsr(transport, labels["fe25519_one"])
     return read_fe(transport, labels["fe_tmp3"])
 
 
@@ -415,7 +415,7 @@ def test_cswap(transport, labels, rng):
     #
     # Actually the easiest approach: write a 3-byte trampoline at cassette_buf
     # LDA #$00; JMP fe_cswap
-    cswap_addr = labels["fe_cswap"]
+    cswap_addr = labels["fe25519_cswap"]
     # Use input_buffer for the trampoline since jsr() uses cassette_buf ($0334)
     trampoline = labels["input_buffer"]
 
@@ -476,7 +476,7 @@ def test_reduce_final(transport, labels):
         raw = val.to_bytes(32, "little")
         write_bytes(transport, labels["fe_tmp3"], raw)
         set_fe_ptrs(transport, labels, dst=labels["fe_tmp3"])
-        jsr(transport, labels["fe_reduce_final"])
+        jsr(transport, labels["fe25519_reduce_final"])
         result = read_fe(transport, labels["fe_tmp3"])
 
         if result == expected:
@@ -582,10 +582,10 @@ def main():
     # Load labels
     labels = Labels.from_file(LABELS_PATH)
     required = [
-        "fe_src1", "fe_src2", "fe_dst",
-        "fe_copy", "fe_zero", "fe_one",
-        "fe_add", "fe_sub", "fe_mul", "fe_sqr", "fe_inv",
-        "fe_cswap", "fe_mul_a24", "fe_reduce_final",
+        "fe25519_src1", "fe25519_src2", "fe25519_dst",
+        "fe25519_copy", "fe25519_zero", "fe25519_one",
+        "fe25519_add", "fe25519_sub", "fe25519_mul", "fe25519_sqr", "fe25519_inv",
+        "fe25519_cswap", "fe25519_mul_a24", "fe25519_reduce_final",
         "fe_tmp1", "fe_tmp2", "fe_tmp3", "fe_tmp4",
         "fe_wide", "fe_p",
         "cassette_buf",

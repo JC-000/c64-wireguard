@@ -1,5 +1,5 @@
 ; =============================================================================
-; word32.asm - 32-bit word operations (little-endian)
+; word32.s - 32-bit word operations (little-endian)
 ;
 ; All operations use zero-page pointers:
 ;   w32_src1 / w32_src2 = source operands
@@ -7,6 +7,28 @@
 ;
 ; BLAKE2s uses little-endian words: byte[0] = LSB, byte[3] = MSB
 ; =============================================================================
+
+.include "constants.inc"
+
+.export add32
+.export add32_to_dst
+.export xor32
+.export xor32_in_place
+.export rotr32_16
+.export rotr32_8
+.export rotr32_12
+.export rotr32_4
+.export rotr32_7
+.export rotl32_1
+.export rotl32_8
+.export rotl32_4
+.export rotl32_12
+.export rotr32_1
+.export rotl32_7
+.export copy32
+.export zero32
+
+.segment "CRYPTO_CODE"
 
 ; =============================================================================
 ; add32 - 32-bit addition: (w32_dst) = (w32_src1) + (w32_src2)
@@ -290,12 +312,12 @@ rotl32_1:
         rol
         sta (w32_dst),y
         ; carry = old MSB, wraps to bit 0 of byte 0
-        bcc +
+        bcc :+
         ldy #0
         lda (w32_dst),y
         ora #$01
         sta (w32_dst),y
-+
+:
         rts
 
 ; =============================================================================
@@ -450,12 +472,12 @@ rotr32_1:
         ror
         sta (w32_dst),y
         ; carry = old LSB, wraps to bit 7 of byte 3
-        bcc +
+        bcc :+
         ldy #3
         lda (w32_dst),y
         ora #$80
         sta (w32_dst),y
-+
+:
         rts
 
 ; =============================================================================

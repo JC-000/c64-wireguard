@@ -1,5 +1,5 @@
 ; =============================================================================
-; blake2s.asm - BLAKE2s-256 hash function (RFC 7693)
+; blake2s.s - BLAKE2s-256 hash function (RFC 7693)
 ;
 ; Little-endian 32-bit words, 64-byte blocks, 10 rounds
 ; Supports both keyed and unkeyed modes
@@ -11,40 +11,112 @@
 ;   blake2s_final     - Finalize hash; output in b2s_hash
 ; =============================================================================
 
+.include "constants.inc"
+
+; --- Public entry points ---
+.export blake2s_init
+.export blake2s_update
+.export blake2s_final
+.export blake2s_hash_oneshot
+
+; --- Shared constant tables (kept exported; no sibling lib, but other WG
+;     modules may reference them in future) ---
+.export blake2s_iv
+.export blake2s_sigma
+
+; --- word32 primitives (now in src/crypto/word32.s) ---
+.import add32_to_dst
+.import xor32_in_place
+.import rotr32_16
+.import rotr32_12
+.import rotr32_8
+.import rotr32_7
+
+; --- External mutable state (defined in src/data.asm) ---
+.import b2s_h
+.import b2s_v
+.import b2s_block
+.import b2s_t
+.import b2s_t1
+.import b2s_f
+.import b2s_buf_len
+.import b2s_out_len
+.import b2s_hash
+.import input_buffer
+
+; =============================================================================
+; Constant tables (read-only)
+; =============================================================================
+.segment "CRYPTO_RODATA"
+
 ; --- BLAKE2s IV (RFC 7693 Section 2.6) ---
 ; SHA-256 fractional parts of square roots of first 8 primes
 blake2s_iv:
         ; IV[0] = 0x6A09E667 (little-endian: 67 E6 09 6A)
-        !byte $67, $e6, $09, $6a
+        .byte $67, $e6, $09, $6a
         ; IV[1] = 0xBB67AE85
-        !byte $85, $ae, $67, $bb
+        .byte $85, $ae, $67, $bb
         ; IV[2] = 0x3C6EF372
-        !byte $72, $f3, $6e, $3c
+        .byte $72, $f3, $6e, $3c
         ; IV[3] = 0xA54FF53A
-        !byte $3a, $f5, $4f, $a5
+        .byte $3a, $f5, $4f, $a5
         ; IV[4] = 0x510E527F
-        !byte $7f, $52, $0e, $51
+        .byte $7f, $52, $0e, $51
         ; IV[5] = 0x9B05688C
-        !byte $8c, $68, $05, $9b
+        .byte $8c, $68, $05, $9b
         ; IV[6] = 0x1F83D9AB
-        !byte $ab, $d9, $83, $1f
+        .byte $ab, $d9, $83, $1f
         ; IV[7] = 0x5BE0CD19
-        !byte $19, $cd, $e0, $5b
+        .byte $19, $cd, $e0, $5b
 
 ; --- BLAKE2s sigma permutation schedule (10 rounds x 16 entries) ---
 ; Each entry is an index 0-15 into the message block m[]
 blake2s_sigma:
         ;        0   1   2   3   4   5   6   7   8   9  10  11  12  13  14  15
-        !byte    0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15  ; round 0
-        !byte   14, 10,  4,  8,  9, 15, 13,  6,  1, 12,  0,  2, 11,  7,  5,  3  ; round 1
-        !byte   11,  8, 12,  0,  5,  2, 15, 13, 10, 14,  3,  6,  7,  1,  9,  4  ; round 2
-        !byte    7,  9,  3,  1, 13, 12, 11, 14,  2,  6,  5, 10,  4,  0, 15,  8  ; round 3
-        !byte    9,  0,  5,  7,  2,  4, 10, 15, 14,  1, 11, 12,  6,  8,  3, 13  ; round 4
-        !byte    2, 12,  6, 10,  0, 11,  8,  3,  4, 13,  7,  5, 15, 14,  1,  9  ; round 5
-        !byte   12,  5,  1, 15, 14, 13,  4, 10,  0,  7,  6,  3,  9,  2,  8, 11  ; round 6
-        !byte   13, 11,  7, 14, 12,  1,  3,  9,  5,  0, 15,  4,  8,  6,  2, 10  ; round 7
-        !byte    6, 15, 14,  9, 11,  3,  0,  8, 12,  2, 13,  7,  1,  4, 10,  5  ; round 8
-        !byte   10,  2,  8,  4,  7,  6,  1,  5, 15, 11,  9, 14,  3, 12, 13,  0  ; round 9
+        .byte    0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15  ; round 0
+        .byte   14, 10,  4,  8,  9, 15, 13,  6,  1, 12,  0,  2, 11,  7,  5,  3  ; round 1
+        .byte   11,  8, 12,  0,  5,  2, 15, 13, 10, 14,  3,  6,  7,  1,  9,  4  ; round 2
+        .byte    7,  9,  3,  1, 13, 12, 11, 14,  2,  6,  5, 10,  4,  0, 15,  8  ; round 3
+        .byte    9,  0,  5,  7,  2,  4, 10, 15, 14,  1, 11, 12,  6,  8,  3, 13  ; round 4
+        .byte    2, 12,  6, 10,  0, 11,  8,  3,  4, 13,  7,  5, 15, 14,  1,  9  ; round 5
+        .byte   12,  5,  1, 15, 14, 13,  4, 10,  0,  7,  6,  3,  9,  2,  8, 11  ; round 6
+        .byte   13, 11,  7, 14, 12,  1,  3,  9,  5,  0, 15,  4,  8,  6,  2, 10  ; round 7
+        .byte    6, 15, 14,  9, 11,  3,  0,  8, 12,  2, 13,  7,  1,  4, 10,  5  ; round 8
+        .byte   10,  2,  8,  4,  7,  6,  1,  5, 15, 11,  9, 14,  3, 12, 13,  0  ; round 9
+
+; --- G call indices: 8 calls x (a, b, c, d) ---
+blake2s_g_indices:
+        ; column step
+        .byte  0,  4,  8, 12   ; G0
+        .byte  1,  5,  9, 13   ; G1
+        .byte  2,  6, 10, 14   ; G2
+        .byte  3,  7, 11, 15   ; G3
+        ; diagonal step
+        .byte  0,  5, 10, 15   ; G4
+        .byte  1,  6, 11, 12   ; G5
+        .byte  2,  7,  8, 13   ; G6
+        .byte  3,  4,  9, 14   ; G7
+
+; =============================================================================
+; Internal mutable state (uninitialised BSS)
+; =============================================================================
+.segment "CRYPTO_BSS"
+
+b2s_copy_count:
+        .res 1
+
+; --- G function internal pointers ---
+b2s_va_ptr:     .res 2
+b2s_vb_ptr:     .res 2
+b2s_vc_ptr:     .res 2
+b2s_vd_ptr:     .res 2
+b2s_mx_ptr:     .res 2
+b2s_my_ptr:     .res 2
+
+; =============================================================================
+; Code
+; =============================================================================
+.segment "CRYPTO_CODE"
 
 ; =============================================================================
 ; blake2s_init - Initialize BLAKE2s state
@@ -69,10 +141,10 @@ blake2s_init:
 
         ; h[0..7] = IV[0..7]
         ldx #31
--       lda blake2s_iv,x
+:       lda blake2s_iv,x
         sta b2s_h,x
         dex
-        bpl -
+        bpl :-
 
         ; h[0] ^= 0x01010000 ^ (kk << 8) ^ nn
         ; In little-endian at b2s_h:
@@ -100,17 +172,17 @@ blake2s_init:
         ; copy key to block buffer, zero-pad to 64 bytes
         ldx #63
         lda #0
--       sta b2s_block,x
+:       sta b2s_block,x
         dex
-        bpl -
+        bpl :-
 
         ldx #0
         ldy b2s_key_len
--       lda input_buffer,x
+:       lda input_buffer,x
         sta b2s_block,x
         inx
         dey
-        bne -
+        bne :-
 
         ; mark block as full (64 bytes buffered)
         lda #64
@@ -152,9 +224,9 @@ blake2s_update:
         sec
         sbc b2s_buf_len        ; A = space in buffer
         cmp b2s_remain
-        bcc +                  ; if space < remain, use space
+        bcc :+                 ; if space < remain, use space
         lda b2s_remain         ; otherwise use remain
-+
+:
         ; A = bytes to copy
         sta b2s_copy_count
         beq @loop_top
@@ -178,9 +250,9 @@ blake2s_update:
         clc
         adc b2s_data_ptr
         sta b2s_data_ptr
-        bcc +
+        bcc :+
         inc b2s_data_ptr+1
-+
+:
         ; remain -= bytes copied
         tya
         sta zp_tmp1
@@ -191,9 +263,6 @@ blake2s_update:
 
         ; loop if more data
         jmp @loop_top
-
-b2s_copy_count:
-        !byte 0
 
 ; =============================================================================
 ; blake2s_final - Finalize BLAKE2s hash
@@ -210,10 +279,10 @@ blake2s_final:
         cpx #64
         beq @no_pad
         lda #0
--       sta b2s_block,x
+:       sta b2s_block,x
         inx
         cpx #64
-        bne -
+        bne :-
 @no_pad:
 
         ; set final flag
@@ -226,11 +295,11 @@ blake2s_final:
         ; copy h[0..out_len-1] to b2s_hash
         ldx #0
         ldy b2s_out_len
--       lda b2s_h,x
+:       lda b2s_h,x
         sta b2s_hash,x
         inx
         dey
-        bne -
+        bne :-
 
         rts
 
@@ -275,55 +344,55 @@ blake2s_increment_counter:
 blake2s_compress:
         ; v[0..7] = h[0..7]
         ldx #31
--       lda b2s_h,x
+:       lda b2s_h,x
         sta b2s_v,x
         dex
-        bpl -
+        bpl :-
 
         ; v[8..11] = IV[0..3]
         ldx #0
--       lda blake2s_iv,x
+:       lda blake2s_iv,x
         sta b2s_v+32,x
         inx
         cpx #16
-        bne -
+        bne :-
 
         ; v[12] = IV[4] ^ t0
         ldx #0
--       lda blake2s_iv+16,x
+:       lda blake2s_iv+16,x
         eor b2s_t,x
         sta b2s_v+48,x
         inx
         cpx #4
-        bne -
+        bne :-
 
         ; v[13] = IV[5] ^ t1
         ldx #0
--       lda blake2s_iv+20,x
+:       lda blake2s_iv+20,x
         eor b2s_t1,x
         sta b2s_v+52,x
         inx
         cpx #4
-        bne -
+        bne :-
 
         ; v[14] = IV[6] ^ f0 (f0 = 0x00000000 or 0xFFFFFFFF)
         lda b2s_f
         sta zp_tmp1            ; 0 or $FF
         ldx #0
--       lda blake2s_iv+24,x
+:       lda blake2s_iv+24,x
         eor zp_tmp1
         sta b2s_v+56,x
         inx
         cpx #4
-        bne -
+        bne :-
 
         ; v[15] = IV[7] ^ f1 (f1 = 0, no last-node flag)
         ldx #0
--       lda blake2s_iv+28,x
+:       lda blake2s_iv+28,x
         sta b2s_v+60,x
         inx
         cpx #4
-        bne -
+        bne :-
 
         ; --- 10 rounds of mixing ---
         lda #0
@@ -440,40 +509,27 @@ blake2s_compress:
         ldx b2s_offset
         inx
         cpx #8
-        beq +
+        beq :+
         jmp @g_loop
-+
+:
         ; next round
         inc b2s_round
         lda b2s_round
         cmp #blake2s_rounds
-        beq +
+        beq :+
         jmp @round_loop
-+
+:
 
         ; --- XOR v[0..7] ^ v[8..15] into h[0..7] ---
         ldx #31
--       lda b2s_h,x
+:       lda b2s_h,x
         eor b2s_v,x
         eor b2s_v+32,x
         sta b2s_h,x
         dex
-        bpl -
+        bpl :-
 
         rts
-
-; --- G call indices: 8 calls x (a, b, c, d) ---
-blake2s_g_indices:
-        ; column step
-        !byte  0,  4,  8, 12   ; G0
-        !byte  1,  5,  9, 13   ; G1
-        !byte  2,  6, 10, 14   ; G2
-        !byte  3,  7, 11, 15   ; G3
-        ; diagonal step
-        !byte  0,  5, 10, 15   ; G4
-        !byte  1,  6, 11, 12   ; G5
-        !byte  2,  7,  8, 13   ; G6
-        !byte  3,  4,  9, 14   ; G7
 
 ; =============================================================================
 ; blake2s_g - G mixing function
@@ -606,14 +662,6 @@ blake2s_g:
         jsr rotr32_7           ; b >>>= 7
 
         rts
-
-; --- G function internal pointers (in data section) ---
-b2s_va_ptr:     !word 0
-b2s_vb_ptr:     !word 0
-b2s_vc_ptr:     !word 0
-b2s_vd_ptr:     !word 0
-b2s_mx_ptr:     !word 0
-b2s_my_ptr:     !word 0
 
 ; =============================================================================
 ; blake2s_hash_oneshot - Hash a single message

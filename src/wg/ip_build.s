@@ -1,11 +1,33 @@
 ; =============================================================================
-; ip_build.asm - IP/ICMP/UDP packet construction for WireGuard tunnel payloads
+; ip_build.s - IP/ICMP/UDP packet construction (ca65 port of src/ip_build.asm)
 ;
 ; Builds inner IP packets for encapsulation inside WireGuard Type 4 transport
 ; packets. Provides ICMP echo (ping) and UDP text messaging.
 ;
 ; All multi-byte fields in IP/ICMP/UDP headers are big-endian (network order).
 ; =============================================================================
+
+        .include "constants.inc"
+
+        .export ip_checksum
+        .export icmp_build_echo
+        .export icmp_parse_reply
+        .export udp_tunnel_build
+        .export udp_tunnel_parse
+
+        .import ip_packet_buf
+        .import ip_hdr_template
+        .import ip_cksum_result
+        .import ip_pkt_len
+        .import tunnel_ip
+        .import ping_target_ip
+        .import ping_seq
+        .import msg_port
+        .import msg_recv_ptr
+        .import msg_recv_len
+        .import tp_packet
+
+        .segment "APP_CODE"
 
 ; =============================================================================
 ; ip_checksum - RFC 1071 Internet checksum (16-bit one's complement sum)

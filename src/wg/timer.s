@@ -1,5 +1,7 @@
 ; =============================================================================
-; timer.asm - Session timers using jiffy clock ($A0-$A2, 60Hz)
+; wg/timer.s - Session timers using jiffy clock ($A0-$A2, 60Hz)
+;
+; ca65 port of src/timer.asm. No logic changes; syntax translation only.
 ;
 ; The C64 jiffy clock is a 24-bit counter at $A0(hi)/$A1(mid)/$A2(lo),
 ; incremented at 60Hz by the KERNAL IRQ handler.
@@ -16,12 +18,42 @@
 ;   timer_elapsed_cmp   - compare elapsed time against threshold
 ; =============================================================================
 
+.include "constants.inc"
+
+; --- Public entry points ---
+.export timer_session_start
+.export timer_check
+.export timer_mark_send
+.export timer_elapsed_cmp
+
+; --- External symbols ---
+; SESSION_ACTIVE, SESSION_IDLE : session state constants (src/session.asm)
+.importzp SESSION_ACTIVE
+.importzp SESSION_IDLE
+; wg_state, rekey_pending, session_start_jiffy, last_send_jiffy,
+; tp_payload_len : mutable globals (src/data.asm)
+.import wg_state
+.import rekey_pending
+.import session_start_jiffy
+.import last_send_jiffy
+.import tp_payload_len
+; transport_send : send routine (src/transport.asm)
+.import transport_send
+; print_string : string printer (src/boot.asm)
+.import print_string
+; session_expired_msg, rekey_msg, keepalive_msg : strings (src/strings.asm)
+.import session_expired_msg
+.import rekey_msg
+.import keepalive_msg
+
 KEEPALIVE_JIFFIES_LO = $58     ; 600 = $0258
 KEEPALIVE_JIFFIES_HI = $02
 REKEY_JIFFIES_LO     = $20     ; 7200 = $1C20
 REKEY_JIFFIES_HI     = $1c
 EXPIRE_JIFFIES_LO    = $30     ; 10800 = $2A30
 EXPIRE_JIFFIES_HI    = $2a
+
+.segment "APP_CODE"
 
 ; =============================================================================
 ; timer_session_start - Record session start time
@@ -56,7 +88,7 @@ timer_session_start:
 ; =============================================================================
 timer_check:
         lda wg_state
-        cmp #SESSION_ACTIVE
+        cmp #<SESSION_ACTIVE
         beq @active
         rts
 @active:
@@ -71,7 +103,7 @@ timer_check:
         bcc @check_rekey        ; C=0: not expired yet
 
         ; Expired — reset to IDLE
-        lda #SESSION_IDLE
+        lda #<SESSION_IDLE
         sta wg_state
         lda #<session_expired_msg
         ldy #>session_expired_msg

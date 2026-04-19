@@ -1,9 +1,22 @@
 ; =============================================================================
-; tai64n.asm - TAI64N timestamp helpers
+; tai64n.s - TAI64N timestamp helpers (ca65 port of src/tai64n.asm)
 ;
 ; Provides tai64n_init (set epoch anchor), tai64n_now (current time),
 ; and tai64n_increment (legacy monotonic increment).
 ; =============================================================================
+
+        .include "constants.inc"
+
+        .export tai64n_init
+        .export tai64n_now
+        .export tai64n_increment
+
+        .import tai64n_base_time
+        .import tai64n_init_jiffy
+        .import tai64n_seq
+        .import hs_timestamp
+
+        .segment "APP_CODE"
 
 ; =============================================================================
 ; tai64n_init - Initialize timestamp from base Unix epoch
@@ -165,9 +178,9 @@ tai64n_now:
 
 ; Temporaries for tai64n_now (in code segment to avoid data.asm clutter)
 @elapsed:
-        !fill 3, 0
+        .res 3, 0
 @seconds:
-        !fill 3, 0
+        .res 3, 0
 
 ; =============================================================================
 ; tai64n_increment - Increment TAI64N timestamp for replay protection
@@ -188,12 +201,12 @@ tai64n_increment:
         lda hs_timestamp,x
         adc #0
         sta hs_timestamp,x
-        bcc @done              ; no carry → done
+        bcc @done              ; no carry -> done
         dex
         cpx #7
         bne @inc_nano
 
-        ; Carry out of nanoseconds → increment seconds (bytes 0..7)
+        ; Carry out of nanoseconds -> increment seconds (bytes 0..7)
         ; Also zero out nanoseconds
         lda #0
         sta hs_timestamp+8

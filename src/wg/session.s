@@ -1,5 +1,7 @@
 ; =============================================================================
-; session.asm - WireGuard session state machine
+; wg/session.s - WireGuard session state machine
+;
+; ca65 port of src/session.asm. No logic changes; syntax translation only.
 ;
 ; States:
 ;   0 (IDLE)    - no handshake in progress
@@ -13,9 +15,85 @@
 ;   display_payload       - print decrypted payload to screen
 ; =============================================================================
 
+.include "constants.inc"
+
+; ---- Session-state constants (exported for other modules) -------------------
 SESSION_IDLE    = 0
 SESSION_HS_SENT = 1
 SESSION_ACTIVE  = 2
+
+; ---- Public entry points ----------------------------------------------------
+.export session_initiate
+.export session_handle_packet
+.export session_reset
+.export display_payload
+.export endpoint_update
+
+; ---- Exported session-state constants (referenced by timer.s, etc.) --------
+; Using .exportzp because ca65 treats small numeric equates as zeropage-sized
+; by default, and importers use them with #<immediate addressing.
+.exportzp SESSION_IDLE
+.exportzp SESSION_HS_SENT
+.exportzp SESSION_ACTIVE
+
+; ---- External subroutines ---------------------------------------------------
+; Config / entropy / timestamp
+.import config_load
+.import entropy_fill
+.import tai64n_increment
+; Handshake
+.import hs_create_initiation
+.import hs_process_response
+; Transport
+.import transport_init
+.import transport_decrypt
+; Cookie (wg/cookie.s)
+.import cookie_handle_type3
+; Session timer (wg/timer.s)
+.import timer_session_start
+; Networking
+.import net_udp_send
+; IP-layer parsers
+.import icmp_parse_reply
+.import udp_tunnel_parse
+; Console output
+.import print_string
+
+; ---- External data buffers / state ------------------------------------------
+; Handshake buffers
+.import hs_ephem_priv
+.import hs_packet
+.import hs_resp_packet
+; UDP I/O buffers / flags
+.import udp_send_len_local
+.import udp_recv_buf
+.import udp_recv_len
+.import udp_recv_ready
+.import udp_recv_src_ip
+.import udp_recv_src_port
+; Peer endpoint
+.import wg_peer_ip
+.import wg_peer_port
+; Session state variable
+.import wg_state
+; Transport packet buffers
+.import tp_packet
+.import tp_packet_len
+.import tp_payload_len
+; Tunnel UDP message receive state
+.import msg_recv_ptr
+.import msg_recv_len
+
+; ---- Imported strings (wg/strings.s) ---------------------------------------
+.import cookie_recv_msg
+.import hs_ok_msg
+.import hs_fail_msg
+.import decrypt_fail_msg
+.import recv_data_msg
+.import ping_reply_msg
+.import msg_recv_hdr
+
+.segment "APP_CODE"
 
 ; =============================================================================
 ; session_initiate - Start WireGuard handshake
@@ -264,15 +342,6 @@ session_reset:
         rts
 
 ; =============================================================================
-; display_payload - Print decrypted transport payload as ASCII
-;
-; Prints tp_payload_len bytes from tp_packet+16 (payload starts after header).
-; Non-printable characters (< $20 or > $7E) replaced with '.'.
-; Prints newline at end.
-;
-; Clobbers: A, X, Y
-; =============================================================================
-; =============================================================================
 ; endpoint_update - Update peer endpoint after successful decrypt
 ;
 ; Compares current source IP/port against stored peer IP/port.
@@ -319,6 +388,15 @@ endpoint_update:
 
         rts
 
+; =============================================================================
+; display_payload - Print decrypted transport payload as ASCII
+;
+; Prints tp_payload_len bytes from tp_packet+16 (payload starts after header).
+; Non-printable characters (< $20 or > $7E) replaced with '.'.
+; Prints newline at end.
+;
+; Clobbers: A, X, Y
+; =============================================================================
 display_payload:
         lda #<recv_data_msg
         ldy #>recv_data_msg

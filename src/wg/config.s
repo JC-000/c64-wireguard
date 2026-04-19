@@ -1,9 +1,29 @@
 ; =============================================================================
-; config.asm - Peer configuration loader
+; config.s - Peer configuration loader (ca65)
 ;
 ; Copies configuration data from cfg_* buffers into handshake state.
 ; Test harness or user writes actual values to cfg_* before calling.
 ; =============================================================================
+
+.include "constants.inc"
+
+.export config_load
+
+.import cfg_static_priv
+.import cfg_static_pub
+.import cfg_peer_pub
+.import cfg_peer_endpoint_ip
+.import cfg_peer_endpoint_port
+.import cfg_preshared_key
+.import hs_static_priv
+.import hs_static_pub
+.import hs_resp_pub
+.import hs_preshared_key
+.import wg_peer_ip
+.import wg_peer_port
+.import tai64n_init
+
+.segment "APP_CODE"
 
 ; =============================================================================
 ; config_load - Load peer configuration into handshake state
