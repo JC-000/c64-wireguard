@@ -39,42 +39,52 @@ The project was originally written in ACME syntax; a migration to ca65/ld65 (see
 ## Memory Layout
 
 ```
-$0801-$0A72  Boot stub, main loop, network wrapper (net.asm)
-$2000-$32EF  ip65 binary blob (UDP-only, 4,847 bytes)
-$32F0-$7CFF  Crypto + transport + session + application + data buffers + strings
-$8000-$83FF  Quarter-square multiply tables (page-aligned, BASIC ROM banked out)
+$0801-$1FFF  LOADER:       BASIC stub + boot + net wrapper + RODATA tables
+$2000-$32EF  NET_CODE:     ip65 binary blob (UDP-only, ~4.8 KB)
+$32F0-$7FFF  MAIN_AREA_LO: crypto + app code + BSS (emitted as zeros)
+$8000-$83FF  SQTAB:        quarter-square multiply tables (runtime-built
+                            by sqtab_init; no PRG bytes here)
+$8400-$9FFF  MAIN_AREA_HI: overflow region for extra app data
+$A000-$BFFF  ip65 BSS:     private to ip65 (BASIC ROM banked out)
 ```
 
-ip65 uses zero page $02-$1B (cc65 standard). These overlap our crypto ZP variables. The `net.asm` wrapper saves and restores $02-$1B around every ip65 call (~60 cycles overhead, negligible vs network latency).
+ip65 uses zero page $02-$1B (cc65 standard). These overlap our crypto ZP variables. The `src/net/ip65/net.s` wrapper saves and restores $02-$1B around every ip65 call (~60 cycles overhead, negligible vs network latency).
+
+The full memory layout is defined in `cfg/c64-wireguard-ip65.cfg` (the ld65 linker config). Code and data sections declare their target segment with ca65's `.segment` directive; ld65 resolves absolute addresses at link time.
 
 ## Source Files
 
 | File | Description |
 |---|---|
-| `src/main.asm` | Top-level includes, memory layout with ip65 blob |
-| `src/constants.asm` | Zero page variables, hardware equates, ip65 jump table |
-| `src/boot.asm` | BASIC stub, startup, main loop, network init UI |
-| `src/net.asm` | ip65 wrapper: ZP save/restore, init, DHCP, UDP listen/send/recv |
-| `src/word32.asm` | 32-bit arithmetic: add, xor, rotate (7/8/12/16), copy, zero |
-| `src/blake2s.asm` | BLAKE2s-256: init, update, final, compress, G function, keyed hashing |
-| `src/blake2s_kdf.asm` | HMAC-BLAKE2s and WireGuard KDF (kdf_1, kdf_2, kdf_3) |
-| `src/chacha20.asm` | ChaCha20 stream cipher (RFC 7539) |
-| `src/poly1305.asm` | Poly1305 MAC (130-bit modular arithmetic, quarter-square multiply) |
-| `src/aead.asm` | ChaCha20-Poly1305 AEAD encrypt/decrypt |
-| `src/fe25519.asm` | Field arithmetic mod 2^255-19 (add, sub, mul, sqr, inv, cswap, REU DMA) |
-| `src/x25519.asm` | X25519 scalar multiplication (Montgomery ladder, RFC 7748) |
-| `src/tai64n.asm` | TAI64N timestamp increment |
-| `src/handshake.asm` | WireGuard IKpsk2 Noise handshake (Type 1/Type 2 packets) |
-| `src/transport.asm` | Transport data packets: Type 4 encrypt/decrypt, replay protection |
-| `src/entropy.asm` | Hardware RNG: SID voice 3 noise XOR CIA1 timer |
-| `src/config.asm` | Peer configuration: copy config buffers to handshake state |
-| `src/session.asm` | Session state machine: initiate, handle packet, reset, display |
-| `src/ip_build.asm` | IP/ICMP/UDP packet construction for tunnel payloads |
-| `src/disk_config.asm` | KERNAL SEQ file reader for WG.CFG (hex, IP, port parsing) |
-| `src/cookie.asm` | Type 3 cookie handling (HChaCha20, XChaCha20-Poly1305) |
-| `src/timer.asm` | Session timers: keepalive (10s), rekey (120s), expire (180s) |
-| `src/data.asm` | Mutable buffers (crypto state, transport state, session config, network buffers) |
-| `src/strings.asm` | Display strings |
+| `src/loadaddr.s` | 2-byte PRG load address header ($0801) |
+| `src/boot.s` | BASIC stub, startup, main loop, network init UI |
+| `src/exports.s` | Promotes ZP equates to linker-visible labels for the test harness |
+| `src/constants.inc` | Zero page variables, hardware equates (header, not assembled directly) |
+| `src/crypto_abi.inc` | Public crypto ABI contract (fe25519_*, x25519_*, chacha20_*, poly1305_*, aead_*, blake2s_*) matching the sibling libraries |
+| `src/net_abi.inc` | Public UDP networking ABI contract (net_init, net_dhcp, net_poll, net_udp_*) |
+| `src/crypto/word32.s` | 32-bit arithmetic: add, xor, rotate (7/8/12/16), copy, zero |
+| `src/crypto/blake2s.s` | BLAKE2s-256: init, update, final, compress, G function, keyed hashing |
+| `src/crypto/blake2s_kdf.s` | HMAC-BLAKE2s and WireGuard KDF (kdf_1, kdf_2, kdf_3) |
+| `src/crypto/chacha20.s` | ChaCha20 stream cipher (RFC 7539) |
+| `src/crypto/poly1305.s` | Poly1305 MAC (130-bit modular arithmetic, quarter-square multiply) |
+| `src/crypto/aead.s` | ChaCha20-Poly1305 AEAD encrypt/decrypt |
+| `src/crypto/fe25519.s` | Field arithmetic mod 2^255-19 (add, sub, mul, sqr, inv, cswap, REU DMA) |
+| `src/crypto/x25519.s` | X25519 scalar multiplication (Montgomery ladder, RFC 7748) |
+| `src/crypto/entropy.s` | Hardware RNG: SID voice 3 noise XOR CIA1 timer |
+| `src/wg/handshake.s` | WireGuard IKpsk2 Noise handshake (Type 1/Type 2 packets) |
+| `src/wg/transport.s` | Transport data packets: Type 4 encrypt/decrypt, replay protection |
+| `src/wg/session.s` | Session state machine: initiate, handle packet, reset, display |
+| `src/wg/config.s` | Peer configuration: copy config buffers to handshake state |
+| `src/wg/disk_config.s` | KERNAL SEQ file reader for WG.CFG (hex, IP, port parsing) |
+| `src/wg/cookie.s` | Type 3 cookie handling (HChaCha20, XChaCha20-Poly1305) |
+| `src/wg/ip_build.s` | IP/ICMP/UDP packet construction for tunnel payloads |
+| `src/wg/timer.s` | Session timers: keepalive (10s), rekey (120s), expire (180s) |
+| `src/wg/tai64n.s` | TAI64N timestamp increment |
+| `src/wg/data.s` | Mutable buffers (crypto state, transport state, session config, network buffers) |
+| `src/wg/strings.s` | Display strings |
+| `src/net/ip65/net.s` | ip65 wrapper: ZP save/restore, init, DHCP, UDP listen/send/recv |
+| `src/net/ip65/ip65_blob.s` | `.incbin` wrapper around the pre-built ip65 binary blob |
+| `src/net/ip65/ip65_symbols.inc` | ip65 jump-table + variable-pointer equates |
 
 ### ip65 Build
 
@@ -95,7 +105,7 @@ ip65 uses zero page $02-$1B (cc65 standard). These overlap our crypto ZP variabl
 | $2A-$2D | x25_* | X25519 ladder state |
 | $FB-$FE | zp_ptr1/2 | General-purpose pointers |
 
-Note: $02-$1B overlaps with ip65's cc65 ZP usage. The `net.asm` wrapper handles time-sharing via save/restore.
+Note: $02-$1B overlaps with ip65's cc65 ZP usage. The `src/net/ip65/net.s` wrapper handles time-sharing via save/restore.
 
 ## Testing
 
@@ -155,16 +165,16 @@ On real C64 hardware (~1 MHz), with REU-accelerated field arithmetic:
 - BLAKE2s compress: ~22 ms
 - ChaCha20 block: ~65 ms
 - Poly1305 block: ~110 ms
-- Field multiply (fe_mul): ~110 ms (REU DMA table lookup)
-- Field square (fe_sqr): ~83 ms (dedicated squaring with symmetry)
+- Field multiply (`fe25519_mul`): ~110 ms (REU DMA table lookup)
+- Field square (`fe25519_sqr`): ~83 ms (dedicated squaring with symmetry)
 - X25519 scalar multiply: ~3 minutes (255 ladder steps)
 - Full handshake (3 X25519 ops): ~9 minutes
 
 Optimizations imported from the [c64-x25519](https://github.com/JC-000/c64-x25519) project:
-- **REU DMA fe_mul**: Precomputed 128KB multiplication tables in REU expansion memory, fetched via DMA per outer loop iteration. Self-modifying accumulation addresses, 2x inner loop unroll.
-- **Dedicated fe_sqr**: Exploits a[i]*a[j] = a[j]*a[i] symmetry to halve cross-term multiplies. Uses mult66 indirect-indexed quarter-square multiply with shift-before-accumulate for implicit doubling.
-- **Self-modifying fe_cswap**: Patches absolute,Y addresses at entry to replace indirect-indexed loads. 4x loop unroll. 38 cycles/byte vs 49 cycles/byte.
-- **mul38 lookup tables**: 512-byte compile-time tables replace `jsr mul_8x8` in fe_reduce_wide. 8 cycles vs 58 cycles per byte (7x speedup, called ~720 times per scalarmult).
+- **REU DMA `fe25519_mul`**: Precomputed 128KB multiplication tables in REU expansion memory, fetched via DMA per outer loop iteration. Self-modifying accumulation addresses, 2x inner loop unroll.
+- **Dedicated `fe25519_sqr`**: Exploits a[i]*a[j] = a[j]*a[i] symmetry to halve cross-term multiplies. Uses mult66 indirect-indexed quarter-square multiply with shift-before-accumulate for implicit doubling.
+- **Self-modifying `fe25519_cswap`**: Patches absolute,Y addresses at entry to replace indirect-indexed loads. 4x loop unroll. 38 cycles/byte vs 49 cycles/byte.
+- **mul38 lookup tables**: 512-byte compile-time tables replace `jsr mul_8x8` in `fe25519_reduce_wide`. 8 cycles vs 58 cycles per byte (7x speedup, called ~720 times per scalarmult).
 
 ## Architecture
 
@@ -195,9 +205,11 @@ Each packet is encrypted with ChaCha20-Poly1305 AEAD using the transport key der
 
 ### Networking
 
-UDP packets are sent and received via [ip65](https://github.com/cc65/ip65), driving the RR-Net CS8900a ethernet adapter. The ip65 library is built as a standalone binary blob (ca65/ld65) and included at $2000 via ACME's `!binary` directive. A 10-entry jump table provides: init, process, DHCP, DNS, UDP add/remove listener, UDP send, and helper wrappers.
+UDP packets are sent and received via [ip65](https://github.com/cc65/ip65), driving the RR-Net CS8900a ethernet adapter. The ip65 library is built as a standalone binary blob (ca65/ld65) and linked into the final PRG at $2000 via ca65's `.incbin` directive in `src/net/ip65/ip65_blob.s`. A 10-entry jump table provides: init, process, DHCP, DNS, UDP add/remove listener, UDP send, and helper wrappers.
 
 The UDP receive callback fires during `ip65_process` while ip65 owns the zero page. It copies incoming packet data to `udp_recv_buf` and sets a flag for the main loop — no crypto ZP is touched.
+
+All ip65 calls go through the `src/net_abi.inc` façade (`net_init`, `net_dhcp`, `net_poll`, `net_udp_listen`, `net_udp_send`, `net_udp_recv_cb`). Higher-level modules (handshake, transport, session) use these ABI names rather than calling into ip65 directly — the same pattern `c64-https` uses for its UCI/ip65 backend swap. Dropping in the `c64-https` networking stack (proven on Ultimate 64 at 48 MHz / 1 MHz and on VICE at normal speed) is a link-line change only.
 
 ### Session State Machine
 
