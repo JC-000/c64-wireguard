@@ -171,7 +171,7 @@ On real C64 hardware (~1 MHz), with REU-accelerated field arithmetic:
 - Full handshake (3 X25519 ops): ~9 minutes
 
 Optimizations imported from the [c64-x25519](https://github.com/JC-000/c64-x25519) project:
-- **REU DMA `fe25519_mul`**: Precomputed 128KB multiplication tables in REU expansion memory, fetched via DMA per outer loop iteration. Self-modifying accumulation addresses, 2x inner loop unroll.
+- **REU DMA `fe25519_mul`**: Precomputed 128KB multiplication tables in REU expansion memory, fetched via DMA per outer loop iteration. Self-modifying accumulation addresses, 2x inner loop unroll. REU bank allocation is documented in [`src/crypto/shared/reu_layout.inc`](src/crypto/shared/reu_layout.inc), which also reserves bank-2 slots for future overlay-paged crypto modules.
 - **Dedicated `fe25519_sqr`**: Exploits a[i]*a[j] = a[j]*a[i] symmetry to halve cross-term multiplies. Uses mult66 indirect-indexed quarter-square multiply with shift-before-accumulate for implicit doubling.
 - **Self-modifying `fe25519_cswap`**: Patches absolute,Y addresses at entry to replace indirect-indexed loads. 4x loop unroll. 38 cycles/byte vs 49 cycles/byte.
 - **mul38 lookup tables**: 512-byte compile-time tables replace `jsr mul_8x8` in `fe25519_reduce_wide`. 8 cycles vs 58 cycles per byte (7x speedup, called ~720 times per scalarmult).
