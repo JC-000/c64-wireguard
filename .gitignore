@@ -13,3 +13,5 @@ __pycache__/
 *.swo
 *~
 .claude/worktrees/
+.serena/
+artifacts/
