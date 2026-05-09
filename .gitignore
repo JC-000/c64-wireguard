@@ -13,5 +13,9 @@ __pycache__/
 *.swo
 *~
 .claude/worktrees/
-.serena/
+# Serena: ignore regenerable/local state, track project.yml + memories
+.serena/cache/
+.serena/logs/
+.serena/hook_data/
+.serena/project.local.yml
 artifacts/
