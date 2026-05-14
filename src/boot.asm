@@ -29,6 +29,12 @@ start:
         ldy #>title_msg
         jsr print_string
 
+        ; Initialize quarter-square table (needed by mul_8x8 and fe_sqr)
+        jsr sqtab_init
+
+        ; Initialize REU multiplication tables (precompute all 256x256 products)
+        jsr reu_mul_init
+
         ; fall through to main loop
 main_loop:
         lda net_initialized

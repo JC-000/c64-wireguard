@@ -35,6 +35,7 @@ reu_reu_hi      = $df05         ; REU address high
 reu_bank        = $df06         ; REU bank
 reu_len_lo      = $df07         ; REU transfer length low
 reu_len_hi      = $df08         ; REU transfer length high
+reu_addr_ctrl   = $df0a         ; REU address control
 proc_port       = $01           ; processor port (ROM banking)
 
 ; --- System addresses ---
@@ -78,6 +79,10 @@ poly_i          = $1a           ; inner loop counter
 poly_j          = $1b           ; outer loop counter
 poly_carry      = $1c           ; carry byte for multi-precision arithmetic
 poly_tmp        = $1d           ; temp for multiply
+
+; mult66 indirect-indexed multiply pointers (aliased with ChaCha20, not used concurrently)
+lmul0           = $14           ; 2-byte ZP pointer (aliases cc20_round/$14, cc20_qr_idx/$15)
+lmul1           = $16           ; 2-byte ZP pointer (aliases cc20_data_ptr/$16-$17)
 
 ; fe25519 field arithmetic working variables
 fe_src1         = $1e           ; 2-byte pointer to operand 1

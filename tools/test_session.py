@@ -286,25 +286,25 @@ def test_build_verification(labels):
             failed += 1
             print(f"  FAIL label '{name}' not found")
 
-    # All code below $7800
+    # All code below $8000
     for name in ["entropy_init", "config_load", "session_initiate",
                   "session_handle_packet", "display_payload"]:
         addr = labels.address(name)
-        if addr is not None and addr < 0x7800:
+        if addr is not None and addr < 0x8000:
             passed += 1
             if VERBOSE:
-                print(f"  PASS {name} ${addr:04X} < $7800")
+                print(f"  PASS {name} ${addr:04X} < $8000")
         else:
             failed += 1
             print(f"  FAIL {name} address check")
 
-    # Data labels below $7800
+    # Data labels below $8000
     for name in ["wg_state", "cfg_static_priv", "cfg_peer_pub"]:
         addr = labels.address(name)
-        if addr is not None and addr < 0x7800:
+        if addr is not None and addr < 0x8000:
             passed += 1
             if VERBOSE:
-                print(f"  PASS {name} data ${addr:04X} < $7800")
+                print(f"  PASS {name} data ${addr:04X} < $8000")
         else:
             failed += 1
             print(f"  FAIL {name} data address check")

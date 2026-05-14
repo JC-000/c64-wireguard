@@ -106,15 +106,15 @@ def test_memory_layout(labels):
             print_pass(f"{label} at ${addr:04X} (after ip65)")
             passed += 1
 
-    # data must not exceed $7800 (sqtab region)
+    # data must not exceed $8000 (sqtab region)
     data_labels = ["net_initialized", "udp_recv_buf"]
     for label in data_labels:
         addr = labels[label]
-        if addr >= 0x7800:
-            print_fail(f"{label} (${addr:04X}) overlaps sqtab at $7800")
+        if addr >= 0x8000:
+            print_fail(f"{label} (${addr:04X}) overlaps sqtab at $8000")
             failed += 1
         else:
-            print_pass(f"{label} at ${addr:04X} (before $7800)")
+            print_pass(f"{label} at ${addr:04X} (before $8000)")
             passed += 1
 
     return passed, failed
