@@ -14,32 +14,21 @@ import random
 import struct
 import subprocess
 import sys
-import time
+
 
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
-    read_bytes, write_bytes, jsr, wait_for_text,
+    read_bytes, write_bytes, jsr,
 )
+from vice_util import binary_wait_for_text
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "wireguard.prg")
 LABELS_PATH = os.path.join(PROJECT_ROOT, "build", "labels.txt")
 
 VERBOSE = False
-
-
-def robust_jsr(transport, addr, timeout=30.0, retries=5):
-    """jsr() with retry for transient VICE connection failures."""
-    for attempt in range(retries):
-        try:
-            return jsr(transport, addr, timeout=timeout)
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(1.0 + attempt * 0.5)
-                continue
-            raise
 
 
 def py_encrypt(key, counter_val, plaintext):
@@ -106,7 +95,7 @@ def test_encrypt_normal_counter(transport, labels, rng):
                 struct.pack('<H', labels["input_buffer"]))
     write_bytes(transport, labels["tp_payload_len"], bytes([len(plaintext)]))
 
-    robust_jsr(transport, labels["transport_encrypt"], timeout=60.0)
+    jsr(transport, labels["transport_encrypt"], timeout=60.0)
 
     # Check tp_encrypt_error = 0
     err = read_bytes(transport, labels["tp_encrypt_error"], 1)[0]
@@ -164,7 +153,7 @@ def test_encrypt_counter_exhausted(transport, labels, rng):
                 struct.pack('<H', labels["input_buffer"]))
     write_bytes(transport, labels["tp_payload_len"], bytes([len(plaintext)]))
 
-    robust_jsr(transport, labels["transport_encrypt"], timeout=60.0)
+    jsr(transport, labels["transport_encrypt"], timeout=60.0)
 
     # Check tp_encrypt_error = 1
     err = read_bytes(transport, labels["tp_encrypt_error"], 1)[0]
@@ -221,7 +210,7 @@ def test_encrypt_rekey_warning(transport, labels, rng):
                 struct.pack('<H', labels["input_buffer"]))
     write_bytes(transport, labels["tp_payload_len"], bytes([len(plaintext)]))
 
-    robust_jsr(transport, labels["transport_encrypt"], timeout=60.0)
+    jsr(transport, labels["transport_encrypt"], timeout=60.0)
 
     # Check tp_encrypt_error = 0 (encrypt should succeed)
     err = read_bytes(transport, labels["tp_encrypt_error"], 1)[0]
@@ -280,7 +269,7 @@ def test_decrypt_counter_exhausted(transport, labels, rng):
     write_bytes(transport, labels["udp_recv_len"],
                 struct.pack('<H', len(packet)))
 
-    robust_jsr(transport, labels["transport_decrypt"], timeout=60.0)
+    jsr(transport, labels["transport_decrypt"], timeout=60.0)
 
     # Recv counter should NOT have been updated (still 0)
     recv_ctr = read_bytes(transport, labels["tp_recv_counter"], 8)
@@ -317,7 +306,7 @@ def test_encrypt_no_rekey_below_threshold(transport, labels, rng):
                 struct.pack('<H', labels["input_buffer"]))
     write_bytes(transport, labels["tp_payload_len"], bytes([len(plaintext)]))
 
-    robust_jsr(transport, labels["transport_encrypt"], timeout=60.0)
+    jsr(transport, labels["transport_encrypt"], timeout=60.0)
 
     # Check rekey_pending = 0 (no rekey)
     rekey = read_bytes(transport, labels["rekey_pending"], 1)[0]
@@ -365,7 +354,7 @@ def test_counter_rekey_independent(transport, labels, rng):
                 struct.pack('<H', labels["input_buffer"]))
     write_bytes(transport, labels["tp_payload_len"], bytes([len(plaintext)]))
 
-    robust_jsr(transport, labels["transport_encrypt"], timeout=60.0)
+    jsr(transport, labels["transport_encrypt"], timeout=60.0)
 
     rekey = read_bytes(transport, labels["rekey_pending"], 1)[0]
     if rekey == 1:
@@ -393,7 +382,7 @@ def test_counter_rekey_independent(transport, labels, rng):
                 struct.pack('<H', labels["input_buffer"]))
     write_bytes(transport, labels["tp_payload_len"], bytes([len(plaintext)]))
 
-    robust_jsr(transport, labels["transport_encrypt"], timeout=60.0)
+    jsr(transport, labels["transport_encrypt"], timeout=60.0)
 
     # rekey_pending should still be 1 (not cleared by encrypt)
     rekey = read_bytes(transport, labels["rekey_pending"], 1)[0]
@@ -438,7 +427,6 @@ def run_tests(transport, labels, seed):
             import traceback
             traceback.print_exc()
             total_failed += 1
-        time.sleep(1.0)
 
     return total_passed, total_failed
 
@@ -497,16 +485,12 @@ def main():
     # Launch VICE
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
 
-    with ViceInstanceManager(
-        config=config,
-        port_range_start=6510,
-        port_range_end=6530,
-    ) as mgr:
+    with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         print(f"VICE PID={inst.pid}, port={inst.port}")
 
         transport = inst.transport
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+        grid = binary_wait_for_text(transport, "Q=QUIT", timeout=60.0)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)

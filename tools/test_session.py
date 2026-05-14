@@ -16,7 +16,6 @@ import random
 import struct
 import subprocess
 import sys
-import time
 
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey, X25519PublicKey,
@@ -25,8 +24,9 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
-    read_bytes, write_bytes, jsr, wait_for_text,
+    read_bytes, write_bytes, jsr,
 )
+from vice_util import binary_wait_for_text
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "wireguard.prg")
@@ -35,17 +35,6 @@ LABELS_PATH = os.path.join(PROJECT_ROOT, "build", "labels.txt")
 VERBOSE = False
 SLOW = False
 
-
-def robust_jsr(transport, addr, timeout=30.0, retries=5):
-    """jsr() with retry for transient VICE connection failures."""
-    for attempt in range(retries):
-        try:
-            return jsr(transport, addr, timeout=timeout)
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(1.0 + attempt * 0.5)
-                continue
-            raise
 
 
 # ============================================================================
@@ -328,7 +317,7 @@ def test_entropy(transport, labels):
     passed = failed = 0
 
     # Test entropy_init runs without crash
-    robust_jsr(transport, labels["entropy_init"])
+    jsr(transport, labels["entropy_init"])
     passed += 1
     if VERBOSE:
         print("  PASS entropy_init runs")
@@ -354,7 +343,7 @@ def test_entropy(transport, labels):
         0x60,                               # RTS
     ])
     write_bytes(transport, 0x0340, trampoline)
-    robust_jsr(transport, 0x0340, timeout=10.0)
+    jsr(transport, 0x0340, timeout=10.0)
 
     # Read 17 bytes from $0360
     results = read_bytes(transport, 0x0360, 17)
@@ -386,7 +375,7 @@ def test_entropy(transport, labels):
         0x60,                               # RTS
     ])
     write_bytes(transport, 0x0340, tramp2)
-    robust_jsr(transport, 0x0340, timeout=10.0)
+    jsr(transport, 0x0340, timeout=10.0)
 
     filled = read_bytes(transport, buf_addr, 32)
     unique_fill = len(set(filled))
@@ -411,7 +400,7 @@ def test_entropy(transport, labels):
 
     # Run entropy_byte multiple times and check statistical variation
     write_bytes(transport, 0x0340, trampoline)  # rewrite 17-sample trampoline
-    robust_jsr(transport, 0x0340, timeout=10.0)
+    jsr(transport, 0x0340, timeout=10.0)
     results2 = read_bytes(transport, 0x0360, 17)
     # Different from first run (very unlikely to be identical)
     if results != results2:
@@ -448,7 +437,7 @@ def test_config_load(transport, labels):
     write_bytes(transport, labels["cfg_peer_endpoint_port"], peer_port)
 
     # Call config_load
-    robust_jsr(transport, labels["config_load"])
+    jsr(transport, labels["config_load"])
 
     # Verify all destinations
     checks = [
@@ -490,7 +479,7 @@ def test_state_transitions(transport, labels):
 
     # session_reset → IDLE
     write_bytes(transport, labels["wg_state"], bytes([2]))  # pretend ACTIVE
-    robust_jsr(transport, labels["session_reset"])
+    jsr(transport, labels["session_reset"])
     state = read_bytes(transport, labels["wg_state"], 1)[0]
     if state == 0:
         passed += 1
@@ -506,7 +495,7 @@ def test_state_transitions(transport, labels):
     type2_fake = bytearray(92)
     type2_fake[0] = 2
     write_bytes(transport, labels["udp_recv_buf"], bytes(type2_fake))
-    robust_jsr(transport, labels["session_handle_packet"])
+    jsr(transport, labels["session_handle_packet"])
     state = read_bytes(transport, labels["wg_state"], 1)[0]
     if state == 0:
         passed += 1
@@ -523,7 +512,7 @@ def test_state_transitions(transport, labels):
     type4_fake[0] = 4
     write_bytes(transport, labels["udp_recv_buf"], bytes(type4_fake))
     write_bytes(transport, labels["udp_recv_len"], struct.pack('<H', 48))
-    robust_jsr(transport, labels["session_handle_packet"])
+    jsr(transport, labels["session_handle_packet"])
     state = read_bytes(transport, labels["wg_state"], 1)[0]
     if state == 1:
         passed += 1
@@ -539,7 +528,7 @@ def test_state_transitions(transport, labels):
     unknown = bytearray(20)
     unknown[0] = 99
     write_bytes(transport, labels["udp_recv_buf"], bytes(unknown))
-    robust_jsr(transport, labels["session_handle_packet"])
+    jsr(transport, labels["session_handle_packet"])
     state = read_bytes(transport, labels["wg_state"], 1)[0]
     if state == 2:
         passed += 1
@@ -640,7 +629,7 @@ def test_type2_processing(transport, labels, rng):
         write_bytes(transport, labels["udp_recv_len"], struct.pack('<H', 92))
         write_bytes(transport, labels["udp_recv_ready"], bytes([1]))
 
-        robust_jsr(transport, labels["session_handle_packet"], timeout=120.0)
+        jsr(transport, labels["session_handle_packet"], timeout=120.0)
 
         # Check state transitioned to ACTIVE
         state = read_bytes(transport, labels["wg_state"], 1)[0]
@@ -733,7 +722,7 @@ def test_type2_tampered(transport, labels, rng):
     write_bytes(transport, labels["udp_recv_len"], struct.pack('<H', 92))
     write_bytes(transport, labels["udp_recv_ready"], bytes([1]))
 
-    robust_jsr(transport, labels["session_handle_packet"], timeout=120.0)
+    jsr(transport, labels["session_handle_packet"], timeout=120.0)
 
     # State should NOT be ACTIVE (should still be HS_SENT)
     state = read_bytes(transport, labels["wg_state"], 1)[0]
@@ -782,6 +771,11 @@ def test_type4_in_session(transport, labels, rng):
         write_bytes(transport, labels["tp_peer_recv_idx"], receiver_idx)
         write_bytes(transport, labels["tp_recv_counter"],
                     struct.pack('<Q', counter_val))  # accept this counter
+        # Reset sliding window state so counter is accepted
+        if "rw_counter_max" in labels:
+            write_bytes(transport, labels["rw_counter_max"], bytes(8))
+        if "rw_bitmap" in labels:
+            write_bytes(transport, labels["rw_bitmap"], bytes(256))
         write_bytes(transport, labels["wg_state"], bytes([2]))  # ACTIVE
 
         # Write packet to udp_recv_buf
@@ -790,7 +784,7 @@ def test_type4_in_session(transport, labels, rng):
                     struct.pack('<H', len(pkt)))
         write_bytes(transport, labels["udp_recv_ready"], bytes([1]))
 
-        robust_jsr(transport, labels["session_handle_packet"], timeout=60.0)
+        jsr(transport, labels["session_handle_packet"], timeout=60.0)
 
         # Verify payload was decrypted
         dec_len = int.from_bytes(read_bytes(transport, labels["tp_payload_len"], 2), 'little')
@@ -820,10 +814,6 @@ def test_round_trip(transport, labels, rng):
     sizes = [1, 16, 32, 64, 128]
 
     for i, size in enumerate(sizes):
-        # Brief pause between round-trips to let VICE monitor settle
-        if i > 0:
-            time.sleep(1.0)
-
         send_key = bytes(rng.randint(0, 255) for _ in range(32))
         receiver_idx = bytes(rng.randint(0, 255) for _ in range(4))
         plaintext = bytes(rng.randint(0, 255) for _ in range(size))
@@ -840,7 +830,7 @@ def test_round_trip(transport, labels, rng):
                     struct.pack('<H', labels["input_buffer"]))
         write_bytes(transport, labels["tp_payload_len"], struct.pack('<H', size))
 
-        robust_jsr(transport, labels["transport_encrypt"], timeout=60.0)
+        jsr(transport, labels["transport_encrypt"], timeout=60.0)
 
         # Read packet
         pkt_len_bytes = read_bytes(transport, labels["tp_packet_len"], 2)
@@ -880,7 +870,7 @@ def test_display_payload(transport, labels):
     write_bytes(transport, labels["tp_payload_len"], struct.pack('<H', len(test_msg)))
 
     # Call display_payload (just verify it doesn't crash)
-    robust_jsr(transport, labels["display_payload"])
+    jsr(transport, labels["display_payload"])
     passed += 1
     if VERBOSE:
         print("  PASS display_payload runs without crash")
@@ -889,14 +879,14 @@ def test_display_payload(transport, labels):
     test_mixed = bytes([0x01, 0x41, 0x42, 0x7F, 0x43])
     write_bytes(transport, tp_pkt_addr + 16, test_mixed)
     write_bytes(transport, labels["tp_payload_len"], struct.pack('<H', len(test_mixed)))
-    robust_jsr(transport, labels["display_payload"])
+    jsr(transport, labels["display_payload"])
     passed += 1
     if VERBOSE:
         print("  PASS display_payload with non-printable chars")
 
     # Test with zero length
     write_bytes(transport, labels["tp_payload_len"], bytes([0, 0]))
-    robust_jsr(transport, labels["display_payload"])
+    jsr(transport, labels["display_payload"])
     passed += 1
     if VERBOSE:
         print("  PASS display_payload with zero length")
@@ -942,8 +932,6 @@ def run_tests(transport, labels, seed):
             import traceback
             traceback.print_exc()
             total_failed += 1
-        # Small delay between groups to let VICE monitor settle
-        time.sleep(1.0)
 
     return total_passed, total_failed
 
@@ -1020,15 +1008,11 @@ def main():
     # Launch VICE
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
 
-    with ViceInstanceManager(
-        config=config,
-        port_range_start=6510,
-        port_range_end=6530,
-    ) as mgr:
+    with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         print(f"VICE PID={inst.pid}, port={inst.port}")
         transport = inst.transport
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+        grid = binary_wait_for_text(transport, "Q=QUIT", timeout=60.0)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)
@@ -1038,7 +1022,7 @@ def main():
         print("VICE ready, running tests...")
 
         # Initialize entropy before tests
-        robust_jsr(transport, labels["entropy_init"])
+        jsr(transport, labels["entropy_init"])
 
         passed, failed = run_tests(transport, labels, seed)
         total_passed = passed + bp

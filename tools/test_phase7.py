@@ -15,14 +15,14 @@ import random
 import struct
 import subprocess
 import sys
-import time
 
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
-    read_bytes, write_bytes, jsr, wait_for_text,
+    read_bytes, write_bytes, jsr,
 )
+from vice_util import binary_wait_for_text
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "wireguard.prg")
@@ -30,17 +30,6 @@ LABELS_PATH = os.path.join(PROJECT_ROOT, "build", "labels.txt")
 
 VERBOSE = False
 
-
-def robust_jsr(transport, addr, timeout=30.0, retries=5):
-    """jsr() with retry for transient VICE connection failures."""
-    for attempt in range(retries):
-        try:
-            return jsr(transport, addr, timeout=timeout)
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(1.0 + attempt * 0.5)
-                continue
-            raise
 
 
 # ============================================================================
@@ -210,7 +199,7 @@ def test_ip_checksum(transport, labels, rng):
         write_bytes(transport, input_buf, data)
         write_bytes(transport, zp_ptr1, struct.pack('<H', input_buf))
         write_bytes(transport, zp_tmp1, bytes([len(data)]))
-        robust_jsr(transport, ip_cksum)
+        jsr(transport, ip_cksum)
         return bytes(read_bytes(transport, cksum_result, 2))
 
     # Test 1: Zero buffer 2 bytes -> checksum of 0x0000 = 0xFFFF
@@ -311,7 +300,7 @@ def test_icmp_build(transport, labels, rng):
         write_bytes(transport, ping_seq_addr,
                     bytes([(seq_val >> 8) & 0xFF, seq_val & 0xFF]))
 
-        robust_jsr(transport, icmp_build)
+        jsr(transport, icmp_build)
 
         # Read the 28-byte packet
         pkt = bytes(read_bytes(transport, ip_pkt_buf, 28))
@@ -402,7 +391,7 @@ def test_icmp_parse(transport, labels):
     def parse_and_read(ip_pkt):
         """Write IP packet at tp_packet+16, call parse, return A."""
         write_bytes(transport, tp_packet + 16, ip_pkt)
-        robust_jsr(transport, 0x0340)
+        jsr(transport, 0x0340)
         return read_bytes(transport, 0x0360, 1)[0]
 
     # Test 1: Valid echo reply (proto=1, type=0, ID=$C640)
@@ -532,7 +521,7 @@ def test_udp_build(transport, labels, rng):
         write_bytes(transport, zp_ptr1, struct.pack('<H', input_buf))
         write_bytes(transport, zp_tmp1, bytes([text_len]))
 
-        robust_jsr(transport, udp_build)
+        jsr(transport, udp_build)
 
         total_pkt_len = 28 + text_len
         pkt = bytes(read_bytes(transport, ip_pkt_buf, total_pkt_len))
@@ -617,7 +606,7 @@ def test_udp_parse(transport, labels):
     def parse_and_read(ip_pkt):
         """Write IP packet at tp_packet+16, call parse, return A."""
         write_bytes(transport, tp_packet + 16, ip_pkt)
-        robust_jsr(transport, 0x0340)
+        jsr(transport, 0x0340)
         return read_bytes(transport, 0x0360, 1)[0]
 
     # Set msg_port to a known value (big-endian)
@@ -746,7 +735,7 @@ def test_timer_elapsed(transport, labels):
         tramp = make_timer_trampoline(curr_hi, curr_mid, curr_lo,
                                       thr_lo, thr_hi)
         write_bytes(transport, 0x0340, tramp)
-        robust_jsr(transport, 0x0340)
+        jsr(transport, 0x0340)
         return read_bytes(transport, 0x0360, 1)[0]
 
     # Test 1: Elapsed = 0, threshold = 1 -> C=0
@@ -854,7 +843,7 @@ def test_keepalive(transport, labels, rng):
                         struct.pack('<Q', counter_val))
             write_bytes(transport, labels["tp_payload_len"], bytes([0, 0]))
 
-            robust_jsr(transport, labels["transport_encrypt"])
+            jsr(transport, labels["transport_encrypt"])
 
             pkt_len_bytes = read_bytes(transport, labels["tp_packet_len"], 2)
             pkt_len = int.from_bytes(pkt_len_bytes, 'little')
@@ -913,7 +902,7 @@ def test_keepalive(transport, labels, rng):
                         struct.pack('<H', len(pkt)))
             write_bytes(transport, labels["udp_recv_ready"], bytes([1]))
 
-            robust_jsr(transport, labels["session_handle_packet"], timeout=60.0)
+            jsr(transport, labels["session_handle_packet"], timeout=60.0)
 
             dec_len = int.from_bytes(read_bytes(transport, labels["tp_payload_len"], 2), 'little')
             if dec_len == 0:
@@ -975,7 +964,7 @@ def test_cookie(transport, labels, rng):
     # Clear cookie_valid first
     write_bytes(transport, cookie_valid_addr, bytes([0]))
     write_bytes(transport, udp_recv_buf_addr, bytes(type3))
-    robust_jsr(transport, 0x0340)
+    jsr(transport, 0x0340)
 
     result_a = read_bytes(transport, 0x0360, 1)[0]
     valid_flag = read_bytes(transport, cookie_valid_addr, 1)[0]
@@ -995,7 +984,7 @@ def test_cookie(transport, labels, rng):
     tampered = bytearray(type3)
     tampered[60] ^= 0xFF  # flip byte in tag
     write_bytes(transport, udp_recv_buf_addr, bytes(tampered))
-    robust_jsr(transport, 0x0340)
+    jsr(transport, 0x0340)
 
     result_a = read_bytes(transport, 0x0360, 1)[0]
     valid_flag = read_bytes(transport, cookie_valid_addr, 1)[0]
@@ -1012,7 +1001,7 @@ def test_cookie(transport, labels, rng):
     wrong_nonce = bytearray(type3)
     wrong_nonce[8] ^= 0xFF  # flip first nonce byte
     write_bytes(transport, udp_recv_buf_addr, bytes(wrong_nonce))
-    robust_jsr(transport, 0x0340)
+    jsr(transport, 0x0340)
 
     result_a = read_bytes(transport, 0x0360, 1)[0]
     valid_flag = read_bytes(transport, cookie_valid_addr, 1)[0]
@@ -1039,7 +1028,7 @@ def test_cookie(transport, labels, rng):
 
     write_bytes(transport, cookie_valid_addr, bytes([0]))
     write_bytes(transport, udp_recv_buf_addr, bytes(type3b))
-    robust_jsr(transport, 0x0340)
+    jsr(transport, 0x0340)
 
     result_a = read_bytes(transport, 0x0360, 1)[0]
     decrypted_cookie2 = bytes(read_bytes(transport, cookie_buf_addr, 16))
@@ -1057,7 +1046,7 @@ def test_cookie(transport, labels, rng):
     tampered_ct = bytearray(type3)
     tampered_ct[35] ^= 0xFF  # flip byte in encrypted cookie
     write_bytes(transport, udp_recv_buf_addr, bytes(tampered_ct))
-    robust_jsr(transport, 0x0340)
+    jsr(transport, 0x0340)
 
     result_a = read_bytes(transport, 0x0360, 1)[0]
     valid_flag = read_bytes(transport, cookie_valid_addr, 1)[0]
@@ -1092,6 +1081,11 @@ def test_payload_routing(transport, labels, rng):
         write_bytes(transport, labels["tp_peer_recv_idx"], receiver_idx)
         write_bytes(transport, labels["tp_recv_counter"],
                     struct.pack('<Q', counter_val))
+        # Reset sliding window state so counter is accepted
+        if "rw_counter_max" in labels:
+            write_bytes(transport, labels["rw_counter_max"], bytes(8))
+        if "rw_bitmap" in labels:
+            write_bytes(transport, labels["rw_bitmap"], bytes(256))
         write_bytes(transport, labels["wg_state"], bytes([2]))
 
         write_bytes(transport, labels["udp_recv_buf"], bytes(pkt))
@@ -1099,7 +1093,7 @@ def test_payload_routing(transport, labels, rng):
                     struct.pack('<H', len(pkt)))
         write_bytes(transport, labels["udp_recv_ready"], bytes([1]))
 
-        robust_jsr(transport, labels["session_handle_packet"], timeout=60.0)
+        jsr(transport, labels["session_handle_packet"], timeout=60.0)
 
     # Set up msg_port for UDP routing tests
     port_val = 9999
@@ -1211,7 +1205,7 @@ def test_payload_routing(transport, labels, rng):
     write_bytes(transport, labels["udp_recv_len"],
                 struct.pack('<H', len(bad_pkt)))
     write_bytes(transport, labels["udp_recv_ready"], bytes([1]))
-    robust_jsr(transport, labels["session_handle_packet"], timeout=60.0)
+    jsr(transport, labels["session_handle_packet"], timeout=60.0)
     counter += 1
 
     state = read_bytes(transport, labels["wg_state"], 1)[0]
@@ -1250,7 +1244,7 @@ def test_payload_routing(transport, labels, rng):
     write_bytes(transport, labels["udp_recv_len"],
                 struct.pack('<H', len(pkt)))
     write_bytes(transport, labels["udp_recv_ready"], bytes([1]))
-    robust_jsr(transport, labels["session_handle_packet"], timeout=60.0)
+    jsr(transport, labels["session_handle_packet"], timeout=60.0)
     state = read_bytes(transport, labels["wg_state"], 1)[0]
     if state == 0:
         passed += 1
@@ -1291,7 +1285,7 @@ def test_round_trip(transport, labels, rng):
         seq_val = rng.randint(0, 0xFFFE)
         write_bytes(transport, ping_seq_addr,
                     bytes([(seq_val >> 8) & 0xFF, seq_val & 0xFF]))
-        robust_jsr(transport, labels["icmp_build_echo"])
+        jsr(transport, labels["icmp_build_echo"])
         pkt = bytes(read_bytes(transport, ip_pkt_buf, 28))
 
         ok = True
@@ -1322,7 +1316,7 @@ def test_round_trip(transport, labels, rng):
         write_bytes(transport, input_buf, text)
         write_bytes(transport, zp_ptr1, struct.pack('<H', input_buf))
         write_bytes(transport, zp_tmp1, bytes([len(text)]))
-        robust_jsr(transport, labels["udp_tunnel_build"])
+        jsr(transport, labels["udp_tunnel_build"])
 
         total_len = 28 + len(text)
         pkt = bytes(read_bytes(transport, ip_pkt_buf, total_len))
@@ -1366,12 +1360,17 @@ def test_round_trip(transport, labels, rng):
         write_bytes(transport, labels["tp_peer_recv_idx"], receiver_idx)
         write_bytes(transport, labels["tp_recv_counter"],
                     struct.pack('<Q', counter_val))
+        # Reset sliding window state so counter is accepted
+        if "rw_counter_max" in labels:
+            write_bytes(transport, labels["rw_counter_max"], bytes(8))
+        if "rw_bitmap" in labels:
+            write_bytes(transport, labels["rw_bitmap"], bytes(256))
 
         # Write to udp_recv_buf (transport_decrypt reads from there)
         write_bytes(transport, labels["udp_recv_buf"], bytes(type4))
         write_bytes(transport, labels["udp_recv_len"],
                     struct.pack('<H', len(type4)))
-        robust_jsr(transport, labels["transport_decrypt"], timeout=60.0)
+        jsr(transport, labels["transport_decrypt"], timeout=60.0)
 
         # Read A result from transport_decrypt: check via tp_payload_len
         dec_len = int.from_bytes(read_bytes(transport, labels["tp_payload_len"], 2), 'little')
@@ -1387,7 +1386,7 @@ def test_round_trip(transport, labels, rng):
                 0x60,
             ])
             write_bytes(transport, 0x0340, tramp)
-            robust_jsr(transport, 0x0340)
+            jsr(transport, 0x0340)
             parse_result = read_bytes(transport, 0x0360, 1)[0]
             if parse_result == 0:
                 passed += 1
@@ -1422,11 +1421,16 @@ def test_round_trip(transport, labels, rng):
         write_bytes(transport, labels["tp_peer_recv_idx"], receiver_idx)
         write_bytes(transport, labels["tp_recv_counter"],
                     struct.pack('<Q', counter_val))
+        # Reset sliding window state so counter is accepted
+        if "rw_counter_max" in labels:
+            write_bytes(transport, labels["rw_counter_max"], bytes(8))
+        if "rw_bitmap" in labels:
+            write_bytes(transport, labels["rw_bitmap"], bytes(256))
 
         write_bytes(transport, labels["udp_recv_buf"], bytes(type4))
         write_bytes(transport, labels["udp_recv_len"],
                     struct.pack('<H', len(type4)))
-        robust_jsr(transport, labels["transport_decrypt"], timeout=60.0)
+        jsr(transport, labels["transport_decrypt"], timeout=60.0)
 
         dec_len = int.from_bytes(read_bytes(transport, labels["tp_payload_len"], 2), 'little')
 
@@ -1439,7 +1443,7 @@ def test_round_trip(transport, labels, rng):
                 0x60,
             ])
             write_bytes(transport, 0x0340, tramp)
-            robust_jsr(transport, 0x0340)
+            jsr(transport, 0x0340)
             parse_result = read_bytes(transport, 0x0360, 1)[0]
             recv_msg_len = read_bytes(transport, labels["msg_recv_len"], 1)[0]
 
@@ -1503,8 +1507,6 @@ def run_tests(transport, labels, seed):
             import traceback
             traceback.print_exc()
             total_failed += 1
-        # Small delay between groups to let VICE monitor settle
-        time.sleep(1.0)
 
     return total_passed, total_failed
 
@@ -1581,15 +1583,11 @@ def main():
     # Launch VICE
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
 
-    with ViceInstanceManager(
-        config=config,
-        port_range_start=6510,
-        port_range_end=6530,
-    ) as mgr:
+    with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         print(f"VICE PID={inst.pid}, port={inst.port}")
         transport = inst.transport
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+        grid = binary_wait_for_text(transport, "Q=QUIT", timeout=60.0)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)

@@ -26,8 +26,9 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
-    read_bytes, write_bytes, jsr, wait_for_text,
+    read_bytes, write_bytes, jsr,
 )
+from vice_util import binary_wait_for_text
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "wireguard.prg")
@@ -128,17 +129,6 @@ def py_noise_responder_from_state(c, h, init_ephem_pub, init_static_pub_bytes,
 
     return bytes(type2), i_send, i_recv
 
-
-def robust_jsr(transport, addr, timeout=30.0, retries=5):
-    """jsr() with retry for transient VICE connection failures."""
-    for attempt in range(retries):
-        try:
-            return jsr(transport, addr, timeout=timeout)
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(1.0 + attempt * 0.5)
-                continue
-            raise
 
 
 # ============================================================================
@@ -294,7 +284,7 @@ def run_trial(instance, labels, trial):
         write_bytes(transport, labels["udp_recv_ready"], bytes([1]))
 
         # Run session_handle_packet (3x X25519)
-        robust_jsr(transport, labels["session_handle_packet"], timeout=TYPE2_TIMEOUT)
+        jsr(transport, labels["session_handle_packet"], timeout=TYPE2_TIMEOUT)
 
         # Check result
         state = read_bytes(transport, labels["wg_state"], 1)[0]
@@ -396,8 +386,7 @@ def main():
     print(f"\nLaunching {effective_workers} VICE instances...")
 
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
-    mgr = ViceInstanceManager(config=config, port_range_start=6510,
-                              port_range_end=6530)
+    mgr = ViceInstanceManager(config=config)
 
     with mgr:
         instances = []
@@ -405,17 +394,14 @@ def main():
             inst = mgr.acquire()
             print(f"  Instance {idx}: PID={inst.pid}, port={inst.port}")
             instances.append(inst)
-            if idx < effective_workers - 1:
-                time.sleep(0.1)  # stagger launches for 6+ instances
 
         for idx, inst in enumerate(instances):
-            grid = wait_for_text(inst.transport, "Q=QUIT", timeout=90.0,
-                                 verbose=False)
+            grid = binary_wait_for_text(inst.transport, "Q=QUIT", timeout=90.0)
             if grid is None:
                 print(f"FATAL: Main menu did not appear on instance {idx}")
                 sys.exit(1)
             write_bytes(inst.transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
-            robust_jsr(inst.transport, labels["entropy_init"])
+            jsr(inst.transport, labels["entropy_init"])
 
         print(f"All {effective_workers} instances ready\n")
         print(f"Running {len(trials)} trials (timeout {TYPE2_TIMEOUT}s each)...")

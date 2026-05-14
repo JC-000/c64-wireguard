@@ -15,74 +15,15 @@ import time
 
 from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
-    read_bytes, write_bytes, wait_for_text,
+    read_bytes, write_bytes, jsr,
 )
-from c64_test_harness.execute import set_register
-from c64_test_harness.transport import (
-    TimeoutError as HarnessTimeoutError,
-    ConnectionError as TransportConnectionError,
-)
+from vice_util import binary_wait_for_text
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "wireguard.prg")
 LABELS_PATH = os.path.join(PROJECT_ROOT, "build", "labels.txt")
 
 VERBOSE = False
-
-
-# ---------------------------------------------------------------------------
-# Flag-based jsr() — reliable replacement for breakpoint-based jsr()
-# ---------------------------------------------------------------------------
-
-def jsr_flag(transport, addr, timeout=10.0, scratch_addr=0x0334,
-             poll_interval=0.5):
-    """Call a subroutine at *addr* using flag-based completion detection."""
-    lo = addr & 0xFF
-    hi = (addr >> 8) & 0xFF
-    flag_addr = scratch_addr + 16
-    loop_addr = scratch_addr + 15
-    trampoline = bytes([
-        0xA9, 0x00,                                         # LDA #$00
-        0x8D, flag_addr & 0xFF, (flag_addr >> 8) & 0xFF,    # STA flag
-        0x20, lo, hi,                                        # JSR addr
-        0xA9, 0xFF,                                          # LDA #$FF
-        0x8D, flag_addr & 0xFF, (flag_addr >> 8) & 0xFF,    # STA flag
-        0x4C, loop_addr & 0xFF, (loop_addr >> 8) & 0xFF,    # JMP loop
-        0x00,                                                # flag byte
-    ])
-    transport.write_memory(scratch_addr, trampoline)
-    transport.write_memory(flag_addr, bytes([0x00]))
-    set_register(transport, "PC", scratch_addr)
-
-    deadline = time.monotonic() + timeout
-    while True:
-        time.sleep(poll_interval)
-        if time.monotonic() >= deadline:
-            raise HarnessTimeoutError(
-                f"JSR ${addr:04X} did not return within {timeout}s"
-            )
-        try:
-            data = transport.read_memory(flag_addr, 1)
-            if data[0] == 0xFF:
-                try:
-                    return transport.read_registers()
-                except TransportConnectionError:
-                    return {}
-        except TransportConnectionError:
-            continue
-
-
-def robust_jsr(transport, addr, timeout=10.0, retries=3, poll_interval=0.5):
-    """jsr() with retry for transient VICE connection failures."""
-    for attempt in range(retries):
-        try:
-            return jsr_flag(transport, addr, timeout=timeout,
-                            poll_interval=poll_interval)
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(0.3)
-                continue
-            raise
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +50,7 @@ def test_tai64n_init_zeros(transport, labels):
 
     # Write zeros to base time
     write_bytes(transport, labels["tai64n_base_time"], bytes(8))
-    robust_jsr(transport, labels["tai64n_init"])
+    jsr(transport, labels["tai64n_init"])
 
     ts = read_timestamp(transport, labels)
     seq = bytes(read_bytes(transport, labels["tai64n_seq"], 4))
@@ -141,7 +82,7 @@ def test_tai64n_init_copies_base(transport, labels):
     # As 8-byte big-endian: 00 00 00 00 65 E5 A9 00
     base_time = bytes([0x00, 0x00, 0x00, 0x00, 0x65, 0xE5, 0xA9, 0x00])
     write_bytes(transport, labels["tai64n_base_time"], base_time)
-    robust_jsr(transport, labels["tai64n_init"])
+    jsr(transport, labels["tai64n_init"])
 
     ts = read_timestamp(transport, labels)
 
@@ -171,7 +112,7 @@ def test_tai64n_init_snapshots_jiffy(transport, labels):
     passed = failed = 0
 
     write_bytes(transport, labels["tai64n_base_time"], bytes(8))
-    robust_jsr(transport, labels["tai64n_init"])
+    jsr(transport, labels["tai64n_init"])
 
     jiffy = bytes(read_bytes(transport, labels["tai64n_init_jiffy"], 3))
     jiffy_val = (jiffy[0] << 16) | (jiffy[1] << 8) | jiffy[2]
@@ -193,12 +134,12 @@ def test_tai64n_now_basic(transport, labels):
 
     base_time = bytes([0x00, 0x00, 0x00, 0x00, 0x65, 0xE5, 0xA9, 0x00])
     write_bytes(transport, labels["tai64n_base_time"], base_time)
-    robust_jsr(transport, labels["tai64n_init"])
+    jsr(transport, labels["tai64n_init"])
 
     # Sleep briefly so jiffies advance
     time.sleep(0.1)
 
-    robust_jsr(transport, labels["tai64n_now"])
+    jsr(transport, labels["tai64n_now"])
     ts = read_timestamp(transport, labels)
 
     # Seconds portion should be >= base time
@@ -233,14 +174,14 @@ def test_tai64n_now_sequence_increments(transport, labels):
 
     base_time = bytes([0x00, 0x00, 0x00, 0x00, 0x65, 0xE5, 0xA9, 0x00])
     write_bytes(transport, labels["tai64n_base_time"], base_time)
-    robust_jsr(transport, labels["tai64n_init"])
+    jsr(transport, labels["tai64n_init"])
 
     # First call
-    robust_jsr(transport, labels["tai64n_now"])
+    jsr(transport, labels["tai64n_now"])
     ts1 = read_timestamp(transport, labels)
 
     # Second call
-    robust_jsr(transport, labels["tai64n_now"])
+    jsr(transport, labels["tai64n_now"])
     ts2 = read_timestamp(transport, labels)
 
     seq1 = int.from_bytes(ts1[8:12], 'big')
@@ -280,11 +221,11 @@ def test_tai64n_now_monotonic(transport, labels):
 
     base_time = bytes([0x00, 0x00, 0x00, 0x00, 0x65, 0xE5, 0xA9, 0x00])
     write_bytes(transport, labels["tai64n_base_time"], base_time)
-    robust_jsr(transport, labels["tai64n_init"])
+    jsr(transport, labels["tai64n_init"])
 
     timestamps = []
     for i in range(5):
-        robust_jsr(transport, labels["tai64n_now"])
+        jsr(transport, labels["tai64n_now"])
         ts = read_timestamp(transport, labels)
         timestamps.append(ts)
 
@@ -347,7 +288,7 @@ def test_tai64n_increment_still_works(transport, labels):
 
     for i, (ts_in, expected) in enumerate(test_cases):
         write_bytes(transport, labels["hs_timestamp"], ts_in)
-        robust_jsr(transport, labels["tai64n_increment"])
+        jsr(transport, labels["tai64n_increment"])
         got = read_timestamp(transport, labels)
 
         if got == expected:
@@ -385,19 +326,19 @@ def test_tai64n_now_elapsed_seconds(transport, labels):
     base_val = 1000
     base_time = base_val.to_bytes(8, 'big')
     write_bytes(transport, labels["tai64n_base_time"], base_time)
-    robust_jsr(transport, labels["tai64n_init"])
+    jsr(transport, labels["tai64n_init"])
 
     # Let some jiffies elapse
     time.sleep(0.1)
 
     # Reset seq for a clean count
     write_bytes(transport, labels["tai64n_seq"], bytes(4))
-    robust_jsr(transport, labels["tai64n_now"])
+    jsr(transport, labels["tai64n_now"])
     ts = read_timestamp(transport, labels)
 
     # Read back init_jiffy and current jiffy to see what actually elapsed
     init_jiffy_bytes = bytes(read_bytes(transport, labels["tai64n_init_jiffy"], 3))
-    cur_jiffy_bytes = transport.read_memory(0xA0, 3)
+    cur_jiffy_bytes = read_bytes(transport, 0xA0, 3)
     init_jiffy = (init_jiffy_bytes[0] << 16) | (init_jiffy_bytes[1] << 8) | init_jiffy_bytes[2]
     cur_jiffy = (cur_jiffy_bytes[0] << 16) | (cur_jiffy_bytes[1] << 8) | cur_jiffy_bytes[2]
     # The jiffy clock read now is AFTER tai64n_now ran, but the routine read
@@ -428,7 +369,7 @@ def test_tai64n_now_elapsed_seconds(transport, labels):
     # expect seconds >= 2 (120/60) but allow a small margin.
     write_bytes(transport, labels["tai64n_seq"], bytes(4))
 
-    cur_bytes = transport.read_memory(0xA0, 3)
+    cur_bytes = read_bytes(transport, 0xA0, 3)
     cur = (cur_bytes[0] << 16) | (cur_bytes[1] << 8) | cur_bytes[2]
     fake_init = (cur - 120) & 0xFFFFFF
     write_bytes(transport, labels["tai64n_init_jiffy"], bytes([
@@ -437,7 +378,7 @@ def test_tai64n_now_elapsed_seconds(transport, labels):
         fake_init & 0xFF,
     ]))
 
-    robust_jsr(transport, labels["tai64n_now"])
+    jsr(transport, labels["tai64n_now"])
     ts2 = read_timestamp(transport, labels)
     ts2_seconds = int.from_bytes(ts2[0:8], 'big')
     elapsed2 = ts2_seconds - base_val
@@ -538,15 +479,11 @@ def main():
     # Launch VICE
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
 
-    with ViceInstanceManager(
-        config=config,
-        port_range_start=6510,
-        port_range_end=6530,
-    ) as mgr:
+    with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         print(f"VICE PID={inst.pid}, port={inst.port}")
         transport = inst.transport
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+        grid = binary_wait_for_text(transport, "Q=QUIT", timeout=60.0)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)

@@ -18,12 +18,12 @@ import os
 import random
 import subprocess
 import sys
-import time
 
 from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
-    read_bytes, write_bytes, jsr, wait_for_text,
+    read_bytes, write_bytes, jsr,
 )
+from vice_util import binary_wait_for_text
 
 try:
     from cryptography.hazmat.primitives.asymmetric.x25519 import (
@@ -43,18 +43,6 @@ VERBOSE = False
 SLOW = False
 
 
-def robust_jsr(transport, addr, timeout=30.0, retries=3):
-    """jsr() with retry for transient VICE connection failures."""
-    for attempt in range(retries):
-        try:
-            return jsr(transport, addr, timeout=timeout)
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(0.5)
-                continue
-            raise
-
-
 # ============================================================================
 # C64 helpers
 # ============================================================================
@@ -62,7 +50,7 @@ def robust_jsr(transport, addr, timeout=30.0, retries=3):
 def c64_x25519_clamp(transport, labels, scalar):
     """Clamp a scalar on C64. Returns clamped scalar bytes."""
     write_bytes(transport, labels["x25_scalar"], scalar)
-    robust_jsr(transport, labels["x25519_clamp"])
+    jsr(transport, labels["x25519_clamp"])
     return read_bytes(transport, labels["x25_scalar"], 32)
 
 
@@ -71,14 +59,14 @@ def c64_x25519_scalarmult(transport, labels, scalar, u):
     write_bytes(transport, labels["x25_scalar"], scalar)
     write_bytes(transport, labels["x25_u"], u)
     # Already clamped by caller or test
-    robust_jsr(transport, labels["x25519_scalarmult"], timeout=7200.0)
+    jsr(transport, labels["x25519_scalarmult"], timeout=7200.0)
     return read_bytes(transport, labels["x25_result"], 32)
 
 
 def c64_x25519_base(transport, labels, scalar):
     """Compute scalar * basepoint(9) on C64. Returns 32-byte result."""
     write_bytes(transport, labels["x25_scalar"], scalar)
-    robust_jsr(transport, labels["x25519_base"], timeout=7200.0)
+    jsr(transport, labels["x25519_base"], timeout=7200.0)
     return read_bytes(transport, labels["x25_result"], 32)
 
 
@@ -204,7 +192,6 @@ def test_rfc7748_vectors(transport, labels):
         scalar = clamp_ref(scalar)
 
         print(f"    {vec['desc']}...", end="", flush=True)
-        time.sleep(1.0)
         result = c64_x25519_scalarmult(transport, labels, scalar, u)
 
         if result == expected:
@@ -231,7 +218,6 @@ def test_basepoint(transport, labels):
         expected = bytes.fromhex(vec["expected"])
 
         print(f"    {vec['desc']}...", end="", flush=True)
-        time.sleep(1.0)
         result = c64_x25519_base(transport, labels, scalar)
 
         if result == expected:
@@ -267,7 +253,6 @@ def test_dh_exchange(transport, labels, rng):
     # Generate Bob's keypair on C64
     bob_priv_bytes = bytes(rng.randint(0, 255) for _ in range(32))
     print(f"    DH: generating Bob's pubkey on C64...", end="", flush=True)
-    time.sleep(1.0)
     bob_pub_bytes = c64_x25519_base(transport, labels, bob_priv_bytes)
     print(" done")
 
@@ -278,7 +263,6 @@ def test_dh_exchange(transport, labels, rng):
     # Bob (C64) computes shared secret: bob_priv * alice_pub
     bob_priv_clamped = clamp_ref(bob_priv_bytes)
     print(f"    DH: computing shared secret on C64...", end="", flush=True)
-    time.sleep(1.0)
     bob_shared = c64_x25519_scalarmult(transport, labels,
                                         bob_priv_clamped, alice_pub_bytes)
     print(" done")
@@ -390,15 +374,11 @@ def main():
     # Launch VICE
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
 
-    with ViceInstanceManager(
-        config=config,
-        port_range_start=6510,
-        port_range_end=6530,
-    ) as mgr:
+    with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         print(f"VICE PID={inst.pid}, port={inst.port}")
         transport = inst.transport
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+        grid = binary_wait_for_text(transport, "Q=QUIT", timeout=60.0)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)
@@ -411,7 +391,7 @@ def main():
         print("Initializing sqtab...")
         write_bytes(transport, labels["poly_r"], bytes(16))
         write_bytes(transport, labels["poly_s"], bytes(16))
-        robust_jsr(transport, labels["poly1305_init"], timeout=30.0)
+        jsr(transport, labels["poly1305_init"], timeout=30.0)
         print("sqtab ready")
 
         passed, failed = run_tests(transport, labels, seed)

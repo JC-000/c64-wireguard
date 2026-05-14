@@ -13,30 +13,19 @@ import random
 import struct
 import subprocess
 import sys
-import time
+
 
 from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
-    read_bytes, write_bytes, jsr, wait_for_text,
+    read_bytes, write_bytes, jsr,
 )
+from vice_util import binary_wait_for_text
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "wireguard.prg")
 LABELS_PATH = os.path.join(PROJECT_ROOT, "build", "labels.txt")
 
 VERBOSE = False
-
-
-def robust_jsr(transport, addr, timeout=30.0, retries=5):
-    """jsr() with retry for transient VICE connection failures."""
-    for attempt in range(retries):
-        try:
-            return jsr(transport, addr, timeout=timeout)
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(1.0 + attempt * 0.5)
-                continue
-            raise
 
 
 # ============================================================================
@@ -95,7 +84,7 @@ def test_different_ip_updates(transport, labels):
     write_bytes(transport, labels["udp_recv_src_ip"], new_ip)
     write_bytes(transport, labels["udp_recv_src_port"], initial_port)
 
-    robust_jsr(transport, labels["endpoint_update"])
+    jsr(transport, labels["endpoint_update"])
 
     # Verify peer IP was updated
     result_ip = read_bytes(transport, labels["wg_peer_ip"], 4)
@@ -135,7 +124,7 @@ def test_different_port_updates(transport, labels):
     write_bytes(transport, labels["udp_recv_src_ip"], initial_ip)
     write_bytes(transport, labels["udp_recv_src_port"], new_port)
 
-    robust_jsr(transport, labels["endpoint_update"])
+    jsr(transport, labels["endpoint_update"])
 
     result_ip = read_bytes(transport, labels["wg_peer_ip"], 4)
     result_port = read_bytes(transport, labels["wg_peer_port"], 2)
@@ -172,7 +161,7 @@ def test_same_endpoint_no_change(transport, labels):
     write_bytes(transport, labels["udp_recv_src_ip"], ip_val)
     write_bytes(transport, labels["udp_recv_src_port"], port_val)
 
-    robust_jsr(transport, labels["endpoint_update"])
+    jsr(transport, labels["endpoint_update"])
 
     result_ip = read_bytes(transport, labels["wg_peer_ip"], 4)
     result_port = read_bytes(transport, labels["wg_peer_port"], 2)
@@ -202,7 +191,7 @@ def test_both_ip_and_port_change(transport, labels):
     write_bytes(transport, labels["udp_recv_src_ip"], new_ip)
     write_bytes(transport, labels["udp_recv_src_port"], new_port)
 
-    robust_jsr(transport, labels["endpoint_update"])
+    jsr(transport, labels["endpoint_update"])
 
     result_ip = read_bytes(transport, labels["wg_peer_ip"], 4)
     result_port = read_bytes(transport, labels["wg_peer_port"], 2)
@@ -266,7 +255,7 @@ def test_source_port_capture(transport, labels):
         print("  SKIP: net_udp_recv_cb label not found")
         return 0, 0
 
-    robust_jsr(transport, net_udp_recv_cb)
+    jsr(transport, net_udp_recv_cb)
 
     # Check source port was captured
     result_port = read_bytes(transport, labels["udp_recv_src_port"], 2)
@@ -319,7 +308,6 @@ def run_tests(transport, labels):
             import traceback
             traceback.print_exc()
             total_failed += 1
-        time.sleep(1.0)
 
     return total_passed, total_failed
 
@@ -358,16 +346,12 @@ def main():
     # Launch VICE
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
 
-    with ViceInstanceManager(
-        config=config,
-        port_range_start=6510,
-        port_range_end=6530,
-    ) as mgr:
+    with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         print(f"VICE PID={inst.pid}, port={inst.port}")
 
         transport = inst.transport
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+        grid = binary_wait_for_text(transport, "Q=QUIT", timeout=60.0)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)

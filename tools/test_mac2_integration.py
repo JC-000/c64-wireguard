@@ -17,80 +17,20 @@ import random
 import struct
 import subprocess
 import sys
-import time
 
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
-    read_bytes, write_bytes, wait_for_text,
+    read_bytes, write_bytes, jsr,
 )
-from c64_test_harness.execute import set_register
-from c64_test_harness.transport import (
-    TimeoutError as HarnessTimeoutError,
-    ConnectionError as TransportConnectionError,
-)
+from vice_util import binary_wait_for_text
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "wireguard.prg")
 LABELS_PATH = os.path.join(PROJECT_ROOT, "build", "labels.txt")
 
 VERBOSE = False
-
-
-# ---------------------------------------------------------------------------
-# Flag-based jsr() — reliable replacement for breakpoint-based jsr()
-# ---------------------------------------------------------------------------
-
-def jsr_flag(transport, addr, timeout=10.0, scratch_addr=0x0334,
-             poll_interval=0.5):
-    """Call a subroutine at *addr* using flag-based completion detection."""
-    lo = addr & 0xFF
-    hi = (addr >> 8) & 0xFF
-    flag_addr = scratch_addr + 16
-    loop_addr = scratch_addr + 15
-    trampoline = bytes([
-        0xA9, 0x00,
-        0x8D, flag_addr & 0xFF, (flag_addr >> 8) & 0xFF,
-        0x20, lo, hi,
-        0xA9, 0xFF,
-        0x8D, flag_addr & 0xFF, (flag_addr >> 8) & 0xFF,
-        0x4C, loop_addr & 0xFF, (loop_addr >> 8) & 0xFF,
-        0x00,
-    ])
-    transport.write_memory(scratch_addr, trampoline)
-    transport.write_memory(flag_addr, bytes([0x00]))
-    set_register(transport, "PC", scratch_addr)
-
-    deadline = time.monotonic() + timeout
-    while True:
-        time.sleep(poll_interval)
-        if time.monotonic() >= deadline:
-            raise HarnessTimeoutError(
-                f"JSR ${addr:04X} did not return within {timeout}s"
-            )
-        try:
-            data = transport.read_memory(flag_addr, 1)
-            if data[0] == 0xFF:
-                try:
-                    return transport.read_registers()
-                except TransportConnectionError:
-                    return {}
-        except TransportConnectionError:
-            continue
-
-
-def robust_jsr(transport, addr, timeout=10.0, retries=3, poll_interval=0.5):
-    """jsr() with retry for transient VICE connection failures."""
-    for attempt in range(retries):
-        try:
-            return jsr_flag(transport, addr, timeout=timeout,
-                            poll_interval=poll_interval)
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(0.3)
-                continue
-            raise
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +169,7 @@ def test_mac2_zero_without_cookie(transport, labels, rng):
     trampoline[jmp_placeholder + 2] = (done_addr >> 8) & 0xFF
 
     write_bytes(transport, trampoline_addr, bytes(trampoline))
-    robust_jsr(transport, trampoline_addr, timeout=10.0)
+    jsr(transport, trampoline_addr, timeout=10.0)
 
     # Read MAC2 region: hs_packet[132..147]
     mac2_bytes = bytes(read_bytes(transport, hs_packet_addr + 132, 16))
@@ -291,7 +231,7 @@ def test_cookie_sets_valid_flag(transport, labels, rng):
     # Clear cookie_valid before handling cookie reply
     write_bytes(transport, cookie_valid_addr, bytes([0]))
     write_bytes(transport, udp_recv_buf_addr, bytes(type3))
-    robust_jsr(transport, 0x0380, timeout=120.0)
+    jsr(transport, 0x0380, timeout=120.0)
 
     result_a = read_bytes(transport, 0x0360, 1)[0]
     valid_flag = read_bytes(transport, cookie_valid_addr, 1)[0]
@@ -343,7 +283,7 @@ def test_mac2_nonzero_with_cookie(transport, labels, rng):
     write_bytes(transport, cookie_valid_addr, bytes([1]))
 
     # Call hs_set_mac2 directly
-    robust_jsr(transport, set_mac2_addr, timeout=30.0)
+    jsr(transport, set_mac2_addr, timeout=30.0)
 
     # Read MAC2: hs_packet[132..147]
     mac2_c64 = bytes(read_bytes(transport, hs_packet_addr + 132, 16))
@@ -395,7 +335,7 @@ def test_cookie_valid_cleared_after_use(transport, labels):
         return passed, failed
 
     # Call hs_set_mac2
-    robust_jsr(transport, set_mac2_addr, timeout=30.0)
+    jsr(transport, set_mac2_addr, timeout=30.0)
 
     # Check cookie_valid is now 0
     post_valid = read_bytes(transport, cookie_valid_addr, 1)[0]
@@ -458,7 +398,7 @@ def test_full_flow(transport, labels, rng):
 
     write_bytes(transport, cookie_valid_addr, bytes([0]))
     write_bytes(transport, udp_recv_buf_addr, bytes(type3))
-    robust_jsr(transport, 0x0380, timeout=120.0)
+    jsr(transport, 0x0380, timeout=120.0)
 
     result_a = read_bytes(transport, 0x0360, 1)[0]
     if result_a != 0:
@@ -476,7 +416,7 @@ def test_full_flow(transport, labels, rng):
     packet_prefix = bytes(rng.randint(0, 255) for _ in range(132))
     write_bytes(transport, hs_packet_addr, packet_prefix)
 
-    robust_jsr(transport, set_mac2_addr, timeout=30.0)
+    jsr(transport, set_mac2_addr, timeout=30.0)
 
     # --- Phase 3: Verify MAC2 ---
     mac2_c64 = bytes(read_bytes(transport, hs_packet_addr + 132, 16))
@@ -640,15 +580,11 @@ def main():
     # Launch VICE
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
 
-    with ViceInstanceManager(
-        config=config,
-        port_range_start=6510,
-        port_range_end=6530,
-    ) as mgr:
+    with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         print(f"VICE PID={inst.pid}, port={inst.port}")
         transport = inst.transport
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+        grid = binary_wait_for_text(transport, "Q=QUIT", timeout=60.0)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)

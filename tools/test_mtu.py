@@ -14,86 +14,20 @@ import random
 import struct
 import subprocess
 import sys
-import time
 
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
-    read_bytes, write_bytes, wait_for_text,
+    read_bytes, write_bytes, jsr,
 )
-from c64_test_harness.execute import set_register
-from c64_test_harness.transport import (
-    TimeoutError as HarnessTimeoutError,
-    ConnectionError as TransportConnectionError,
-)
+from vice_util import binary_wait_for_text
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "wireguard.prg")
 LABELS_PATH = os.path.join(PROJECT_ROOT, "build", "labels.txt")
 
 VERBOSE = False
-
-
-# ---------------------------------------------------------------------------
-# Flag-based jsr() — reliable replacement for breakpoint-based jsr()
-# ---------------------------------------------------------------------------
-
-def jsr_flag(transport, addr, timeout=10.0, scratch_addr=0x0334,
-             poll_interval=0.5):
-    """Call a subroutine at *addr* using flag-based completion detection.
-
-    Uses a trampoline that sets a flag byte after the subroutine returns.
-    Polls the flag via memory reads instead of using breakpoints.  This
-    avoids VICE's text monitor becoming unresponsive during long warp-mode
-    computations.
-    """
-    lo = addr & 0xFF
-    hi = (addr >> 8) & 0xFF
-    flag_addr = scratch_addr + 16
-    loop_addr = scratch_addr + 15
-    trampoline = bytes([
-        0xA9, 0x00,
-        0x8D, flag_addr & 0xFF, (flag_addr >> 8) & 0xFF,
-        0x20, lo, hi,
-        0xA9, 0xFF,
-        0x8D, flag_addr & 0xFF, (flag_addr >> 8) & 0xFF,
-        0x4C, loop_addr & 0xFF, (loop_addr >> 8) & 0xFF,
-        0x00,
-    ])
-    transport.write_memory(scratch_addr, trampoline)
-    transport.write_memory(flag_addr, bytes([0x00]))
-    set_register(transport, "PC", scratch_addr)
-
-    deadline = time.monotonic() + timeout
-    while True:
-        time.sleep(poll_interval)
-        if time.monotonic() >= deadline:
-            raise HarnessTimeoutError(
-                f"JSR ${addr:04X} did not return within {timeout}s"
-            )
-        try:
-            data = transport.read_memory(flag_addr, 1)
-            if data[0] == 0xFF:
-                try:
-                    return transport.read_registers()
-                except TransportConnectionError:
-                    return {}
-        except TransportConnectionError:
-            continue
-
-
-def robust_jsr(transport, addr, timeout=10.0, retries=3, poll_interval=0.5):
-    """jsr() with retry for transient VICE connection failures."""
-    for attempt in range(retries):
-        try:
-            return jsr_flag(transport, addr, timeout=timeout,
-                            poll_interval=poll_interval)
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(0.3)
-                continue
-            raise
 
 
 def py_encrypt(key, counter_val, plaintext):
@@ -185,10 +119,7 @@ def test_encrypt(transport, labels, rng, sizes):
         write_bytes(transport, labels["tp_payload_len"],
                     struct.pack('<H', size))
 
-        timeout = 30.0
-        pi = 0.5
-        robust_jsr(transport, labels["transport_encrypt"],
-                   timeout=timeout, poll_interval=pi)
+        jsr(transport, labels["transport_encrypt"], timeout=30.0)
 
         pkt_len = int.from_bytes(
             read_bytes(transport, labels["tp_packet_len"], 2), 'little')
@@ -232,10 +163,7 @@ def test_decrypt(transport, labels, rng, sizes):
         write_bytes(transport, labels["udp_recv_len"],
                     struct.pack('<H', len(packet)))
 
-        timeout = 30.0
-        pi = 0.5
-        robust_jsr(transport, labels["transport_decrypt"],
-                   timeout=timeout, poll_interval=pi)
+        jsr(transport, labels["transport_decrypt"], timeout=30.0)
 
         result_len = int.from_bytes(
             read_bytes(transport, labels["tp_payload_len"], 2), 'little')
@@ -283,10 +211,7 @@ def test_round_trip(transport, labels, rng, sizes):
         write_bytes(transport, labels["tp_payload_len"],
                     struct.pack('<H', size))
 
-        timeout = 30.0
-        pi = 0.5
-        robust_jsr(transport, labels["transport_encrypt"],
-                   timeout=timeout, poll_interval=pi)
+        jsr(transport, labels["transport_encrypt"], timeout=30.0)
 
         pkt_len = int.from_bytes(
             read_bytes(transport, labels["tp_packet_len"], 2), 'little')
@@ -299,8 +224,7 @@ def test_round_trip(transport, labels, rng, sizes):
         write_bytes(transport, labels["udp_recv_len"],
                     struct.pack('<H', pkt_len))
 
-        robust_jsr(transport, labels["transport_decrypt"],
-                   timeout=timeout, poll_interval=pi)
+        jsr(transport, labels["transport_decrypt"], timeout=30.0)
 
         result_len = int.from_bytes(
             read_bytes(transport, labels["tp_payload_len"], 2), 'little')
@@ -408,17 +332,12 @@ def main():
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True,
                         sound=False)
 
-    with ViceInstanceManager(
-        config=config,
-        port_range_start=6510,
-        port_range_end=6530,
-    ) as mgr:
+    with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         print(f"VICE PID={inst.pid}, port={inst.port}")
 
         transport = inst.transport
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0,
-                             verbose=False)
+        grid = binary_wait_for_text(transport, "Q=QUIT", timeout=60.0)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)

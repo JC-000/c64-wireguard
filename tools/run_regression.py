@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run all regression test suites in parallel with staggered launch.
+"""Run all regression test suites in parallel.
 
 Builds once before launching tests. Sets C64_SKIP_BUILD=1 so individual
 test scripts skip their own make clean && make.
@@ -8,7 +8,6 @@ test scripts skip their own make clean && make.
 import os
 import subprocess
 import sys
-import time
 
 TESTS = [
     ("session",    ["tools/test_session.py", "--seed", "51820", "--verbose"]),
@@ -27,7 +26,6 @@ TESTS = [
 ]
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
-STAGGER_DELAY = 2.0  # seconds between launches for port binding
 
 
 def main():
@@ -56,7 +54,6 @@ def main():
         )
         procs.append((name, p))
         print(f"Launched {name} (PID {p.pid})")
-        time.sleep(STAGGER_DELAY)
 
     results = {}
     for name, p in procs:

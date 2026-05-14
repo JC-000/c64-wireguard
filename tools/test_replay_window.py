@@ -14,32 +14,21 @@ import random
 import struct
 import subprocess
 import sys
-import time
+
 
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
-    read_bytes, write_bytes, jsr, wait_for_text,
+    read_bytes, write_bytes, jsr,
 )
+from vice_util import binary_wait_for_text
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "wireguard.prg")
 LABELS_PATH = os.path.join(PROJECT_ROOT, "build", "labels.txt")
 
 VERBOSE = False
-
-
-def robust_jsr(transport, addr, timeout=30.0, retries=5):
-    """jsr() with retry for transient VICE connection failures."""
-    for attempt in range(retries):
-        try:
-            return jsr(transport, addr, timeout=timeout)
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(1.0 + attempt * 0.5)
-                continue
-            raise
 
 
 # ============================================================================
@@ -91,7 +80,7 @@ def send_and_check(transport, labels, key, counter_val, plaintext,
     byte_offset = counter_low11 >> 3
     bit_index = counter_low11 & 7
 
-    robust_jsr(transport, labels["transport_decrypt"], timeout=60.0)
+    jsr(transport, labels["transport_decrypt"], timeout=60.0)
 
     # Check result: read rw_counter_max and the bitmap bit
     new_max = read_bytes(transport, labels["rw_counter_max"], 8)
@@ -438,7 +427,6 @@ def run_tests(transport, labels, seed):
             import traceback
             traceback.print_exc()
             total_failed += 1
-        time.sleep(1.0)
 
     return total_passed, total_failed
 
@@ -497,16 +485,12 @@ def main():
     # Launch VICE
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
 
-    with ViceInstanceManager(
-        config=config,
-        port_range_start=6510,
-        port_range_end=6530,
-    ) as mgr:
+    with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         print(f"VICE PID={inst.pid}, port={inst.port}")
 
         transport = inst.transport
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+        grid = binary_wait_for_text(transport, "Q=QUIT", timeout=60.0)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)
