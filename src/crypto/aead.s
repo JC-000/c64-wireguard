@@ -1,5 +1,5 @@
 ; =============================================================================
-; aead.asm - ChaCha20-Poly1305 AEAD (RFC 7539 §2.8)
+; aead.s - ChaCha20-Poly1305 AEAD (RFC 7539 §2.8)
 ;
 ; Encrypt: derive OTK, encrypt plaintext, compute tag
 ; Decrypt: derive OTK, verify tag, decrypt ciphertext
@@ -17,6 +17,46 @@
 ;   aead_tag (16 bytes) — authentication tag
 ;   A register: 0 = success (decrypt), nonzero = auth failure
 ; =============================================================================
+
+.include "constants.inc"
+
+.export aead_encrypt
+.export aead_decrypt
+
+; Configuration buffers (defined in data module alongside all other WG
+; mutable state; imported here so aead code can reference them).
+.import aead_key
+.import aead_nonce
+.import aead_aad_ptr
+.import aead_aad_len
+.import aead_data_ptr
+.import aead_data_len
+.import aead_tag
+.import aead_scratch
+
+; ChaCha20 primitives
+.import chacha20_init
+.import chacha20_block
+.import chacha20_encrypt
+
+; ChaCha20 shared state (defined in data module)
+.import cc20_key
+.import cc20_nonce
+.import cc20_counter
+.import cc20_keystream
+.import cc20_remain_hi
+
+; Poly1305 primitives
+.import poly1305_init
+.import poly1305_block
+.import poly1305_final
+
+; Poly1305 shared state (defined in data module)
+.import poly_r
+.import poly_s
+.import poly1305_tag
+
+.segment "CRYPTO_CODE"
 
 ; =============================================================================
 ; aead_encrypt - ChaCha20-Poly1305 authenticated encryption
@@ -334,3 +374,8 @@ aead_verify_tag:
         bpl @cmp_loop
         lda poly_carry          ; 0 = match, nonzero = mismatch
         rts
+
+; Mutable state buffers (aead_key/nonce/aad_ptr/aad_len/data_ptr/
+; data_len/tag/scratch) are defined in the shared data module alongside
+; all other WG mutable state — see src/wg/data.s (Phase 4 migration of
+; src/data.asm).

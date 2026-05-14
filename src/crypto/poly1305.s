@@ -1,5 +1,5 @@
 ; =============================================================================
-; poly1305.asm - Poly1305 MAC (RFC 7539)
+; poly1305.s - Poly1305 MAC (RFC 7539)
 ;
 ; 130-bit modular arithmetic using quarter-square lookup table for fast
 ; 8x8→16-bit byte multiplication.
@@ -12,9 +12,50 @@
 ; Identity: a*b = floor((a+b)^2/4) - floor((a-b)^2/4)
 ; =============================================================================
 
+.include "constants.inc"
+
+; --- Public API entry points ---
+.export poly1305_init
+.export poly1305_clamp
+.export poly1305_multiply
+.export poly1305_reduce
+.export poly1305_block
+.export poly1305_update
+.export poly1305_final
+.export mul_8x8
+.export sqtab_init
+
+; --- Data labels referenced by other modules (fe25519 in particular) ---
+.export sqtab_lo
+.export sqtab_hi
+.export poly_prod_lo
+.export poly_prod_hi
+
+; --- Mutable state defined in data.asm (still ACME during migration) ---
+.import poly_r
+.import poly_s
+.import poly_h
+.import poly_product
+.import poly1305_tag
+.import aead_scratch
+
+; =============================================================================
 ; Quarter-square table addresses (page-aligned for speed)
+;
+; TODO(phase-3): ACME source and cfg/c64-wireguard-ip65.cfg disagree on the
+; sqtab location. The ACME equates below place the table at $8000/$8200,
+; matching the live ACME build. The ld65 cfg reserves SQTAB at $7800-$7BFF.
+; These equates preserve ACME behaviour (mechanical port, no logic change).
+; Reconcile by either moving sqtab_lo/sqtab_hi into .segment "SQTAB_DATA"
+; with .res 256 x2 (letting ld65 place them at $7800), or updating the cfg
+; MEMORY map to match $8000. Do this after all crypto modules are ported
+; and the cfg's CRYPTO region is verified to end below whichever address
+; is chosen.
+; =============================================================================
 sqtab_lo        = $8000         ; 512 bytes: low bytes of floor(n^2/4)
 sqtab_hi        = $8200         ; 512 bytes: high bytes of floor(n^2/4)
+
+.segment "CRYPTO_CODE"
 
 ; =============================================================================
 ; poly1305_init - Initialize Poly1305 state
@@ -134,9 +175,9 @@ sqtab_init:
         rol
         sta sq_ad+1
         inc sq_ad
-        bne +
+        bne :+
         inc sq_ad+1
-+
+:
         clc
         lda sq_acc
         adc sq_ad
@@ -149,19 +190,13 @@ sqtab_init:
         sta sq_acc+2
 
         inc sq_i
-        bne +
+        bne :+
         inc sq_i+1
-+       lda sq_i+1
+:       lda sq_i+1
         cmp #2                  ; check if i reached 512 (0x200)
         beq @done
         jmp @loop
 @done:  rts
-
-; Temporaries for sqtab_init
-sq_acc: !fill 3, 0              ; 24-bit accumulator for i^2
-sq_sh:  !fill 3, 0              ; 24-bit shifted result (i^2 / 4)
-sq_ad:  !fill 2, 0              ; 16-bit addition term (2i+1)
-sq_i:   !fill 2, 0              ; 16-bit index counter (0..511)
 
 ; =============================================================================
 ; mul_8x8 - 8-bit x 8-bit → 16-bit multiply using quarter-square table
@@ -172,9 +207,6 @@ sq_i:   !fill 2, 0              ; 16-bit index counter (0..511)
 ; Uses identity: a*b = sqtab[a+b] - sqtab[|a-b|]
 ; Clobbers: A, X, Y
 ; =============================================================================
-poly_prod_lo:   !byte 0
-poly_prod_hi:   !byte 0
-
 mul_8x8:
         sta mul_a               ; save A
         stx mul_b               ; save X
@@ -191,10 +223,10 @@ mul_8x8:
         lda mul_a
         sec
         sbc mul_b
-        bcs +
+        bcs :+
         eor #$ff
         adc #1                  ; negate (carry was clear, so ADC adds 1)
-+       tay                     ; Y = |a-b| (always page 0, ≤255)
+:       tay                     ; Y = |a-b| (always page 0, ≤255)
 
         ; sqtab[sum] - sqtab[|diff|]
         lda mul_s_pg
@@ -218,10 +250,6 @@ mul_8x8:
         sbc sqtab_hi,y
         sta poly_prod_hi
         rts
-
-mul_a:          !byte 0
-mul_b:          !byte 0
-mul_s_pg:       !byte 0
 
 ; =============================================================================
 ; poly1305_multiply - Multiply h (17 bytes) by r (16 bytes), reduce mod 2^130-5
@@ -608,3 +636,22 @@ poly1305_final:
         cpx #16
         bcc @output
         rts
+
+; =============================================================================
+; BSS — mul_8x8 output + sqtab_init / mul_8x8 scratch
+; =============================================================================
+.segment "CRYPTO_BSS"
+
+poly_prod_lo:   .res 1
+poly_prod_hi:   .res 1
+
+; Temporaries for sqtab_init
+sq_acc: .res 3                  ; 24-bit accumulator for i^2
+sq_sh:  .res 3                  ; 24-bit shifted result (i^2 / 4)
+sq_ad:  .res 2                  ; 16-bit addition term (2i+1)
+sq_i:   .res 2                  ; 16-bit index counter (0..511)
+
+; Temporaries for mul_8x8
+mul_a:          .res 1
+mul_b:          .res 1
+mul_s_pg:       .res 1

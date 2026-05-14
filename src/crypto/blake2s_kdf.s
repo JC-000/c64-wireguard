@@ -1,5 +1,5 @@
 ; =============================================================================
-; blake2s_kdf.asm - HMAC-BLAKE2s + WireGuard KDF functions
+; blake2s_kdf.s - HMAC-BLAKE2s + WireGuard KDF functions
 ;
 ; HMAC-BLAKE2s(key, data) = BLAKE2s(opad || BLAKE2s(ipad || data))
 ;   where ipad = key XOR 0x36 (padded to 64 bytes)
@@ -17,6 +17,33 @@
 ;   T3 = HMAC(PRK, T2 || 0x03)
 ; =============================================================================
 
+.include "constants.inc"
+
+.export hmac_blake2s
+.export kdf_1
+.export kdf_2
+.export kdf_3
+
+.import blake2s_init
+.import blake2s_update
+.import blake2s_final
+
+; Shared data buffers defined in data module
+.import b2s_hash
+.import hmac_ipad
+.import hmac_opad
+.import hmac_inner_hash
+.import hmac_key_ptr
+.import hmac_key_len
+.import hmac_data_ptr
+.import hmac_data_len
+.import kdf_out1
+.import kdf_out2
+.import kdf_out3
+.import kdf_prk
+.import kdf_input_ptr
+.import kdf_input_len
+
 ; =============================================================================
 ; hmac_blake2s - Compute HMAC-BLAKE2s-256
 ;
@@ -26,15 +53,17 @@
 ;
 ; Clobbers: hmac_ipad, hmac_opad, hmac_inner_hash, all BLAKE2s state
 ; =============================================================================
+.segment "CRYPTO_CODE"
+
 hmac_blake2s:
         ; --- Build ipad and opad ---
         ; zero both pads
         ldx #63
         lda #0
--       sta hmac_ipad,x
+:       sta hmac_ipad,x
         sta hmac_opad,x
         dex
-        bpl -
+        bpl :-
 
         ; copy key into both pads (if key > 64 bytes, should hash first,
         ; but BLAKE2s keys are <= 32 bytes so this never happens)
@@ -57,14 +86,14 @@ hmac_blake2s:
 @pads_xored:
         ; XOR ipad with 0x36, opad with 0x5c
         ldx #63
--       lda hmac_ipad,x
+:       lda hmac_ipad,x
         eor #$36
         sta hmac_ipad,x
         lda hmac_opad,x
         eor #$5c
         sta hmac_opad,x
         dex
-        bpl -
+        bpl :-
 
         ; --- Inner hash: BLAKE2s(ipad || data) ---
         lda #32
@@ -93,10 +122,10 @@ hmac_blake2s:
 
         ; save inner hash
         ldx #31
--       lda b2s_hash,x
+:       lda b2s_hash,x
         sta hmac_inner_hash,x
         dex
-        bpl -
+        bpl :-
 
         ; --- Outer hash: BLAKE2s(opad || inner_hash) ---
         lda #32
@@ -168,10 +197,10 @@ kdf_1:
 
         ; save PRK
         ldx #31
--       lda b2s_hash,x
+:       lda b2s_hash,x
         sta kdf_prk,x
         dex
-        bpl -
+        bpl :-
 
         ; T1 = HMAC(PRK, 0x01)
         jsr kdf_set_hmac_key_prk
@@ -185,10 +214,10 @@ kdf_1:
 
         ; copy to kdf_out1
         ldx #31
--       lda b2s_hash,x
+:       lda b2s_hash,x
         sta kdf_out1,x
         dex
-        bpl -
+        bpl :-
 
         rts
 
@@ -204,10 +233,10 @@ kdf_2:
         ; T2 = HMAC(PRK, T1 || 0x02)
         ; Build T1 || 0x02 in kdf_hmac_buf (33 bytes)
         ldx #31
--       lda kdf_out1,x
+:       lda kdf_out1,x
         sta kdf_hmac_buf,x
         dex
-        bpl -
+        bpl :-
         lda #$02
         sta kdf_hmac_buf+32
 
@@ -221,10 +250,10 @@ kdf_2:
         jsr hmac_blake2s
 
         ldx #31
--       lda b2s_hash,x
+:       lda b2s_hash,x
         sta kdf_out2,x
         dex
-        bpl -
+        bpl :-
 
         rts
 
@@ -239,10 +268,10 @@ kdf_3:
 
         ; T3 = HMAC(PRK, T2 || 0x03)
         ldx #31
--       lda kdf_out2,x
+:       lda kdf_out2,x
         sta kdf_hmac_buf,x
         dex
-        bpl -
+        bpl :-
         lda #$03
         sta kdf_hmac_buf+32
 
@@ -256,18 +285,22 @@ kdf_3:
         jsr hmac_blake2s
 
         ldx #31
--       lda b2s_hash,x
+:       lda b2s_hash,x
         sta kdf_out3,x
         dex
-        bpl -
+        bpl :-
 
         rts
 
 ; --- KDF counter bytes ---
-kdf_counter_1:  !byte $01
-kdf_counter_2:  !byte $02
-kdf_counter_3:  !byte $03
+.segment "CRYPTO_RODATA"
+
+kdf_counter_1:  .byte $01
+kdf_counter_2:  .byte $02
+kdf_counter_3:  .byte $03
 
 ; --- KDF HMAC input buffer (T_prev || counter, 33 bytes max) ---
+.segment "CRYPTO_BSS"
+
 kdf_hmac_buf:
-        !fill 33, 0
+        .res 33, 0

@@ -1,5 +1,7 @@
 ; =============================================================================
-; disk_config.asm - SEQ file configuration reader
+; wg/disk_config.s - SEQ file configuration reader (ca65)
+;
+; ca65 port of src/disk_config.asm. No logic changes; syntax translation only.
 ;
 ; Reads WireGuard configuration from "WG.CFG" on disk using KERNAL I/O.
 ; BASIC ROM is banked out; KERNAL ROM is available.
@@ -12,12 +14,36 @@
 ;   Line 5: endpoint port (decimal, e.g. "51820")
 ;   Line 6: tunnel IP (dotted decimal)
 ;   Line 7: ping target IP (dotted decimal)
-;   Line 8: preshared key (64 hex chars) — optional, zeros if omitted
-;   Line 9: Unix timestamp (decimal, up to 10 digits) — optional, zeros if omitted
+;   Line 8: preshared key (64 hex chars) - optional, zeros if omitted
+;   Line 9: Unix timestamp (decimal, up to 10 digits) - optional, zeros if omitted
 ;
 ; Interface:
 ;   config_read_file  - read and parse entire config file
 ; =============================================================================
+
+.include "constants.inc"
+
+; ---- Public entry points -----------------------------------------------------
+.export config_read_file
+
+; ---- External symbols (defined in other modules) ----------------------------
+; Config buffers (defined in data.s)
+.import cfg_static_priv
+.import cfg_static_pub
+.import cfg_peer_pub
+.import cfg_peer_endpoint_ip
+.import cfg_peer_endpoint_port
+.import cfg_preshared_key
+.import tunnel_ip
+.import ping_target_ip
+.import tai64n_base_time
+.import config_filename
+.import config_filename_len
+
+; =============================================================================
+; Code
+; =============================================================================
+.segment "APP_CODE"
 
 ; =============================================================================
 ; config_read_file - Open and parse WireGuard config from disk
@@ -36,7 +62,7 @@ config_read_file:
         jsr setlfs
 
         ; SETNAM: filename
-        lda #config_filename_len
+        lda #<config_filename_len
         ldx #<config_filename
         ldy #>config_filename
         jsr setnam
@@ -419,8 +445,12 @@ parse_decimal_u64:
         bpl @copy_out
         rts
 
-; 8-byte working buffers for u64 decimal parsing
+; =============================================================================
+; BSS: 8-byte working buffers for u64 decimal parsing
+; =============================================================================
+.segment "APP_BSS"
+
 u64_acc:
-        !fill 8, 0
+        .res 8, 0
 u64_tmp:
-        !fill 8, 0
+        .res 8, 0

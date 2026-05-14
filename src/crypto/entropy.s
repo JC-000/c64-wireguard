@@ -1,8 +1,16 @@
 ; =============================================================================
-; entropy.asm - Hardware random number generation
+; entropy.s - Hardware random number generation
 ;
 ; Uses SID voice 3 noise waveform + CIA1 timer A for entropy.
 ; =============================================================================
+
+.include "constants.inc"
+
+.export entropy_init
+.export entropy_byte
+.export entropy_fill
+
+.segment "CRYPTO_CODE"
 
 ; =============================================================================
 ; entropy_init - Initialize entropy sources

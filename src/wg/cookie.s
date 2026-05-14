@@ -1,5 +1,5 @@
 ; =============================================================================
-; cookie.asm - Type 3 cookie reply handling (XChaCha20-Poly1305)
+; cookie.s - Type 3 cookie reply handling (XChaCha20-Poly1305)
 ;
 ; Type 3 packet format (64 bytes in udp_recv_buf):
 ;   [0-3]   type=3, reserved
@@ -14,9 +14,66 @@
 ;   hs_set_mac2         - compute MAC2 from cookie and set in hs_packet
 ; =============================================================================
 
+.include "constants.inc"
+
+; ---- Public entry points -----------------------------------------------------
+.export wg_cookie_label
+.export hchacha20
+.export cookie_handle_type3
+.export hs_set_mac2
+
+; ---- External symbols (defined in other modules) ----------------------------
+; Subroutines
+.import chacha20_init
+.import chacha20_quarter_round
+.import blake2s_init
+.import blake2s_update
+.import blake2s_final
+.import aead_decrypt
+
+; ChaCha20 state buffers
+; Note: cc20_round, cc20_qr_idx are ZP equates in constants.inc (not imported)
+.import cc20_state
+.import cc20_work
+.import cc20_key
+.import cc20_counter
+.import cc20_nonce
+
+; BLAKE2s state
+; Note: b2s_key_len, b2s_data_ptr, b2s_remain are ZP equates in constants.inc
+.import b2s_out_len
+.import b2s_hash
+
+; AEAD state
+.import aead_key
+.import aead_nonce
+.import aead_aad_ptr
+.import aead_aad_len
+.import aead_data_ptr
+.import aead_data_len
+.import aead_tag
+
+; Handshake / session / config / network buffers
+.import cfg_peer_pub
+.import udp_recv_buf
+.import cookie_buf
+.import cookie_valid
+.import hs_packet
+.import input_buffer
+
+; =============================================================================
+; Data
+; =============================================================================
+.segment "APP_DATA"
+
 ; Cookie label for key derivation
 wg_cookie_label:
-        !text "cookie--"
+        .byte "cookie--"
+
+; =============================================================================
+; Code
+; =============================================================================
+.segment "APP_CODE"
 
 ; =============================================================================
 ; hchacha20 - HChaCha20 subkey derivation
@@ -33,7 +90,7 @@ hchacha20:
         ; Set up state via chacha20_init
         jsr chacha20_init
 
-        ; Copy cc20_state → cc20_work (64 bytes)
+        ; Copy cc20_state -> cc20_work (64 bytes)
         ldx #63
 @hc_copy:
         lda cc20_state,x
@@ -58,7 +115,7 @@ hchacha20:
         dec cc20_round
         bne @hc_dr
 
-        ; Extract subkey: work[0..15] → cc20_key[0..15]
+        ; Extract subkey: work[0..15] -> cc20_key[0..15]
         ldx #15
 @hc_out1:
         lda cc20_work,x
@@ -66,7 +123,7 @@ hchacha20:
         dex
         bpl @hc_out1
 
-        ; Extract subkey: work[48..63] → cc20_key[16..31]
+        ; Extract subkey: work[48..63] -> cc20_key[16..31]
         ldx #15
 @hc_out2:
         lda cc20_work+48,x
@@ -80,7 +137,7 @@ hchacha20:
 ; cookie_handle_type3 - Process Type 3 cookie reply
 ;
 ; 1. Derive cookie_key = BLAKE2s-256("cookie--" || cfg_peer_pub)
-; 2. HChaCha20(cookie_key, nonce[0..15]) → subkey
+; 2. HChaCha20(cookie_key, nonce[0..15]) -> subkey
 ; 3. XChaCha20-Poly1305 decrypt cookie with subkey + nonce[16..23]
 ;    AAD = mac1 from last sent initiation (hs_packet+116, 16 bytes)
 ;
@@ -114,7 +171,7 @@ cookie_handle_type3:
 
         jsr blake2s_final
 
-        ; 2. Copy b2s_hash → cc20_key (cookie decryption key)
+        ; 2. Copy b2s_hash -> cc20_key (cookie decryption key)
         ldx #31
 @copy_key:
         lda b2s_hash,x
@@ -122,7 +179,7 @@ cookie_handle_type3:
         dex
         bpl @copy_key
 
-        ; 3. HChaCha20 setup: nonce[0..3] → cc20_counter, nonce[4..15] → cc20_nonce
+        ; 3. HChaCha20 setup: nonce[0..3] -> cc20_counter, nonce[4..15] -> cc20_nonce
         ldx #3
 @copy_cnt:
         lda udp_recv_buf+8,x
@@ -179,7 +236,7 @@ cookie_handle_type3:
         dex
         bpl @copy_edata
 
-        ; aead_data_ptr → cookie_buf, len = 16
+        ; aead_data_ptr -> cookie_buf, len = 16
         lda #<cookie_buf
         sta aead_data_ptr
         lda #>cookie_buf
@@ -249,7 +306,7 @@ hs_set_mac2:
 
         jsr blake2s_final
 
-        ; Copy b2s_hash[0..15] → hs_packet+132
+        ; Copy b2s_hash[0..15] -> hs_packet+132
         ldx #15
 @copy_mac2:
         lda b2s_hash,x

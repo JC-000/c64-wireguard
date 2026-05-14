@@ -1,8 +1,8 @@
 ; =============================================================================
-; x25519.asm - X25519 Diffie-Hellman (RFC 7748)
+; x25519.s - X25519 Diffie-Hellman (RFC 7748)  (ca65 port)
 ;
 ; Montgomery ladder scalar multiplication on Curve25519.
-; Uses fe25519.asm field arithmetic.
+; Uses fe25519.s field arithmetic.
 ;
 ; API:
 ;   x25519_clamp       - Clamp 32-byte scalar per RFC 7748
@@ -12,11 +12,62 @@
 ; Input:  x25_scalar (32 bytes), x25_u (32 bytes)
 ; Output: x25_result (32 bytes)
 ;
-; Performance: ~2550 field multiplies + ~264 for inversion ≈ ~2 min per op
+; Performance: ~2550 field multiplies + ~264 for inversion ~= ~2 min per op
 ; =============================================================================
 
+.include "constants.inc"
+
+; --- Public ABI aliases for fe25519 ZP pointer slots ---
+; The underlying ZP addresses are defined in constants.inc as fe_src1/fe_src2/fe_dst.
+; Expose the sibling-library spelling here so we can use fe25519_* names
+; interchangeably (matches the aliases exposed by fe25519.s).
+fe25519_src1 = fe_src1
+fe25519_src2 = fe_src2
+fe25519_dst  = fe_dst
+
+; --- Public entry points ---
+.export x25519_clamp
+.export x25519_scalarmult
+.export x25519_base
+.export x25519_ladder_step
+
+; --- Imports: fe25519 field arithmetic (renamed from fe_*) ---
+.import fe25519_copy
+.import fe25519_zero
+.import fe25519_one
+.import fe25519_add
+.import fe25519_sub
+.import fe25519_cswap
+.import fe25519_mul
+.import fe25519_sqr
+.import fe25519_mul_a24
+.import fe25519_inv
+
+; --- Imports: x25 scalar/point buffers (from data) ---
+.import x25_scalar
+.import x25_u
+.import x25_result
+.import x25_basepoint
+.import x25_x2
+.import x25_z2
+.import x25_x3
+.import x25_z3
+.import x25_a
+.import x25_b
+.import x25_da
+.import x25_cb
+.import x25_e
+
+; --- Imports: field arithmetic scratch temporaries ---
+.import fe_tmp1
+.import fe_tmp2
+.import fe_tmp3
+.import fe_tmp4
+
+.segment "CRYPTO_CODE"
+
 ; =============================================================================
-; x25519_clamp - Clamp scalar per RFC 7748 §5
+; x25519_clamp - Clamp scalar per RFC 7748 Section 5
 ;
 ; Clear bits 0, 1, 2 of byte 0
 ; Clear bit 7 of byte 31
@@ -56,35 +107,35 @@ x25519_scalarmult:
         ; Initialize ladder state
         ; x_2 = 1
         lda #<x25_x2
-        sta fe_dst
+        sta fe25519_dst
         lda #>x25_x2
-        sta fe_dst+1
-        jsr fe_one
+        sta fe25519_dst+1
+        jsr fe25519_one
 
         ; z_2 = 0
         lda #<x25_z2
-        sta fe_dst
+        sta fe25519_dst
         lda #>x25_z2
-        sta fe_dst+1
-        jsr fe_zero
+        sta fe25519_dst+1
+        jsr fe25519_zero
 
         ; x_3 = u
         lda #<x25_u
-        sta fe_src1
+        sta fe25519_src1
         lda #>x25_u
-        sta fe_src1+1
+        sta fe25519_src1+1
         lda #<x25_x3
-        sta fe_dst
+        sta fe25519_dst
         lda #>x25_x3
-        sta fe_dst+1
-        jsr fe_copy
+        sta fe25519_dst+1
+        jsr fe25519_copy
 
         ; z_3 = 1
         lda #<x25_z3
-        sta fe_dst
+        sta fe25519_dst
         lda #>x25_z3
-        sta fe_dst+1
-        jsr fe_one
+        sta fe25519_dst+1
+        jsr fe25519_one
 
         ; prev_bit = 0
         lda #0
@@ -120,38 +171,38 @@ x25519_scalarmult:
         sta x25_prev_bit
         pla                    ; A = swap flag (0 or 1)
 
-        ; Convert to mask: 0 → $00, 1 → $FF
+        ; Convert to mask: 0 -> $00, 1 -> $FF
         beq @no_swap_mask
         lda #$ff
 @no_swap_mask:
 
         ; cswap(x_2, x_3, swap)
         pha                    ; save mask
-        sta fe_carry           ; fe_cswap reads mask from A
+        sta fe_carry           ; fe25519_cswap reads mask from A
         lda #<x25_x2
-        sta fe_src1
+        sta fe25519_src1
         lda #>x25_x2
-        sta fe_src1+1
+        sta fe25519_src1+1
         lda #<x25_x3
-        sta fe_src2
+        sta fe25519_src2
         lda #>x25_x3
-        sta fe_src2+1
+        sta fe25519_src2+1
         lda fe_carry           ; restore mask
-        jsr fe_cswap
+        jsr fe25519_cswap
 
         ; cswap(z_2, z_3, swap)
         pla                    ; restore mask
         sta fe_carry
         lda #<x25_z2
-        sta fe_src1
+        sta fe25519_src1
         lda #>x25_z2
-        sta fe_src1+1
+        sta fe25519_src1+1
         lda #<x25_z3
-        sta fe_src2
+        sta fe25519_src2
         lda #>x25_z3
-        sta fe_src2+1
+        sta fe25519_src2+1
         lda fe_carry
-        jsr fe_cswap
+        jsr fe25519_cswap
 
         ; --- Montgomery ladder step ---
         jsr x25519_ladder_step
@@ -174,55 +225,55 @@ x25519_scalarmult:
         pha
         sta fe_carry
         lda #<x25_x2
-        sta fe_src1
+        sta fe25519_src1
         lda #>x25_x2
-        sta fe_src1+1
+        sta fe25519_src1+1
         lda #<x25_x3
-        sta fe_src2
+        sta fe25519_src2
         lda #>x25_x3
-        sta fe_src2+1
+        sta fe25519_src2+1
         lda fe_carry
-        jsr fe_cswap
+        jsr fe25519_cswap
 
         pla
         sta fe_carry
         lda #<x25_z2
-        sta fe_src1
+        sta fe25519_src1
         lda #>x25_z2
-        sta fe_src1+1
+        sta fe25519_src1+1
         lda #<x25_z3
-        sta fe_src2
+        sta fe25519_src2
         lda #>x25_z3
-        sta fe_src2+1
+        sta fe25519_src2+1
         lda fe_carry
-        jsr fe_cswap
+        jsr fe25519_cswap
 
         ; result = x_2 * z_2^(-1)
-        ; First compute z_2_inv = fe_inv(z_2)
+        ; First compute z_2_inv = fe25519_inv(z_2)
         lda #<x25_z2
-        sta fe_src1
+        sta fe25519_src1
         lda #>x25_z2
-        sta fe_src1+1
+        sta fe25519_src1+1
         lda #<x25_result
-        sta fe_dst
+        sta fe25519_dst
         lda #>x25_result
-        sta fe_dst+1
-        jsr fe_inv             ; x25_result = z_2^(-1)
+        sta fe25519_dst+1
+        jsr fe25519_inv        ; x25_result = z_2^(-1)
 
         ; result = x_2 * z_2_inv
         lda #<x25_x2
-        sta fe_src1
+        sta fe25519_src1
         lda #>x25_x2
-        sta fe_src1+1
+        sta fe25519_src1+1
         lda #<x25_result
-        sta fe_src2
+        sta fe25519_src2
         lda #>x25_result
-        sta fe_src2+1
+        sta fe25519_src2+1
         lda #<x25_result
-        sta fe_dst
+        sta fe25519_dst
         lda #>x25_result
-        sta fe_dst+1
-        jsr fe_mul             ; x25_result = x_2 * z_2^(-1) mod p
+        sta fe25519_dst+1
+        jsr fe25519_mul        ; x25_result = x_2 * z_2^(-1) mod p
 
         rts
 
@@ -245,254 +296,254 @@ x25519_scalarmult:
 ; Clobbers: A, X, Y, all fe_* ZP vars
 ; =============================================================================
 x25519_ladder_step:
-        ; A = x_2 + z_2 → x25_a
+        ; A = x_2 + z_2 -> x25_a
         lda #<x25_x2
-        sta fe_src1
+        sta fe25519_src1
         lda #>x25_x2
-        sta fe_src1+1
+        sta fe25519_src1+1
         lda #<x25_z2
-        sta fe_src2
+        sta fe25519_src2
         lda #>x25_z2
-        sta fe_src2+1
+        sta fe25519_src2+1
         lda #<x25_a
-        sta fe_dst
+        sta fe25519_dst
         lda #>x25_a
-        sta fe_dst+1
-        jsr fe_add
+        sta fe25519_dst+1
+        jsr fe25519_add
 
-        ; B = x_2 - z_2 → x25_b
+        ; B = x_2 - z_2 -> x25_b
         lda #<x25_x2
-        sta fe_src1
+        sta fe25519_src1
         lda #>x25_x2
-        sta fe_src1+1
+        sta fe25519_src1+1
         lda #<x25_z2
-        sta fe_src2
+        sta fe25519_src2
         lda #>x25_z2
-        sta fe_src2+1
+        sta fe25519_src2+1
         lda #<x25_b
-        sta fe_dst
+        sta fe25519_dst
         lda #>x25_b
-        sta fe_dst+1
-        jsr fe_sub
+        sta fe25519_dst+1
+        jsr fe25519_sub
 
-        ; AA = A^2 → x25_a (overwrite A, no longer needed as A)
+        ; AA = A^2 -> x25_a (overwrite A, no longer needed as A)
         ; Actually we need A for DA computation. Let me keep AA separate.
-        ; AA → fe_tmp3 (available here since fe_inv isn't running)
+        ; AA -> fe_tmp3 (available here since fe25519_inv isn't running)
         lda #<x25_a
-        sta fe_src1
+        sta fe25519_src1
         lda #>x25_a
-        sta fe_src1+1
+        sta fe25519_src1+1
         lda #<fe_tmp3
-        sta fe_dst
+        sta fe25519_dst
         lda #>fe_tmp3
-        sta fe_dst+1
-        jsr fe_sqr             ; fe_tmp3 = AA
+        sta fe25519_dst+1
+        jsr fe25519_sqr        ; fe_tmp3 = AA
 
-        ; BB = B^2 → fe_tmp4
+        ; BB = B^2 -> fe_tmp4
         lda #<x25_b
-        sta fe_src1
+        sta fe25519_src1
         lda #>x25_b
-        sta fe_src1+1
+        sta fe25519_src1+1
         lda #<fe_tmp4
-        sta fe_dst
+        sta fe25519_dst
         lda #>fe_tmp4
-        sta fe_dst+1
-        jsr fe_sqr             ; fe_tmp4 = BB
+        sta fe25519_dst+1
+        jsr fe25519_sqr        ; fe_tmp4 = BB
 
-        ; E = AA - BB → x25_e
+        ; E = AA - BB -> x25_e
         lda #<fe_tmp3
-        sta fe_src1
+        sta fe25519_src1
         lda #>fe_tmp3
-        sta fe_src1+1
+        sta fe25519_src1+1
         lda #<fe_tmp4
-        sta fe_src2
+        sta fe25519_src2
         lda #>fe_tmp4
-        sta fe_src2+1
+        sta fe25519_src2+1
         lda #<x25_e
-        sta fe_dst
+        sta fe25519_dst
         lda #>x25_e
-        sta fe_dst+1
-        jsr fe_sub             ; x25_e = E = AA - BB
+        sta fe25519_dst+1
+        jsr fe25519_sub        ; x25_e = E = AA - BB
 
-        ; C = x_3 + z_3 → fe_tmp1 (temp)
+        ; C = x_3 + z_3 -> fe_tmp1 (temp)
         lda #<x25_x3
-        sta fe_src1
+        sta fe25519_src1
         lda #>x25_x3
-        sta fe_src1+1
+        sta fe25519_src1+1
         lda #<x25_z3
-        sta fe_src2
+        sta fe25519_src2
         lda #>x25_z3
-        sta fe_src2+1
+        sta fe25519_src2+1
         lda #<fe_tmp1
-        sta fe_dst
+        sta fe25519_dst
         lda #>fe_tmp1
-        sta fe_dst+1
-        jsr fe_add             ; fe_tmp1 = C
+        sta fe25519_dst+1
+        jsr fe25519_add        ; fe_tmp1 = C
 
-        ; D = x_3 - z_3 → fe_tmp2 (temp)
+        ; D = x_3 - z_3 -> fe_tmp2 (temp)
         lda #<x25_x3
-        sta fe_src1
+        sta fe25519_src1
         lda #>x25_x3
-        sta fe_src1+1
+        sta fe25519_src1+1
         lda #<x25_z3
-        sta fe_src2
+        sta fe25519_src2
         lda #>x25_z3
-        sta fe_src2+1
+        sta fe25519_src2+1
         lda #<fe_tmp2
-        sta fe_dst
+        sta fe25519_dst
         lda #>fe_tmp2
-        sta fe_dst+1
-        jsr fe_sub             ; fe_tmp2 = D
+        sta fe25519_dst+1
+        jsr fe25519_sub        ; fe_tmp2 = D
 
-        ; DA = D * A → x25_da
+        ; DA = D * A -> x25_da
         lda #<fe_tmp2
-        sta fe_src1
+        sta fe25519_src1
         lda #>fe_tmp2
-        sta fe_src1+1
+        sta fe25519_src1+1
         lda #<x25_a
-        sta fe_src2
+        sta fe25519_src2
         lda #>x25_a
-        sta fe_src2+1
+        sta fe25519_src2+1
         lda #<x25_da
-        sta fe_dst
+        sta fe25519_dst
         lda #>x25_da
-        sta fe_dst+1
-        jsr fe_mul             ; x25_da = D * A
+        sta fe25519_dst+1
+        jsr fe25519_mul        ; x25_da = D * A
 
-        ; CB = C * B → x25_cb
+        ; CB = C * B -> x25_cb
         lda #<fe_tmp1
-        sta fe_src1
+        sta fe25519_src1
         lda #>fe_tmp1
-        sta fe_src1+1
+        sta fe25519_src1+1
         lda #<x25_b
-        sta fe_src2
+        sta fe25519_src2
         lda #>x25_b
-        sta fe_src2+1
+        sta fe25519_src2+1
         lda #<x25_cb
-        sta fe_dst
+        sta fe25519_dst
         lda #>x25_cb
-        sta fe_dst+1
-        jsr fe_mul             ; x25_cb = C * B
+        sta fe25519_dst+1
+        jsr fe25519_mul        ; x25_cb = C * B
 
         ; x_3 = (DA + CB)^2
         lda #<x25_da
-        sta fe_src1
+        sta fe25519_src1
         lda #>x25_da
-        sta fe_src1+1
+        sta fe25519_src1+1
         lda #<x25_cb
-        sta fe_src2
+        sta fe25519_src2
         lda #>x25_cb
-        sta fe_src2+1
+        sta fe25519_src2+1
         lda #<x25_x3
-        sta fe_dst
+        sta fe25519_dst
         lda #>x25_x3
-        sta fe_dst+1
-        jsr fe_add             ; x25_x3 = DA + CB
+        sta fe25519_dst+1
+        jsr fe25519_add        ; x25_x3 = DA + CB
         lda #<x25_x3
-        sta fe_src1
+        sta fe25519_src1
         lda #>x25_x3
-        sta fe_src1+1
+        sta fe25519_src1+1
         lda #<x25_x3
-        sta fe_dst
+        sta fe25519_dst
         lda #>x25_x3
-        sta fe_dst+1
-        jsr fe_sqr             ; x25_x3 = (DA + CB)^2
+        sta fe25519_dst+1
+        jsr fe25519_sqr        ; x25_x3 = (DA + CB)^2
 
         ; z_3 = x_1 * (DA - CB)^2
         ; x_1 is the original u-coordinate (x25_u)
         lda #<x25_da
-        sta fe_src1
+        sta fe25519_src1
         lda #>x25_da
-        sta fe_src1+1
+        sta fe25519_src1+1
         lda #<x25_cb
-        sta fe_src2
+        sta fe25519_src2
         lda #>x25_cb
-        sta fe_src2+1
+        sta fe25519_src2+1
         lda #<x25_z3
-        sta fe_dst
+        sta fe25519_dst
         lda #>x25_z3
-        sta fe_dst+1
-        jsr fe_sub             ; x25_z3 = DA - CB
+        sta fe25519_dst+1
+        jsr fe25519_sub        ; x25_z3 = DA - CB
         lda #<x25_z3
-        sta fe_src1
+        sta fe25519_src1
         lda #>x25_z3
-        sta fe_src1+1
+        sta fe25519_src1+1
         lda #<x25_z3
-        sta fe_dst
+        sta fe25519_dst
         lda #>x25_z3
-        sta fe_dst+1
-        jsr fe_sqr             ; x25_z3 = (DA - CB)^2
+        sta fe25519_dst+1
+        jsr fe25519_sqr        ; x25_z3 = (DA - CB)^2
         ; Now z_3 = x_1 * (DA-CB)^2
         lda #<x25_u
-        sta fe_src1
+        sta fe25519_src1
         lda #>x25_u
-        sta fe_src1+1
+        sta fe25519_src1+1
         lda #<x25_z3
-        sta fe_src2
+        sta fe25519_src2
         lda #>x25_z3
-        sta fe_src2+1
+        sta fe25519_src2+1
         lda #<x25_z3
-        sta fe_dst
+        sta fe25519_dst
         lda #>x25_z3
-        sta fe_dst+1
-        jsr fe_mul             ; x25_z3 = x_1 * (DA - CB)^2
+        sta fe25519_dst+1
+        jsr fe25519_mul        ; x25_z3 = x_1 * (DA - CB)^2
 
         ; x_2 = AA * BB
         lda #<fe_tmp3
-        sta fe_src1
+        sta fe25519_src1
         lda #>fe_tmp3
-        sta fe_src1+1
+        sta fe25519_src1+1
         lda #<fe_tmp4
-        sta fe_src2
+        sta fe25519_src2
         lda #>fe_tmp4
-        sta fe_src2+1
+        sta fe25519_src2+1
         lda #<x25_x2
-        sta fe_dst
+        sta fe25519_dst
         lda #>x25_x2
-        sta fe_dst+1
-        jsr fe_mul             ; x25_x2 = AA * BB
+        sta fe25519_dst+1
+        jsr fe25519_mul        ; x25_x2 = AA * BB
 
         ; z_2 = E * (AA + a24*E)
-        ; First: a24*E → fe_tmp1
+        ; First: a24*E -> fe_tmp1
         lda #<x25_e
-        sta fe_src1
+        sta fe25519_src1
         lda #>x25_e
-        sta fe_src1+1
+        sta fe25519_src1+1
         lda #<fe_tmp1
-        sta fe_dst
+        sta fe25519_dst
         lda #>fe_tmp1
-        sta fe_dst+1
-        jsr fe_mul_a24         ; fe_tmp1 = a24 * E
+        sta fe25519_dst+1
+        jsr fe25519_mul_a24    ; fe_tmp1 = a24 * E
 
-        ; AA + a24*E → fe_tmp1
+        ; AA + a24*E -> fe_tmp1
         lda #<fe_tmp3
-        sta fe_src1
+        sta fe25519_src1
         lda #>fe_tmp3
-        sta fe_src1+1
+        sta fe25519_src1+1
         lda #<fe_tmp1
-        sta fe_src2
+        sta fe25519_src2
         lda #>fe_tmp1
-        sta fe_src2+1
+        sta fe25519_src2+1
         lda #<fe_tmp1
-        sta fe_dst
+        sta fe25519_dst
         lda #>fe_tmp1
-        sta fe_dst+1
-        jsr fe_add             ; fe_tmp1 = AA + a24*E
+        sta fe25519_dst+1
+        jsr fe25519_add        ; fe_tmp1 = AA + a24*E
 
         ; z_2 = E * (AA + a24*E)
         lda #<x25_e
-        sta fe_src1
+        sta fe25519_src1
         lda #>x25_e
-        sta fe_src1+1
+        sta fe25519_src1+1
         lda #<fe_tmp1
-        sta fe_src2
+        sta fe25519_src2
         lda #>fe_tmp1
-        sta fe_src2+1
+        sta fe25519_src2+1
         lda #<x25_z2
-        sta fe_dst
+        sta fe25519_dst
         lda #>x25_z2
-        sta fe_dst+1
-        jsr fe_mul             ; x25_z2 = E * (AA + a24*E)
+        sta fe25519_dst+1
+        jsr fe25519_mul        ; x25_z2 = E * (AA + a24*E)
 
         rts
 
@@ -508,14 +559,14 @@ x25519_ladder_step:
 x25519_base:
         ; Copy basepoint (9) to x25_u
         lda #<x25_basepoint
-        sta fe_src1
+        sta fe25519_src1
         lda #>x25_basepoint
-        sta fe_src1+1
+        sta fe25519_src1+1
         lda #<x25_u
-        sta fe_dst
+        sta fe25519_dst
         lda #>x25_u
-        sta fe_dst+1
-        jsr fe_copy
+        sta fe25519_dst+1
+        jsr fe25519_copy
 
         ; Clamp scalar
         jsr x25519_clamp

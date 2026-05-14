@@ -1,5 +1,10 @@
 ; =============================================================================
-; handshake.asm - WireGuard IKpsk2 Noise Handshake (Initiator)
+; handshake.s - WireGuard IKpsk2 Noise Handshake (Initiator)
+;
+; ca65 port of src/handshake.asm. Mechanical translation only:
+;   - ACME directives -> ca65 directives
+;   - fe_*   crypto calls  -> fe25519_*   (symbol-map.md rename)
+;   - kdf_N  crypto calls  -> blake2s_kdf_N (symbol-map.md rename)
 ;
 ; Generates 148-byte Type 1 initiation packet.
 ; Parses 92-byte Type 2 response and derives transport keys.
@@ -17,38 +22,140 @@
 ;   8. Compute MAC1
 ;
 ; Interface:
-;   hs_static_priv  (32 bytes) — our static private key
-;   hs_static_pub   (32 bytes) — our static public key
-;   hs_resp_pub     (32 bytes) — responder's static public key
-;   hs_ephem_priv   (32 bytes) — ephemeral private key (caller provides)
-;   hs_sender_idx   (4 bytes)  — sender index
-;   hs_timestamp    (12 bytes) — TAI64N timestamp
+;   hs_static_priv  (32 bytes) - our static private key
+;   hs_static_pub   (32 bytes) - our static public key
+;   hs_resp_pub     (32 bytes) - responder's static public key
+;   hs_ephem_priv   (32 bytes) - ephemeral private key (caller provides)
+;   hs_sender_idx   (4 bytes)  - sender index
+;   hs_timestamp    (12 bytes) - TAI64N timestamp
 ;
 ; Output:
-;   hs_packet       (148 bytes) — Type 1 initiation packet
-;   hs_c            (32 bytes)  — final chaining key (for response processing)
-;   hs_h            (32 bytes)  — final hash
+;   hs_packet       (148 bytes) - Type 1 initiation packet
+;   hs_c            (32 bytes)  - final chaining key (for response processing)
+;   hs_h            (32 bytes)  - final hash
 ; =============================================================================
+
+.include "constants.inc"
+
+; ---- Public entry points -----------------------------------------------------
+.export hs_init
+.export hs_mix_hash
+.export hs_create_initiation
+.export hs_compute_mac1
+.export hs_process_response
+.export hs_psk_mix
+.export wg_c_init
+.export wg_h_init
+.export wg_mac1_label
+.export hs_hs_empty
+
+; ---- External symbols -------------------------------------------------------
+; Crypto subroutines (renamed per symbol-map.md):
+;   kdf_N  -> blake2s_kdf_N
+.import blake2s_init
+.import blake2s_update
+.import blake2s_final
+.import kdf_1
+.import kdf_2
+.import kdf_3
+
+; X25519
+.import x25519_clamp
+.import x25519_scalarmult
+.import x25519_base
+
+; AEAD
+.import aead_encrypt
+.import aead_decrypt
+
+; WG helpers (defined in other wg/*.s modules)
+.import hs_set_mac2
+
+; ---- Data buffers (defined in data.asm / future data.s) ---------------------
+; Handshake state
+.import hs_c
+.import hs_h
+.import hs_static_priv
+.import hs_static_pub
+.import hs_resp_pub
+.import hs_ephem_priv
+.import hs_ephem_pub
+.import hs_dh_result
+.import hs_sender_idx
+.import hs_timestamp
+.import hs_mac1_key
+.import hs_packet
+.import hs_resp_packet
+.import hs_transport_send
+.import hs_transport_recv
+.import hs_preshared_key
+
+; KDF buffers
+.import kdf_prk
+.import kdf_out1
+.import kdf_out2
+.import kdf_out3
+.import kdf_input_ptr
+.import kdf_input_len
+
+; BLAKE2s state
+.import b2s_hash
+.import b2s_out_len
+
+; X25519 buffers
+.import x25_scalar
+.import x25_u
+.import x25_result
+
+; AEAD state
+.import aead_key
+.import aead_nonce
+.import aead_aad_ptr
+.import aead_aad_len
+.import aead_data_ptr
+.import aead_data_len
+.import aead_tag
+
+; Poly1305
+.import poly1305_tag
+
+; Misc
+.import input_buffer
+.import cookie_valid
+
+; =============================================================================
+; Data
+; =============================================================================
+.segment "APP_DATA"
 
 ; --- Precomputed Noise constants ---
 
 ; C_init = BLAKE2s("Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s")
 wg_c_init:
-        !byte $60, $e2, $6d, $ae, $f3, $27, $ef, $c0
-        !byte $2e, $c3, $35, $e2, $a0, $25, $d2, $d0
-        !byte $16, $eb, $42, $06, $f8, $72, $77, $f5
-        !byte $2d, $38, $d1, $98, $8b, $78, $cd, $36
+        .byte $60, $e2, $6d, $ae, $f3, $27, $ef, $c0
+        .byte $2e, $c3, $35, $e2, $a0, $25, $d2, $d0
+        .byte $16, $eb, $42, $06, $f8, $72, $77, $f5
+        .byte $2d, $38, $d1, $98, $8b, $78, $cd, $36
 
 ; H_init = BLAKE2s(C_init || "WireGuard v1 zx2c4 Jason@zx2c4.com")
 wg_h_init:
-        !byte $22, $11, $b3, $61, $08, $1a, $c5, $66
-        !byte $69, $12, $43, $db, $45, $8a, $d5, $32
-        !byte $2d, $9c, $6c, $66, $22, $93, $e8, $b7
-        !byte $0e, $e1, $9c, $65, $ba, $07, $9e, $f3
+        .byte $22, $11, $b3, $61, $08, $1a, $c5, $66
+        .byte $69, $12, $43, $db, $45, $8a, $d5, $32
+        .byte $2d, $9c, $6c, $66, $22, $93, $e8, $b7
+        .byte $0e, $e1, $9c, $65, $ba, $07, $9e, $f3
 
 ; MAC1 label
 wg_mac1_label:
-        !text "mac1----"
+        .byte "mac1----"
+
+; Empty input for KDF calls with no input data
+hs_hs_empty:
+        .byte 0
+
+; =============================================================================
+; Code
+; =============================================================================
+.segment "APP_CODE"
 
 ; =============================================================================
 ; hs_init - Initialize handshake state
@@ -211,7 +318,7 @@ hs_create_initiation:
         jsr hs_init
 
         ; --- 2. Generate ephemeral public key ---
-        ; x25519_base(ephem_priv) → ephem_pub
+        ; x25519_base(ephem_priv) -> ephem_pub
         ldx #31
 @copy_epriv:
         lda hs_ephem_priv,x
@@ -306,7 +413,7 @@ hs_create_initiation:
         dex
         bpl @copy_dh1
 
-        ; kdf_2(C, dh_result) → new C + encryption key
+        ; kdf_2(C, dh_result) -> new C + encryption key
         ldx #31
 @save_c2:
         lda hs_c,x
@@ -412,7 +519,7 @@ hs_create_initiation:
         dex
         bpl @copy_dh2
 
-        ; kdf_2(C, dh_result) → new C + key
+        ; kdf_2(C, dh_result) -> new C + key
         ldx #31
 @save_c3:
         lda hs_c,x
@@ -684,7 +791,7 @@ hs_process_response:
         bpl @upd_c3
 
         ; --- PSK mixing (IKpsk2 psk2 token) ---
-        ; kdf_3(C, psk) → C=out1, tau=out2, key=out3
+        ; kdf_3(C, psk) -> C=out1, tau=out2, key=out3
 hs_psk_mix:
         ldx #31
 @save_c4:
@@ -708,7 +815,7 @@ hs_psk_mix:
         dex
         bpl @upd_c4
 
-        ; mix_hash(H, tau=kdf_out2) — required for IKpsk2
+        ; mix_hash(H, tau=kdf_out2) - required for IKpsk2
         lda #<kdf_out2
         sta zp_ptr1
         lda #>kdf_out2
@@ -770,7 +877,7 @@ hs_psk_mix:
         sta b2s_remain
         jsr hs_mix_hash
 
-        ; Derive transport keys: kdf_2(C, empty) → send_key, recv_key
+        ; Derive transport keys: kdf_2(C, empty) -> send_key, recv_key
         ldx #31
 @save_c5:
         lda hs_c,x
@@ -802,7 +909,3 @@ hs_psk_mix:
 @auth_fail:
         lda #$ff               ; failure
         rts
-
-; Empty input for KDF calls with no input data
-hs_hs_empty:
-        !byte 0

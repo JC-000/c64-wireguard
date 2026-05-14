@@ -60,7 +60,7 @@ def test_build_verification(labels):
         "zp_save_buf", "udp_recv_buf", "udp_recv_ready",
         "wg_peer_ip", "wg_peer_port", "wg_local_port", "net_initialized",
         "blake2s_init", "chacha20_init", "poly1305_init",
-        "fe_add", "x25519_scalarmult", "hs_init",
+        "fe25519_add", "x25519_scalarmult", "hs_init",
     ]
     for label in critical_labels:
         if label not in labels:
@@ -96,7 +96,7 @@ def test_memory_layout(labels):
 
     # crypto must be after ip65 blob (at least $32F0)
     crypto_labels = ["blake2s_init", "chacha20_init", "poly1305_init",
-                     "fe_add", "x25519_scalarmult", "hs_init"]
+                     "fe25519_add", "x25519_scalarmult", "hs_init"]
     for label in crypto_labels:
         addr = labels[label]
         if addr < 0x32F0:
