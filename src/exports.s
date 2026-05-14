@@ -16,6 +16,12 @@
 
 .include "constants.inc"
 
+; REU bank-allocation map. Authoritative single source of truth for which
+; REU bank/offset each subsystem owns; included here so it is syntax-
+; checked on every build even though no .s file currently references the
+; equates by symbol (fe25519.s still hard-codes its bank/offset compute).
+.include "crypto/shared/reu_layout.inc"
+
 ; --- General-purpose / word32 ZP ---
 .exportzp zp_ptr1, zp_ptr2, zp_tmp1, zp_tmp2
 .exportzp w32_src1, w32_src2, w32_dst
