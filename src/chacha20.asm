@@ -272,7 +272,8 @@ chacha20_block:
 ;
 ; Inputs:
 ;   cc20_data_ptr ($16-$17) = pointer to plaintext/ciphertext (in-place XOR)
-;   cc20_remain ($18) = number of bytes to process (0-255)
+;   cc20_remain ($18) = number of bytes to process (low byte)
+;   cc20_remain_hi = high byte of byte count (16-bit total)
 ;   State must already be initialized via chacha20_init
 ;
 ; The function generates keystream blocks and XORs them with the data.
@@ -280,17 +281,22 @@ chacha20_block:
 ; Clobbers: A, X, Y
 ; =============================================================================
 chacha20_encrypt:
+        ; Check if anything to do (16-bit)
         lda cc20_remain
+        ora cc20_remain_hi
         beq @enc_done          ; nothing to do
 
 @next_block:
         ; Generate a keystream block
         jsr chacha20_block
 
-        ; Determine how many bytes to XOR from this block
+        ; Determine how many bytes to XOR from this block: min(remain, 64)
+        lda cc20_remain_hi
+        bne @full              ; > 255 remaining, definitely 64
         lda cc20_remain
         cmp #64
         bcc @partial           ; < 64 bytes remaining
+@full:
         lda #64                ; full block
 @partial:
         sta cc20_buf_pos       ; bytes to XOR this iteration
@@ -315,11 +321,17 @@ chacha20_encrypt:
         adc #0
         sta cc20_data_ptr+1
 
-        ; Subtract processed bytes from remaining
+        ; 16-bit subtract processed bytes from remaining
         lda cc20_remain
         sec
         sbc cc20_buf_pos
         sta cc20_remain
+        lda cc20_remain_hi
+        sbc #0
+        sta cc20_remain_hi
+
+        ; Check if done (16-bit)
+        ora cc20_remain
         bne @next_block        ; more bytes to process
 
 @enc_done:

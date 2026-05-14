@@ -158,3 +158,7 @@ wg_default_port     = 51820
 WG_ICMP_ID      = $c640         ; ICMP echo identifier
 IP_PROTO_ICMP   = 1             ; IP protocol: ICMP
 IP_PROTO_UDP    = 17            ; IP protocol: UDP
+
+; --- Key rotation counter thresholds ---
+REJECT_COUNTER_B7 = $10        ; reject if counter byte 7 >= this (~2^60)
+REKEY_COUNTER_B7  = $0F        ; signal rekey if byte 7 >= this

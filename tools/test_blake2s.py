@@ -18,7 +18,7 @@ import sys
 import time
 
 from c64_test_harness import (
-    Labels, ViceConfig, ViceProcess, ViceTransport,
+    Labels, ViceConfig, ViceInstanceManager,
     read_bytes, write_bytes, jsr, wait_for_text,
 )
 
@@ -572,30 +572,28 @@ def main():
     print(f"Labels loaded: {len(required)} required labels verified")
 
     # Launch VICE
-    from c64_test_harness.backends.vice_manager import PortAllocator
-    allocator = PortAllocator(port_range_start=6510, port_range_end=6530)
-    port = allocator.allocate()
-    reservation = allocator.take_socket(port)
-    if reservation:
-        reservation.close()
-    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
-                        port=port)
-    with ViceProcess(config) as vice:
-        if not vice.wait_for_monitor(timeout=30.0):
-            print("FATAL: Could not connect to VICE monitor")
-            allocator.release(port)
-            sys.exit(1)
+    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
 
-        print(f"VICE PID={vice.pid}, port={port}")
-        transport = ViceTransport(port=port)
+    with ViceInstanceManager(
+        config=config,
+        port_range_start=6510,
+        port_range_end=6530,
+    ) as mgr:
+        inst = mgr.acquire()
+        print(f"VICE PID={inst.pid}, port={inst.port}")
+        transport = inst.transport
         grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)
 
+        write_bytes(transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
+
         print("VICE ready, running tests...")
 
         passed, failed = run_tests(transport, labels, seed)
+
+        mgr.release(inst)
 
     total = passed + failed
     print(f"\n{'='*60}")

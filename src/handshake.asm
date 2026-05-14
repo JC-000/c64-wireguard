@@ -371,6 +371,8 @@ hs_create_initiation:
         sta aead_data_ptr+1
         lda #32
         sta aead_data_len
+        lda #0
+        sta aead_data_len+1
 
         jsr aead_encrypt
 
@@ -469,6 +471,8 @@ hs_create_initiation:
         sta aead_data_ptr+1
         lda #12
         sta aead_data_len
+        lda #0
+        sta aead_data_len+1
 
         jsr aead_encrypt
 
@@ -738,6 +742,7 @@ hs_psk_mix:
         sta aead_aad_len
         lda #0
         sta aead_data_len
+        sta aead_data_len+1
         ; Need to set expected tag
         ldx #15
 @copy_tag:

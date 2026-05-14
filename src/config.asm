@@ -61,4 +61,7 @@ config_load:
         dex
         bpl @psk
 
+        ; Initialize TAI64N epoch anchor from base time
+        jsr tai64n_init
+
         rts

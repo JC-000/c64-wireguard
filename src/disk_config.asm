@@ -13,6 +13,7 @@
 ;   Line 6: tunnel IP (dotted decimal)
 ;   Line 7: ping target IP (dotted decimal)
 ;   Line 8: preshared key (64 hex chars) — optional, zeros if omitted
+;   Line 9: Unix timestamp (decimal, up to 10 digits) — optional, zeros if omitted
 ;
 ; Interface:
 ;   config_read_file  - read and parse entire config file
@@ -133,6 +134,22 @@ config_read_file:
         dex
         bpl @zero_psk
 @psk_done:
+
+        ; --- Line 9 (optional): Unix timestamp (decimal, up to 10 digits) ---
+        jsr readst
+        and #$40                ; bit 6 = EOF
+        bne @skip_timestamp
+
+        jsr parse_decimal_u64
+        jmp @timestamp_done
+@skip_timestamp:
+        ldx #7
+        lda #0
+@zero_timestamp:
+        sta tai64n_base_time,x
+        dex
+        bpl @zero_timestamp
+@timestamp_done:
 
         ; Close and restore channels
         jsr clrchn
@@ -303,3 +320,107 @@ parse_decimal_u16:
         lda zp_tmp2
         sta (zp_ptr2),y
         rts
+
+; =============================================================================
+; parse_decimal_u64 - Read decimal number from CHRIN, store as big-endian u64
+;
+; Reads up to 10 ASCII digits (CR-terminated) from CHRIN and converts to an
+; 8-byte big-endian integer stored in tai64n_base_time.
+;
+; Algorithm: digit by digit, accumulator = accumulator * 10 + digit
+; Multiply by 10 = (shift left 3) + (shift left 1) = *8 + *2
+; Uses u64_acc (8 bytes) as accumulator, u64_tmp (8 bytes) as temp.
+;
+; Output: tai64n_base_time filled with 8-byte big-endian value
+; Clobbers: A, X, Y
+; =============================================================================
+parse_decimal_u64:
+        ; Zero the accumulator
+        ldx #7
+        lda #0
+@zero_acc:
+        sta u64_acc,x
+        dex
+        bpl @zero_acc
+
+@loop:
+        jsr chrin
+        cmp #$0d                ; CR = end
+        beq @store
+
+        ; Convert ASCII digit to value 0-9
+        sec
+        sbc #$30
+        pha                     ; save digit on stack
+
+        ; --- Multiply u64_acc by 10 ---
+        ; Copy accumulator to temp
+        ldx #7
+@copy:
+        lda u64_acc,x
+        sta u64_tmp,x
+        dex
+        bpl @copy
+
+        ; Shift u64_acc left by 1 (accumulator now = original * 2)
+        clc
+        ldx #7
+@shl1:
+        rol u64_acc,x
+        dex
+        bpl @shl1
+
+        ; Shift u64_tmp left by 3 (temp now = original * 8)
+        ldy #3                  ; shift count
+@shl3_outer:
+        clc
+        ldx #7
+@shl3_inner:
+        rol u64_tmp,x
+        dex
+        bpl @shl3_inner
+        dey
+        bne @shl3_outer
+
+        ; Add u64_tmp (*8) to u64_acc (*2) => accumulator = original * 10
+        clc
+        ldx #7
+@add_mul:
+        lda u64_acc,x
+        adc u64_tmp,x
+        sta u64_acc,x
+        dex
+        bpl @add_mul
+
+        ; Add digit value to accumulator (big-endian: add to byte 7 = LSB)
+        pla                     ; restore digit
+        clc
+        adc u64_acc+7
+        sta u64_acc+7
+        ; Propagate carry through upper bytes
+        ldx #6
+@carry:
+        bcc @loop               ; no carry, done
+        lda u64_acc,x
+        adc #0
+        sta u64_acc,x
+        dex
+        bpl @carry
+
+        jmp @loop
+
+@store:
+        ; Copy accumulator to tai64n_base_time
+        ldx #7
+@copy_out:
+        lda u64_acc,x
+        sta tai64n_base_time,x
+        dex
+        bpl @copy_out
+        rts
+
+; 8-byte working buffers for u64 decimal parsing
+u64_acc:
+        !fill 8, 0
+u64_tmp:
+        !fill 8, 0

@@ -13,7 +13,7 @@ import sys
 import time
 
 from c64_test_harness import (
-    Labels, ViceConfig, ViceProcess, ViceTransport,
+    Labels, ViceConfig, ViceInstanceManager,
     read_bytes, write_bytes, wait_for_text,
 )
 
@@ -48,16 +48,21 @@ def main():
 
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
     flush_print("Starting VICE...")
-    with ViceProcess(config) as vice:
-        if not vice.wait_for_monitor(timeout=30.0):
-            flush_print("FATAL: Could not connect to VICE monitor")
-            sys.exit(1)
 
-        transport = ViceTransport(port=config.port)
+    with ViceInstanceManager(
+        config=config,
+        port_range_start=6510,
+        port_range_end=6530,
+    ) as mgr:
+        inst = mgr.acquire()
+        flush_print(f"VICE PID={inst.pid}, port={inst.port}")
+        transport = inst.transport
         grid = wait_for_text(transport, "Q=QUIT", timeout=60.0)
         if grid is None:
             flush_print("FATAL: Main menu did not appear")
             sys.exit(1)
+
+        write_bytes(transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
 
         flush_print(f"VICE ready. Test address: ${TEST_ADDR:04X}")
 
@@ -101,6 +106,9 @@ def main():
         flush_print(f"\nTotal: {total_pass}/{total} passed")
         if total_fail == 0:
             flush_print("All sizes pass with auto-chunking fix!")
+
+        mgr.release(inst)
+
         sys.exit(0 if total_fail == 0 else 1)
 
 

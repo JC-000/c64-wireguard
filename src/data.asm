@@ -117,6 +117,10 @@ cc20_nonce:
 cc20_counter:
         !fill 4, 0
 
+; High byte of cc20_remain for 16-bit length support
+cc20_remain_hi:
+        !byte 0
+
 ; --- Poly1305 state ---
 ; 130-bit accumulator (17 bytes for carry room)
 poly_h:
@@ -150,7 +154,7 @@ aead_aad_len:
 aead_data_ptr:
         !word 0
 aead_data_len:
-        !byte 0
+        !word 0                ; 16-bit data length for MTU up to 1500
 aead_tag:
         !fill 16, 0
 
@@ -243,11 +247,13 @@ hs_preshared_key:
 zp_save_buf:
         !fill 26, 0            ; ZP save area ($02-$1B)
 udp_recv_buf:
-        !fill 256, 0           ; incoming UDP packet buffer
+        !fill 1500, 0          ; incoming UDP packet buffer (MTU-sized)
 udp_recv_len:
         !word 0                ; length of received packet
 udp_recv_src_ip:
         !fill 4, 0             ; source IP of received packet
+udp_recv_src_port:
+        !word 0                ; source port of received packet (big-endian)
 udp_recv_ready:
         !byte 0                ; 0=no packet, 1=packet waiting
 wg_peer_ip:
@@ -271,11 +277,31 @@ tp_peer_recv_idx:
 tp_payload_ptr:
         !word 0                ; pointer to plaintext data
 tp_payload_len:
-        !byte 0                ; payload length (max ~220)
+        !word 0                ; 16-bit payload length (up to 1500)
 tp_packet:
-        !fill 256, 0           ; Type 4 packet buffer
+        !fill 1500, 0          ; Type 4 packet buffer (MTU-sized)
 tp_packet_len:
         !word 0                ; total packet length
+tp_encrypt_error:
+        !byte 0                ; 1 = encrypt rejected (counter exhausted)
+
+; --- Replay window state ---
+rw_bitmap:
+        !fill 256, 0           ; 2048-bit sliding window bitmap
+rw_counter_max:
+        !fill 8, 0             ; highest accepted counter (64-bit LE)
+
+; Bit mask lookup (index 0-7 -> bit mask)
+rw_bit_mask:
+        !byte $01,$02,$04,$08,$10,$20,$40,$80
+
+; Temporaries for replay window computation
+rw_shift_lo:
+        !byte 0                ; low byte of shift amount
+rw_shift_hi:
+        !byte 0                ; high byte of shift amount
+rw_new_counter:
+        !byte 0                ; flag: 1 = received > max (new high counter)
 
 ; --- Session state ---
 wg_state:
@@ -353,6 +379,14 @@ last_send_jiffy:
         !fill 3, 0              ; last packet send time
 rekey_pending:
         !byte 0                 ; 1 = rekey initiated
+
+; --- TAI64N timestamp state ---
+tai64n_base_time:
+        !fill 8, 0              ; base Unix time from config (big-endian)
+tai64n_init_jiffy:
+        !fill 3, 0              ; jiffy clock snapshot at tai64n_init
+tai64n_seq:
+        !fill 4, 0              ; monotonic sub-second sequence counter (big-endian)
 
 ; --- Disk I/O ---
 config_filename:

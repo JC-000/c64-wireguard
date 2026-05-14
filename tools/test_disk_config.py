@@ -17,10 +17,9 @@ import tempfile
 import time
 
 from c64_test_harness import (
-    Labels, ViceConfig, ViceProcess, ViceTransport,
+    Labels, ViceConfig, ViceInstanceManager,
     read_bytes, write_bytes, jsr, wait_for_text,
 )
-from c64_test_harness.backends.vice_manager import PortAllocator
 from c64_test_harness.disk import DiskImage, FileType
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -183,48 +182,30 @@ def verify_port(transport, labels, label_name, expected_port, test_name):
 # VICE launcher helper
 # ============================================================================
 
-def launch_vice_with_disk(disk, allocator):
+def launch_vice_with_disk(disk, mgr):
     """Launch VICE with the given DiskImage attached.
 
-    Returns (vice, transport, port) -- caller must manage vice context.
+    Returns (inst, transport) -- caller must release inst via mgr.
     """
-    port = allocator.allocate()
-    reservation = allocator.take_socket(port)
-    if reservation:
-        reservation.close()
-
-    config = ViceConfig(
-        prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
-        port=port, disk_image=disk,
-    )
-    vice = ViceProcess(config)
-    vice.__enter__()
-
-    if not vice.wait_for_monitor(timeout=30.0):
-        vice.__exit__(None, None, None)
-        allocator.release(port)
-        raise RuntimeError("Could not connect to VICE monitor")
-
-    transport = ViceTransport(port=port)
+    inst = mgr.acquire(disk_image=disk)
+    transport = inst.transport
     grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
     if grid is None:
-        vice.__exit__(None, None, None)
-        allocator.release(port)
+        mgr.release(inst)
         raise RuntimeError("Main menu did not appear")
 
     # Safety loop
     write_bytes(transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
 
-    return vice, transport, port
+    return inst, transport
 
 
-def cleanup_vice(vice, allocator, port):
+def cleanup_vice(inst, mgr):
     """Shut down VICE and release port."""
     try:
-        vice.__exit__(None, None, None)
+        mgr.release(inst)
     except Exception:
         pass
-    allocator.release(port)
 
 
 # ============================================================================
@@ -593,11 +574,16 @@ def main():
             sys.exit(1)
     print(f"Labels loaded: {len(required)} required labels verified")
 
-    allocator = PortAllocator(port_range_start=6510, port_range_end=6560)
     total_passed = 0
     total_failed = 0
 
-    with tempfile.TemporaryDirectory() as tmpdir:
+    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
+
+    with ViceInstanceManager(
+        config=config,
+        port_range_start=6510,
+        port_range_end=6560,
+    ) as mgr, tempfile.TemporaryDirectory() as tmpdir:
 
         # ==================================================================
         # Instance 1: Standard config
@@ -622,9 +608,9 @@ def main():
         )
         disk_1 = create_disk_with_config(tmpdir, content_1, "standard.d64")
 
-        vice_1, transport_1, port_1 = launch_vice_with_disk(disk_1, allocator)
+        inst_1, transport_1 = launch_vice_with_disk(disk_1, mgr)
         try:
-            print(f"VICE PID={vice_1.pid}, port={port_1}")
+            print(f"VICE PID={inst_1.pid}, port={inst_1.port}")
 
             # Call config_read_file
             print("\n--- config_read_file (standard) ---")
@@ -659,7 +645,7 @@ def main():
 
             time.sleep(1.0)
         finally:
-            cleanup_vice(vice_1, allocator, port_1)
+            cleanup_vice(inst_1, mgr)
 
         # ==================================================================
         # Instance 2: Edge case -- all max values
@@ -682,9 +668,9 @@ def main():
         )
         disk_2 = create_disk_with_config(tmpdir, content_2, "maxvals.d64")
 
-        vice_2, transport_2, port_2 = launch_vice_with_disk(disk_2, allocator)
+        inst_2, transport_2 = launch_vice_with_disk(disk_2, mgr)
         try:
-            print(f"VICE PID={vice_2.pid}, port={port_2}")
+            print(f"VICE PID={inst_2.pid}, port={inst_2.port}")
 
             result = call_config_read(transport_2, labels)
             if result != 0:
@@ -701,7 +687,7 @@ def main():
 
             time.sleep(1.0)
         finally:
-            cleanup_vice(vice_2, allocator, port_2)
+            cleanup_vice(inst_2, mgr)
 
         # ==================================================================
         # Instance 3: Edge case -- all min values + random key + re-read
@@ -724,9 +710,9 @@ def main():
         )
         disk_3 = create_disk_with_config(tmpdir, content_3, "minvals.d64")
 
-        vice_3, transport_3, port_3 = launch_vice_with_disk(disk_3, allocator)
+        inst_3, transport_3 = launch_vice_with_disk(disk_3, mgr)
         try:
-            print(f"VICE PID={vice_3.pid}, port={port_3}")
+            print(f"VICE PID={inst_3.pid}, port={inst_3.port}")
 
             result = call_config_read(transport_3, labels)
             if result != 0:
@@ -748,7 +734,7 @@ def main():
 
             time.sleep(1.0)
         finally:
-            cleanup_vice(vice_3, allocator, port_3)
+            cleanup_vice(inst_3, mgr)
 
     # ==================================================================
     # Summary

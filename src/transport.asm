@@ -42,6 +42,23 @@ transport_init:
         dex
         bpl @zero_recv
 
+        ; zero replay window bitmap (256 bytes)
+        ldx #0
+@zero_bm:
+        sta rw_bitmap,x
+        inx
+        bne @zero_bm
+
+        ; zero replay window counter max (8 bytes)
+        ldx #7
+@zero_rwmax:
+        sta rw_counter_max,x
+        dex
+        bpl @zero_rwmax
+
+        ; zero new-counter flag
+        sta rw_new_counter
+
         ; copy peer's sender_index from response packet[4..7]
         ldx #3
 @copy_idx:
@@ -136,7 +153,7 @@ transport_build_nonce:
 ;
 ; Input:
 ;   tp_payload_ptr  — pointer to plaintext data
-;   tp_payload_len  — payload length (max ~220)
+;   tp_payload_len  — 16-bit payload length (up to ~1468)
 ;   hs_transport_send — 32-byte send key
 ;   tp_peer_recv_idx — 4-byte receiver index
 ;   tp_send_counter — 8-byte send counter
@@ -149,6 +166,27 @@ transport_build_nonce:
 ; Clobbers: A, X, Y
 ; =============================================================================
 transport_encrypt:
+        ; --- 0. Check counter exhaustion ---
+        lda #0
+        sta tp_encrypt_error    ; clear error flag
+
+        lda tp_send_counter+7   ; check highest byte of 64-bit counter
+        cmp #REJECT_COUNTER_B7
+        bcc @counter_ok         ; < $10, proceed
+        ; Counter exhausted — reject
+        lda #1
+        sta tp_encrypt_error
+        rts                     ; return without encrypting
+
+@counter_ok:
+        ; Check if approaching limit (rekey warning)
+        lda tp_send_counter+7
+        cmp #REKEY_COUNTER_B7
+        bcc @no_rekey           ; < $0F, no rekey needed
+        lda #1
+        sta rekey_pending       ; signal rekey
+@no_rekey:
+
         ; --- 1. Write header ---
         ; type = 4 (LE u32)
         lda #$04
@@ -175,19 +213,40 @@ transport_encrypt:
         bpl @copy_ctr
 
         ; --- 2. Copy plaintext to tp_packet+16 for in-place AEAD ---
+        ; 16-bit copy using ZP indirect
         lda tp_payload_ptr
         sta zp_ptr1
         lda tp_payload_ptr+1
         sta zp_ptr1+1
+        lda #<(tp_packet+16)
+        sta zp_ptr2
+        lda #>(tp_packet+16)
+        sta zp_ptr2+1
+        ; Copy full pages
+        ldx tp_payload_len+1
         ldy #0
+        cpx #0
+        beq @enc_copy_rem
+@enc_copy_pg:
+        lda (zp_ptr1),y
+        sta (zp_ptr2),y
+        iny
+        bne @enc_copy_pg
+        inc zp_ptr1+1
+        inc zp_ptr2+1
+        dex
+        bne @enc_copy_pg
+@enc_copy_rem:
+        ; Copy remaining bytes (low byte)
         ldx tp_payload_len
         beq @skip_copy
-@copy_pt:
+        ldy #0
+@enc_copy_lo:
         lda (zp_ptr1),y
-        sta tp_packet+16,y
+        sta (zp_ptr2),y
         iny
         dex
-        bne @copy_pt
+        bne @enc_copy_lo
 @skip_copy:
 
         ; --- 3. Set up AEAD ---
@@ -217,18 +276,20 @@ transport_encrypt:
         sta aead_data_ptr+1
         lda tp_payload_len
         sta aead_data_len
+        lda tp_payload_len+1
+        sta aead_data_len+1
 
         ; --- 4. Encrypt ---
         jsr aead_encrypt
 
         ; --- 5. Append Poly1305 tag after ciphertext ---
-        ; tag goes at tp_packet + 16 + payload_len
+        ; tag goes at tp_packet + 16 + payload_len (16-bit add)
         lda #<(tp_packet+16)
         clc
         adc tp_payload_len
         sta zp_ptr1
         lda #>(tp_packet+16)
-        adc #0
+        adc tp_payload_len+1
         sta zp_ptr1+1
 
         ldy #0
@@ -244,7 +305,7 @@ transport_encrypt:
         clc
         adc #32
         sta tp_packet_len
-        lda #0
+        lda tp_payload_len+1
         adc #0
         sta tp_packet_len+1
 
@@ -291,18 +352,90 @@ transport_decrypt:
         dex
         bpl @copy_ctr
 
-        ; --- 3. Replay check: received counter >= tp_recv_counter ---
-        ; Compare MSB to LSB (byte 7 to byte 0)
-        ; If received < expected, reject
+        ; --- 2b. Check received counter limit ---
+        lda tp_recv_counter_tmp+7
+        cmp #REJECT_COUNTER_B7
+        bcc @counter_ok         ; < $10, proceed
+        jmp @decrypt_fail       ; counter byte 7 >= $10, reject
+@counter_ok:
+
+        ; --- 3. Sliding window replay check ---
+        ; Compare received (tp_recv_counter_tmp) vs rw_counter_max
+        ; MSB-first comparison (byte 7 down to 0)
+        lda #0
+        sta rw_new_counter       ; assume not new high counter
         ldx #7
 @replay_cmp:
         lda tp_recv_counter_tmp,x
-        cmp tp_recv_counter,x
-        bcc @replay_fail         ; received < expected → reject
-        bne @replay_ok           ; received > expected → accept
-        dex                      ; equal, check next byte
+        cmp rw_counter_max,x
+        bcc @recv_less           ; received < max
+        bne @recv_greater        ; received > max
+        dex
         bpl @replay_cmp
-        ; All bytes equal → accepted (>=)
+        ; All bytes equal: received == max
+        ; Check if bit already set in bitmap
+        jmp @check_bitmap
+
+@recv_greater:
+        ; received > rw_counter_max -> accept (will advance window after decrypt)
+        lda #1
+        sta rw_new_counter
+        jmp @replay_ok
+
+@recv_less:
+        ; received < rw_counter_max
+        ; Compute delta = rw_counter_max - received (64-bit)
+        ; Only need low 16 bits; if any of bytes 2-7 are nonzero, delta >= 65536 > 2048
+        sec
+        lda rw_counter_max
+        sbc tp_recv_counter_tmp
+        sta rw_shift_lo
+        lda rw_counter_max+1
+        sbc tp_recv_counter_tmp+1
+        sta rw_shift_hi
+
+        ; Check bytes 2-7 of delta for nonzero (means delta >= 65536)
+        ldx #2
+@check_high:
+        lda rw_counter_max,x
+        cmp tp_recv_counter_tmp,x
+        bne @replay_fail          ; any difference in high bytes with borrow means too old
+        inx
+        cpx #8
+        bne @check_high
+
+        ; Now delta is in rw_shift_hi:rw_shift_lo (16-bit)
+        ; Check if delta >= 2048 ($0800): high byte >= 8
+        lda rw_shift_hi
+        cmp #8
+        bcs @replay_fail          ; delta >= 2048, outside window
+
+        ; delta < 2048, within window. Check bitmap for duplicate.
+@check_bitmap:
+        ; Compute byte_offset and bit_index from received counter low 11 bits
+        ; bit_index = tp_recv_counter_tmp[0] & 7
+        ; byte_offset = ((tp_recv_counter_tmp[1] & $07) << 5) | (tp_recv_counter_tmp[0] >> 3)
+        lda tp_recv_counter_tmp
+        and #$07
+        tax                       ; X = bit index (0-7)
+        lda tp_recv_counter_tmp+1
+        and #$07
+        asl
+        asl
+        asl
+        asl
+        asl                       ; *32
+        sta zp_tmp1               ; high part of byte offset
+        lda tp_recv_counter_tmp
+        lsr
+        lsr
+        lsr                       ; /8
+        ora zp_tmp1               ; combine
+        tay                       ; Y = byte offset in bitmap (0-255)
+        lda rw_bitmap,y
+        and rw_bit_mask,x
+        bne @replay_fail          ; bit already set -> duplicate, reject
+        ; Bit clear -> not yet seen, accept
         jmp @replay_ok
 
 @replay_fail:
@@ -310,38 +443,71 @@ transport_decrypt:
         rts
 
 @replay_ok:
-        ; --- 4. Compute payload_len = udp_recv_len - 32 ---
+        ; --- 4. Compute payload_len = udp_recv_len - 32 (16-bit) ---
         ; Total = 16 header + payload + 16 tag, so payload = total - 32
         lda udp_recv_len
         sec
         sbc #32
         sta tp_payload_len
-        ; If carry was clear, packet too small
-        bcc @decrypt_fail
+        lda udp_recv_len+1
+        sbc #0
+        sta tp_payload_len+1
+        ; If high byte negative (borrow), packet too small
+        bcs @no_underflow
+        jmp @decrypt_fail
+@no_underflow:
 
-        ; --- 5. Copy ciphertext to tp_packet+16 ---
+        ; --- 5. Copy ciphertext to tp_packet+16 (16-bit) ---
+        lda #<(udp_recv_buf+16)
+        sta zp_ptr1
+        lda #>(udp_recv_buf+16)
+        sta zp_ptr1+1
+        lda #<(tp_packet+16)
+        sta zp_ptr2
+        lda #>(tp_packet+16)
+        sta zp_ptr2+1
+        ; Copy full pages
+        ldx tp_payload_len+1
         ldy #0
+        cpx #0
+        beq @dec_copy_rem
+@dec_copy_pg:
+        lda (zp_ptr1),y
+        sta (zp_ptr2),y
+        iny
+        bne @dec_copy_pg
+        inc zp_ptr1+1
+        inc zp_ptr2+1
+        dex
+        bne @dec_copy_pg
+@dec_copy_rem:
+        ; Copy remaining bytes (low byte)
         ldx tp_payload_len
         beq @skip_ct_copy
-@copy_ct:
-        lda udp_recv_buf+16,y
-        sta tp_packet+16,y
+        ldy #0
+@dec_copy_lo:
+        lda (zp_ptr1),y
+        sta (zp_ptr2),y
         iny
         dex
-        bne @copy_ct
+        bne @dec_copy_lo
 @skip_ct_copy:
 
         ; Copy tag (16 bytes after ciphertext in recv buf)
-        ; Tag is at udp_recv_buf + 16 + payload_len
-        ; Y already = payload_len from the copy loop (or 0 if skip)
-        ldy tp_payload_len
-        ldx #0
+        ; Tag is at udp_recv_buf + 16 + payload_len (16-bit)
+        lda #<(udp_recv_buf+16)
+        clc
+        adc tp_payload_len
+        sta zp_ptr1
+        lda #>(udp_recv_buf+16)
+        adc tp_payload_len+1
+        sta zp_ptr1+1
+        ldy #0
 @copy_in_tag:
-        lda udp_recv_buf+16,y
-        sta aead_tag,x
+        lda (zp_ptr1),y
+        sta aead_tag,y
         iny
-        inx
-        cpx #16
+        cpy #16
         bne @copy_in_tag
 
         ; --- 6. Set up AEAD for decryption ---
@@ -371,22 +537,144 @@ transport_decrypt:
         sta aead_data_ptr+1
         lda tp_payload_len
         sta aead_data_len
+        lda tp_payload_len+1
+        sta aead_data_len+1
 
         ; --- 7. Decrypt and verify ---
         jsr aead_decrypt
         cmp #0
-        bne @decrypt_fail
+        beq @decrypt_ok
+        jmp @decrypt_fail
+@decrypt_ok:
 
-        ; --- 8. On success: tp_recv_counter = received + 1 ---
-        ; Copy received counter to tp_recv_counter
+        ; --- 8. On success: update sliding window ---
+        lda rw_new_counter
+        beq @just_set_bit       ; received <= max, just set the bit
+
+        ; --- received > rw_counter_max: advance window ---
+        ; Compute shift = received - rw_counter_max (16-bit)
+        sec
+        lda tp_recv_counter_tmp
+        sbc rw_counter_max
+        sta rw_shift_lo
+        lda tp_recv_counter_tmp+1
+        sbc rw_counter_max+1
+        sta rw_shift_hi
+
+        ; Check if any bytes 2-7 differ (shift >= 65536)
+        ldx #2
+@chk_big:
+        lda tp_recv_counter_tmp,x
+        cmp rw_counter_max,x
+        bne @clear_all           ; high bytes differ -> huge shift, clear all
+        inx
+        cpx #8
+        bne @chk_big
+
+        ; shift is 16-bit in rw_shift_hi:rw_shift_lo
+        ; If shift >= 256 (high byte != 0), clear all bitmap
+        lda rw_shift_hi
+        bne @clear_all
+
+        ; shift < 256: clear newly exposed bytes in bitmap
+        ; We need to clear bytes for positions (old_max+1) to (new_max)
+        ; byte_start = ((old_max + 1) & $7FF) >> 3
+        ; num_bytes_to_clear = (shift + 7) >> 3
+
+        ; Compute start byte offset from (rw_counter_max + 1) low 11 bits
+        ; Increment rw_counter_max[0..1] temporarily to get old_max+1
+        lda rw_counter_max
+        clc
+        adc #1
+        sta zp_tmp1              ; low byte of (old_max+1)
+        lda rw_counter_max+1
+        adc #0
+        sta zp_tmp2              ; byte 1 of (old_max+1)
+
+        ; start_byte = ((zp_tmp2 & $07) << 5) | (zp_tmp1 >> 3)
+        lda zp_tmp2
+        and #$07
+        asl
+        asl
+        asl
+        asl
+        asl
+        sta zp_ptr2              ; use zp_ptr2 as temp
+        lda zp_tmp1
+        lsr
+        lsr
+        lsr
+        ora zp_ptr2
+        tay                      ; Y = start byte offset
+
+        ; num_bytes = (shift + 7) >> 3
+        lda rw_shift_lo
+        clc
+        adc #7
+        lsr
+        lsr
+        lsr                      ; A = number of bytes to clear
+        tax                      ; X = count
+        beq @advance_done        ; shift was 0? shouldn't happen but guard
+
+        lda #0
+@clear_loop:
+        sta rw_bitmap,y
+        iny                      ; wraps at 256 naturally (8-bit Y)
+        dex
+        bne @clear_loop
+        jmp @advance_done
+
+@clear_all:
+        ; Zero entire bitmap (256 bytes)
+        lda #0
+        ldx #0
+@clear_all_loop:
+        sta rw_bitmap,x
+        inx
+        bne @clear_all_loop
+
+@advance_done:
+        ; Update rw_counter_max = received
+        ldx #7
+@upd_max:
+        lda tp_recv_counter_tmp,x
+        sta rw_counter_max,x
+        dex
+        bpl @upd_max
+
+@just_set_bit:
+        ; Set bit for received counter in bitmap
+        ; byte_offset = ((tp_recv_counter_tmp[1] & $07) << 5) | (tp_recv_counter_tmp[0] >> 3)
+        ; bit_index = tp_recv_counter_tmp[0] & 7
+        lda tp_recv_counter_tmp+1
+        and #$07
+        asl
+        asl
+        asl
+        asl
+        asl
+        sta zp_tmp1
+        lda tp_recv_counter_tmp
+        lsr
+        lsr
+        lsr
+        ora zp_tmp1
+        tay                      ; Y = byte offset
+        lda tp_recv_counter_tmp
+        and #$07
+        tax                      ; X = bit index
+        lda rw_bitmap,y
+        ora rw_bit_mask,x
+        sta rw_bitmap,y
+
+        ; Update tp_recv_counter = rw_counter_max + 1 (for backward compat)
         ldx #7
 @upd_ctr:
-        lda tp_recv_counter_tmp,x
+        lda rw_counter_max,x
         sta tp_recv_counter,x
         dex
         bpl @upd_ctr
-
-        ; Increment tp_recv_counter
         lda #<tp_recv_counter
         sta zp_ptr1
         lda #>tp_recv_counter

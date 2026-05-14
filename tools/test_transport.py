@@ -19,10 +19,9 @@ import time
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 from c64_test_harness import (
-    Labels, ViceConfig, ViceProcess, ViceTransport,
+    Labels, ViceConfig, ViceInstanceManager,
     read_bytes, write_bytes, jsr, wait_for_text,
 )
-from c64_test_harness.backends.vice_manager import PortAllocator
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "wireguard.prg")
@@ -41,6 +40,16 @@ def robust_jsr(transport, addr, timeout=30.0, retries=5):
                 time.sleep(1.0 + attempt * 0.5)
                 continue
             raise
+
+
+def reset_recv_state(transport, labels):
+    """Reset all receive/replay state (counter, sliding window bitmap, max)."""
+    write_bytes(transport, labels["tp_recv_counter"], bytes(8))
+    # Reset sliding window replay state
+    if "rw_counter_max" in labels:
+        write_bytes(transport, labels["rw_counter_max"], bytes(8))
+    if "rw_bitmap" in labels:
+        write_bytes(transport, labels["rw_bitmap"], bytes(256))
 
 
 # ============================================================================
@@ -115,11 +124,11 @@ def test_build_verification(labels):
         addr_str = f"${tp_packet_addr:04X}" if tp_packet_addr else "None"
         print(f"  FAIL tp_packet {addr_str} not below $7800")
 
-    # tp_packet + 256 must be below $7800
-    if tp_packet_addr is not None and tp_packet_addr + 256 < 0x7800:
+    # tp_packet + 1500 must be below $7800
+    if tp_packet_addr is not None and tp_packet_addr + 1500 < 0x7800:
         passed += 1
         if VERBOSE:
-            print(f"  PASS tp_packet end ${tp_packet_addr+256:04X} < $7800")
+            print(f"  PASS tp_packet end ${tp_packet_addr+1500:04X} < $7800")
     else:
         failed += 1
         print(f"  FAIL tp_packet buffer extends past $7800")
@@ -234,7 +243,7 @@ def test_transport_encrypt(transport, labels, rng):
         write_bytes(transport, labels["input_buffer"], plaintext)
         write_bytes(transport, labels["tp_payload_ptr"],
                     struct.pack('<H', labels["input_buffer"]))
-        write_bytes(transport, labels["tp_payload_len"], bytes([size]))
+        write_bytes(transport, labels["tp_payload_len"], struct.pack('<H', size))
 
         robust_jsr(transport, labels["transport_encrypt"], timeout=60.0)
 
@@ -314,7 +323,7 @@ def test_transport_decrypt(transport, labels, rng):
 
         # Set up C64 state
         write_bytes(transport, labels["hs_transport_recv"], key)
-        write_bytes(transport, labels["tp_recv_counter"], bytes(8))  # reset
+        reset_recv_state(transport, labels)
 
         # Write packet to udp_recv_buf
         write_bytes(transport, labels["udp_recv_buf"], packet)
@@ -325,7 +334,7 @@ def test_transport_decrypt(transport, labels, rng):
 
         # Check return value — read A from the last state
         # Actually we need to check tp_payload_len and the decrypted data
-        result_len = read_bytes(transport, labels["tp_payload_len"], 1)[0]
+        result_len = int.from_bytes(read_bytes(transport, labels["tp_payload_len"], 2), 'little')
         result_data = read_bytes(transport, labels["tp_packet"] + 16, size)
 
         if result_len == size and result_data == plaintext:
@@ -357,7 +366,7 @@ def test_decrypt_failures(transport, labels, rng):
     counter_val = 0
 
     # Reset recv counter
-    write_bytes(transport, labels["tp_recv_counter"], bytes(8))
+    reset_recv_state(transport, labels)
     write_bytes(transport, labels["hs_transport_recv"], key)
 
     # --- Test 1: Tampered ciphertext ---
@@ -368,7 +377,7 @@ def test_decrypt_failures(transport, labels, rng):
     write_bytes(transport, labels["udp_recv_buf"], bytes(packet))
     write_bytes(transport, labels["udp_recv_len"],
                 struct.pack('<H', len(packet)))
-    write_bytes(transport, labels["tp_recv_counter"], bytes(8))
+    reset_recv_state(transport, labels)
 
     robust_jsr(transport, labels["transport_decrypt"], timeout=60.0)
     # After decrypt, check a flag or read the payload_len
@@ -396,7 +405,7 @@ def test_decrypt_failures(transport, labels, rng):
     write_bytes(transport, labels["udp_recv_buf"], bytes(packet))
     write_bytes(transport, labels["udp_recv_len"],
                 struct.pack('<H', len(packet)))
-    write_bytes(transport, labels["tp_recv_counter"], bytes(8))
+    reset_recv_state(transport, labels)
 
     robust_jsr(transport, labels["transport_decrypt"], timeout=60.0)
     recv_ctr = read_bytes(transport, labels["tp_recv_counter"], 8)
@@ -417,7 +426,7 @@ def test_decrypt_failures(transport, labels, rng):
     write_bytes(transport, labels["udp_recv_buf"], packet)
     write_bytes(transport, labels["udp_recv_len"],
                 struct.pack('<H', len(packet)))
-    write_bytes(transport, labels["tp_recv_counter"], bytes(8))
+    reset_recv_state(transport, labels)
 
     robust_jsr(transport, labels["transport_decrypt"], timeout=60.0)
     recv_ctr = read_bytes(transport, labels["tp_recv_counter"], 8)
@@ -440,7 +449,7 @@ def test_decrypt_failures(transport, labels, rng):
     write_bytes(transport, labels["udp_recv_buf"], bytes(packet))
     write_bytes(transport, labels["udp_recv_len"],
                 struct.pack('<H', len(packet)))
-    write_bytes(transport, labels["tp_recv_counter"], bytes(8))
+    reset_recv_state(transport, labels)
 
     robust_jsr(transport, labels["transport_decrypt"], timeout=60.0)
     recv_ctr = read_bytes(transport, labels["tp_recv_counter"], 8)
@@ -462,7 +471,7 @@ def test_replay_protection(transport, labels, rng):
     plaintext = b"REPLAY TEST DATA"
 
     write_bytes(transport, labels["hs_transport_recv"], key)
-    write_bytes(transport, labels["tp_recv_counter"], bytes(8))  # start at 0
+    reset_recv_state(transport, labels)  # start at 0
 
     # --- Test 1: Accept counter=0 (first packet) ---
     packet = build_type4_packet(b'\x01\x00\x00\x00', 0, key, plaintext)
@@ -578,7 +587,7 @@ def test_round_trip(transport, labels, rng):
         write_bytes(transport, labels["input_buffer"], plaintext)
         write_bytes(transport, labels["tp_payload_ptr"],
                     struct.pack('<H', labels["input_buffer"]))
-        write_bytes(transport, labels["tp_payload_len"], bytes([size]))
+        write_bytes(transport, labels["tp_payload_len"], struct.pack('<H', size))
 
         robust_jsr(transport, labels["transport_encrypt"], timeout=60.0)
 
@@ -589,7 +598,7 @@ def test_round_trip(transport, labels, rng):
 
         # Now set up for decrypt — use same key as recv key
         write_bytes(transport, labels["hs_transport_recv"], key)
-        write_bytes(transport, labels["tp_recv_counter"], bytes(8))
+        reset_recv_state(transport, labels)
 
         # Copy packet to udp_recv_buf
         write_bytes(transport, labels["udp_recv_buf"], packet)
@@ -599,7 +608,7 @@ def test_round_trip(transport, labels, rng):
         robust_jsr(transport, labels["transport_decrypt"], timeout=60.0)
 
         # Verify round-trip
-        result_len = read_bytes(transport, labels["tp_payload_len"], 1)[0]
+        result_len = int.from_bytes(read_bytes(transport, labels["tp_payload_len"], 2), 'little')
         result_data = read_bytes(transport, labels["tp_packet"] + 16, size)
 
         if result_len == size and result_data == plaintext:
@@ -678,7 +687,12 @@ def main():
     # Build (skip if run_regression.py already built)
     if not os.environ.get("C64_SKIP_BUILD"):
         print("Building...")
-        subprocess.run(["make", "clean"], capture_output=True, cwd=PROJECT_ROOT)
+        # Only clean ACME outputs, not ip65 binary (may not be rebuildable)
+        build_dir = os.path.join(PROJECT_ROOT, "build")
+        for f in ["wireguard.prg", "labels.txt"]:
+            p = os.path.join(build_dir, f)
+            if os.path.exists(p):
+                os.remove(p)
         result = subprocess.run(["make"], capture_output=True, text=True,
                                 cwd=PROJECT_ROOT)
         if result.returncode != 0:
@@ -700,31 +714,31 @@ def main():
         sys.exit(1)
 
     # Launch VICE
-    allocator = PortAllocator(port_range_start=6510, port_range_end=6530)
-    port = allocator.allocate()
-    reservation = allocator.take_socket(port)
-    if reservation:
-        reservation.close()
-    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
-                        port=port)
-    with ViceProcess(config) as vice:
-        if not vice.wait_for_monitor(timeout=30.0):
-            print("FATAL: Could not connect to VICE monitor")
-            allocator.release(port)
-            sys.exit(1)
+    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
 
-        print(f"VICE PID={vice.pid}, port={port}")
-        transport = ViceTransport(port=port)
+    with ViceInstanceManager(
+        config=config,
+        port_range_start=6510,
+        port_range_end=6530,
+    ) as mgr:
+        inst = mgr.acquire()
+        print(f"VICE PID={inst.pid}, port={inst.port}")
+
+        transport = inst.transport
         grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)
+
+        write_bytes(transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
 
         print("VICE ready, running tests...")
 
         passed, failed = run_tests(transport, labels, seed)
         total_passed = passed + p
         total_failed = failed + f
+
+        mgr.release(inst)
 
     total = total_passed + total_failed
     print(f"\n{'='*60}")

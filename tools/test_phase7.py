@@ -20,10 +20,9 @@ import time
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 from c64_test_harness import (
-    Labels, ViceConfig, ViceProcess, ViceTransport,
+    Labels, ViceConfig, ViceInstanceManager,
     read_bytes, write_bytes, jsr, wait_for_text,
 )
-from c64_test_harness.backends.vice_manager import PortAllocator
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "wireguard.prg")
@@ -853,7 +852,7 @@ def test_keepalive(transport, labels, rng):
             write_bytes(transport, labels["tp_peer_recv_idx"], receiver_idx)
             write_bytes(transport, labels["tp_send_counter"],
                         struct.pack('<Q', counter_val))
-            write_bytes(transport, labels["tp_payload_len"], bytes([0]))
+            write_bytes(transport, labels["tp_payload_len"], bytes([0, 0]))
 
             robust_jsr(transport, labels["transport_encrypt"])
 
@@ -916,7 +915,7 @@ def test_keepalive(transport, labels, rng):
 
             robust_jsr(transport, labels["session_handle_packet"], timeout=60.0)
 
-            dec_len = read_bytes(transport, labels["tp_payload_len"], 1)[0]
+            dec_len = int.from_bytes(read_bytes(transport, labels["tp_payload_len"], 2), 'little')
             if dec_len == 0:
                 passed += 1
                 if VERBOSE:
@@ -1228,7 +1227,7 @@ def test_payload_routing(transport, labels, rng):
     encrypt_and_send(recv_key, receiver_idx, counter, b'')
     counter += 1
     # tp_payload_len should be 0 after keepalive
-    dec_len = read_bytes(transport, labels["tp_payload_len"], 1)[0]
+    dec_len = int.from_bytes(read_bytes(transport, labels["tp_payload_len"], 2), 'little')
     if dec_len == 0:
         passed += 1
         if VERBOSE:
@@ -1375,7 +1374,7 @@ def test_round_trip(transport, labels, rng):
         robust_jsr(transport, labels["transport_decrypt"], timeout=60.0)
 
         # Read A result from transport_decrypt: check via tp_payload_len
-        dec_len = read_bytes(transport, labels["tp_payload_len"], 1)[0]
+        dec_len = int.from_bytes(read_bytes(transport, labels["tp_payload_len"], 2), 'little')
         decrypted = bytes(read_bytes(transport, labels["tp_packet"] + 16,
                                      len(reply_pkt)))
 
@@ -1429,7 +1428,7 @@ def test_round_trip(transport, labels, rng):
                     struct.pack('<H', len(type4)))
         robust_jsr(transport, labels["transport_decrypt"], timeout=60.0)
 
-        dec_len = read_bytes(transport, labels["tp_payload_len"], 1)[0]
+        dec_len = int.from_bytes(read_bytes(transport, labels["tp_payload_len"], 2), 'little')
 
         if dec_len == len(udp_pkt):
             # Parse UDP via trampoline
@@ -1580,34 +1579,30 @@ def main():
         sys.exit(1)
 
     # Launch VICE
-    allocator = PortAllocator(port_range_start=6510, port_range_end=6530)
-    port = allocator.allocate()
-    reservation = allocator.take_socket(port)
-    if reservation:
-        reservation.close()
-    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
-                        port=port)
-    with ViceProcess(config) as vice:
-        if not vice.wait_for_monitor(timeout=30.0):
-            print("FATAL: Could not connect to VICE monitor")
-            allocator.release(port)
-            sys.exit(1)
+    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
 
-        print(f"VICE PID={vice.pid}, port={port}")
-        transport = ViceTransport(port=port)
+    with ViceInstanceManager(
+        config=config,
+        port_range_start=6510,
+        port_range_end=6530,
+    ) as mgr:
+        inst = mgr.acquire()
+        print(f"VICE PID={inst.pid}, port={inst.port}")
+        transport = inst.transport
         grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)
 
-        print("VICE ready, running tests...")
-
-        # Safety: write JMP $0339 at $0339 so CPU loops harmlessly
         write_bytes(transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
+
+        print("VICE ready, running tests...")
 
         passed, failed = run_tests(transport, labels, seed)
         total_passed = passed + bp
         total_failed = failed + bf
+
+        mgr.release(inst)
 
     total = total_passed + total_failed
     print(f"\n{'='*60}")

@@ -173,6 +173,8 @@ do_send_test:
         sta tp_payload_ptr+1
         lda #test_payload_len
         sta tp_payload_len
+        lda #0
+        sta tp_payload_len+1
 
         ; encrypt and send
         jsr transport_send
@@ -235,6 +237,8 @@ do_ping:
         sta tp_payload_ptr+1
         lda ip_pkt_len
         sta tp_payload_len
+        lda #0
+        sta tp_payload_len+1
         jsr transport_send
         jsr timer_mark_send
         lda #<ping_sent_msg
@@ -273,6 +277,8 @@ do_message_input:
         sta tp_payload_ptr+1
         lda ip_pkt_len
         sta tp_payload_len
+        lda #0
+        sta tp_payload_len+1
         jsr transport_send
         jsr timer_mark_send
         lda #<send_ok_msg

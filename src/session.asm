@@ -148,15 +148,40 @@ session_handle_packet:
         cmp #SESSION_ACTIVE
         bne @wrong_state
 
-        ; Copy received packet to tp_packet for decrypt
-        ; Need to know length - use udp_recv_len
-        ldx #0
-@copy_t4:
-        lda udp_recv_buf,x
-        sta tp_packet,x
-        inx
-        cpx udp_recv_len        ; low byte (max 255)
-        bne @copy_t4
+        ; Copy received packet to tp_packet for decrypt (16-bit)
+        lda #<udp_recv_buf
+        sta zp_ptr1
+        lda #>udp_recv_buf
+        sta zp_ptr1+1
+        lda #<tp_packet
+        sta zp_ptr2
+        lda #>tp_packet
+        sta zp_ptr2+1
+        ; Copy full pages
+        ldx udp_recv_len+1
+        ldy #0
+        cpx #0
+        beq @t4_copy_rem
+@t4_copy_pg:
+        lda (zp_ptr1),y
+        sta (zp_ptr2),y
+        iny
+        bne @t4_copy_pg
+        inc zp_ptr1+1
+        inc zp_ptr2+1
+        dex
+        bne @t4_copy_pg
+@t4_copy_rem:
+        ldx udp_recv_len
+        beq @t4_copy_done
+        ldy #0
+@t4_copy_lo:
+        lda (zp_ptr1),y
+        sta (zp_ptr2),y
+        iny
+        dex
+        bne @t4_copy_lo
+@t4_copy_done:
 
         ; Set packet length
         lda udp_recv_len
@@ -168,6 +193,9 @@ session_handle_packet:
         jsr transport_decrypt
         cmp #0
         bne @decrypt_fail
+
+        ; Update peer endpoint if changed (roaming support)
+        jsr endpoint_update
 
         ; Route by IP protocol
         lda tp_packet+16+9      ; IP protocol byte
@@ -244,6 +272,53 @@ session_reset:
 ;
 ; Clobbers: A, X, Y
 ; =============================================================================
+; =============================================================================
+; endpoint_update - Update peer endpoint after successful decrypt
+;
+; Compares current source IP/port against stored peer IP/port.
+; If different, updates the stored values (roaming support).
+; Only called after successful AEAD decrypt (spoof protection).
+;
+; Clobbers: A, X
+; =============================================================================
+endpoint_update:
+        ; Compare source IP (4 bytes)
+        ldx #3
+@cmp_ip:
+        lda udp_recv_src_ip,x
+        cmp wg_peer_ip,x
+        bne @update
+        dex
+        bpl @cmp_ip
+
+        ; IP matches, check port (2 bytes)
+        lda udp_recv_src_port
+        cmp wg_peer_port
+        bne @update
+        lda udp_recv_src_port+1
+        cmp wg_peer_port+1
+        bne @update
+
+        ; All same, nothing to do
+        rts
+
+@update:
+        ; Copy new IP
+        ldx #3
+@copy_ip:
+        lda udp_recv_src_ip,x
+        sta wg_peer_ip,x
+        dex
+        bpl @copy_ip
+
+        ; Copy new port
+        lda udp_recv_src_port
+        sta wg_peer_port
+        lda udp_recv_src_port+1
+        sta wg_peer_port+1
+
+        rts
+
 display_payload:
         lda #<recv_data_msg
         ldy #>recv_data_msg

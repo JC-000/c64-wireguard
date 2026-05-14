@@ -91,7 +91,9 @@ hchacha20:
 cookie_handle_type3:
         ; 1. Derive cookie_key = BLAKE2s("cookie--" || cfg_peer_pub)
         lda #32
-        ldx #0                  ; unkeyed
+        sta b2s_out_len
+        lda #0
+        sta b2s_key_len         ; unkeyed
         jsr blake2s_init
 
         lda #<wg_cookie_label
@@ -184,6 +186,8 @@ cookie_handle_type3:
         sta aead_data_ptr+1
         lda #16
         sta aead_data_len
+        lda #0
+        sta aead_data_len+1
 
         ; Copy tag from packet
         ldx #15

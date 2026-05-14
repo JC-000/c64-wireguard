@@ -21,6 +21,9 @@ TESTS = [
     ("phase7",     ["tools/test_phase7.py", "--seed", "7"]),
     ("disk_config",["tools/test_disk_config.py", "--seed", "7"]),
     ("phase8_psk", ["tools/test_phase8_psk.py", "--seed", "7"]),
+    ("mtu",        ["tools/test_mtu.py", "--seed", "1500"]),
+    ("tai64n",     ["tools/test_tai64n.py", "--verbose"]),
+    ("mac2",       ["tools/test_mac2_integration.py", "--verbose"]),
 ]
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -75,7 +78,7 @@ def main():
 
     print("=" * 70)
     if all_ok:
-        print("All 10 suites passed!")
+        print(f"All {len(TESTS)} suites passed!")
     else:
         print("\nFailed suites:")
         for name, (rc, out) in results.items():

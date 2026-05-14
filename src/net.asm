@@ -126,30 +126,65 @@ net_udp_recv_cb:
         bcs +
         dec udp_recv_len+1
 +
-        ; cap at 256 bytes (our buffer size)
+        ; cap at 1500 bytes (our buffer size)
         lda udp_recv_len+1
-        bne @too_large
+        cmp #>(1500)            ; = $05
+        bcc @copy               ; high byte < 5, fits
+        bne @too_large          ; high byte > 5, too large
         lda udp_recv_len
-        beq @done               ; zero length, skip
-        jmp @copy
+        cmp #<(1500)            ; = $DC
+        bcc @copy               ; fits
+        beq @copy               ; exactly 1500
 
 @too_large:
-        ; packet > 255 bytes — cap at 255
-        lda #255
+        lda #<(1500)
         sta udp_recv_len
-        lda #0
+        lda #>(1500)
         sta udp_recv_len+1
 
 @copy:
-        ; copy payload using self-modifying code (ip65 owns ZP pointers)
-        ldx #0
-@copy_loop:
-        cpx udp_recv_len
+        ; Check for zero length
+        lda udp_recv_len
+        ora udp_recv_len+1
+        beq @done
+
+        ; 16-bit copy using self-modifying code (ip65 owns ZP pointers)
+        ; Set up source/dest high bytes for self-mod
+        lda #>(ip65_udp_inp + 8)
+        sta @pg_ld+2
+        lda #>udp_recv_buf
+        sta @pg_st+2
+
+        ; Copy full pages
+        ldx udp_recv_len+1
+        ldy #0
+        cpx #0
+        beq @setup_rem
+
+@pg_ld: lda ip65_udp_inp + 8,y
+@pg_st: sta udp_recv_buf,y
+        iny
+        bne @pg_ld
+        inc @pg_ld+2
+        inc @pg_st+2
+        dex
+        bne @pg_ld
+
+@setup_rem:
+        ; Copy final high bytes to remainder instructions
+        lda @pg_ld+2
+        sta @rm_ld+2
+        lda @pg_st+2
+        sta @rm_st+2
+
+        ldx udp_recv_len        ; low byte = remaining count
         beq @copy_done
-@src:   lda ip65_udp_inp + 8,x ; udp_data offset = 8
-        sta udp_recv_buf,x
-        inx
-        bne @copy_loop          ; max 255 bytes
+        ldy #0
+@rm_ld: lda ip65_udp_inp + 8,y
+@rm_st: sta udp_recv_buf,y
+        iny
+        dex
+        bne @rm_ld
 @copy_done:
         ; copy source IP (ip_inp + 12 = source IP in IP header)
         ; ip65_udp_inp is ip_inp + ip_data(20), so ip_inp = udp_inp - 20
@@ -162,6 +197,12 @@ net_udp_recv_cb:
         sta udp_recv_src_ip+2
         lda ip65_udp_inp - 5
         sta udp_recv_src_ip+3
+
+        ; copy source port from UDP header (network byte order)
+        lda ip65_udp_inp + 0    ; source port high byte
+        sta udp_recv_src_port
+        lda ip65_udp_inp + 1    ; source port low byte
+        sta udp_recv_src_port+1
 
         ; set ready flag
         lda #1
