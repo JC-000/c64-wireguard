@@ -223,13 +223,17 @@ def _run_sequence(
     """Drive the five UCI steps; return a list of failure descriptions."""
     fail: list[str] = []
     # Stage peer config. wg_peer_ip = 4 bytes in natural octet order (see
-    # net.s :427-434); wg_peer_port / wg_local_port = little-endian.
+    # net.s :427-434). wg_peer_port = BIG-endian (matches ip65 native + the
+    # disk_config.s parse_decimal_u16 storage convention; uci/net.s swaps
+    # on push to firmware). wg_local_port = LITTLE-endian (net_udp_listen
+    # stores A=lo,X=hi in net.s :213-215).
     ip_bytes = bytes(int(o) for o in local_ip.split("."))
+    port_be = bytes([listener.port >> 8, listener.port & 0xFF])
     port_le = bytes([listener.port & 0xFF, listener.port >> 8])
-    log.info("peer=%s:%d wg_peer_ip(hex)=%s port_le(hex)=%s",
-             local_ip, listener.port, ip_bytes.hex(), port_le.hex())
+    log.info("peer=%s:%d wg_peer_ip(hex)=%s peer_port_be(hex)=%s local_port_le(hex)=%s",
+             local_ip, listener.port, ip_bytes.hex(), port_be.hex(), port_le.hex())
     write_bytes(tr, L["wg_peer_ip"], ip_bytes)
-    write_bytes(tr, L["wg_peer_port"], port_le)
+    write_bytes(tr, L["wg_peer_port"], port_be)
     write_bytes(tr, L["wg_local_port"], port_le)
     write_bytes(tr, L["udp_recv_ready"], bytes([0]))
     write_bytes(tr, L["udp_recv_len"], bytes([0, 0]))

@@ -414,9 +414,10 @@ net_udp_send:
 ;   <ASCII dotted-decimal host bytes>, 0x00
 ; Response: 1 byte = socket_id.
 ;
-; NOTE: wg_peer_port is stored little-endian in c64-wireguard's data.s
-; (see port staging in config.s). We push it LE, matching TCP_CONNECT
-; which took port_lo then port_hi.
+; NOTE: wg_peer_port is stored big-endian (high byte at +0, low byte at +1)
+; because disk_config.s::parse_decimal_u16 stores network byte order and
+; config.s copies it verbatim. The firmware's UDP_CONNECT expects port_lo
+; then port_hi (little-endian), so we swap here: send +1 first, then +0.
 ;
 ; Clobbers: A, X, Y
 ; =============================================================================
@@ -429,10 +430,10 @@ uci_udp_connect:
         lda #UCI_CMD_UDP_CONNECT
         jsr uci_put_byte
 
-        ; Port (LE).
-        lda wg_peer_port+0
+        ; Port (LE to firmware): wg_peer_port is BE so swap bytes on push.
+        lda wg_peer_port+1      ; low byte of port (BE byte 1)
         jsr uci_put_byte
-        lda wg_peer_port+1
+        lda wg_peer_port+0      ; high byte of port (BE byte 0)
         jsr uci_put_byte
 
         ; Peer IP as ASCII dotted-decimal. UCI firmware's CONNECT

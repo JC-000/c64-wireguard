@@ -72,7 +72,9 @@ def _required_labels() -> list[str]:
 def _setup_peer(tr: Ultimate64Transport, L: dict, host_ip: str, port: int) -> None:
     octets = bytes(int(x) for x in host_ip.split("."))
     write_bytes(tr, L["wg_peer_ip"], octets)
-    write_bytes(tr, L["wg_peer_port"], bytes([port & 0xFF, port >> 8]))
+    # wg_peer_port = BE (ip65 native + disk_config storage; uci/net.s swaps
+    # on push). wg_local_port = LE (net_udp_listen stores A=lo,X=hi).
+    write_bytes(tr, L["wg_peer_port"], bytes([port >> 8, port & 0xFF]))
     write_bytes(tr, L["wg_local_port"], bytes([port & 0xFF, port >> 8]))
     write_bytes(tr, L["udp_recv_ready"], bytes([0]))
     write_bytes(tr, L["udp_recv_len"], bytes([0, 0]))
