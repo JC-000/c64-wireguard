@@ -33,14 +33,17 @@ if SRC not in sys.path:
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from c64_test_harness import (
-    Labels, enable_uci, get_uci_enabled, probe_u64, write_bytes,
+    DeviceLock, DeviceLockTimeout, Labels, enable_uci, get_uci_enabled,
+    probe_u64, write_bytes,
 )
-from c64_test_harness.backends.device_lock import DeviceLock
 from c64_test_harness.backends.u64_debug_capture import DebugCapture
 from c64_test_harness.backends.ultimate64 import Ultimate64Transport
-from c64_test_harness.backends.ultimate64_client import Ultimate64Client
+from c64_test_harness.backends.ultimate64_client import (
+    Ultimate64Client, Ultimate64RunnerStuckError,
+)
 from c64_test_harness.backends.ultimate64_helpers import (
     DEBUG_MODE_6510, get_debug_stream_mode, get_turbo_mhz,
+    recover, runner_health_check,
     set_debug_stream_mode, set_reu, set_turbo_mhz,
 )
 
@@ -226,11 +229,28 @@ def main() -> int:
     L = {n: labels[n] for n in _required_labels()}
 
     lock = DeviceLock(host)
-    if not lock.acquire(timeout=120.0):
-        print(f"SKIP: could not acquire device lock for {host}"); return 77
+    try:
+        # 120s ceiling per c64-test skill — heartbeat extends deadline
+        # for live progressing holders; only fires on wedged/dead.
+        lock.acquire_or_raise(timeout=120.0)
+    except DeviceLockTimeout as e:
+        log.error("DeviceLock acquire failed: host=%s holder_pid=%s "
+                  "pid_alive=%s lockfile_age=%.1fs reachable_rest=%s",
+                  e.device_host, e.holder_pid, e.pid_alive,
+                  e.lockfile_age_seconds, e.device_reachable_rest)
+        print(f"SKIP: {e}"); return 77
 
     client = Ultimate64Client(host=host, timeout=10.0)
     tr = Ultimate64Transport(host=host, timeout=10.0, client=client)
+
+    # Detect wedged-runner state before doing destructive work.
+    try:
+        runner_health_check(client)
+    except Ultimate64RunnerStuckError as exc:
+        log.warning("runner is wedged: %s — running recover()", exc)
+        step = recover(client)
+        log.info("recover() returned %r — re-checking runner", step)
+        runner_health_check(client)
 
     log.info("rebooting U64 to clear UCI state...")
     client.reboot()

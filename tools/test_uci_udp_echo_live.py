@@ -28,13 +28,18 @@ sys.path.insert(0, str(PROJECT_ROOT / "tools"))
 
 from uci.udp_echo_listener import UDPEchoListener  # noqa: E402
 
-from c64_test_harness import Labels, enable_uci, get_uci_enabled, probe_u64, write_bytes  # noqa: E402
-from c64_test_harness.backends.device_lock import DeviceLock  # noqa: E402
+from c64_test_harness import (  # noqa: E402
+    DeviceLock, DeviceLockTimeout, Labels, enable_uci, get_uci_enabled,
+    probe_u64, write_bytes,
+)
 from c64_test_harness.backends.u64_debug_capture import DebugCapture  # noqa: E402
 from c64_test_harness.backends.ultimate64 import Ultimate64Transport  # noqa: E402
-from c64_test_harness.backends.ultimate64_client import Ultimate64Client  # noqa: E402
+from c64_test_harness.backends.ultimate64_client import (  # noqa: E402
+    Ultimate64Client, Ultimate64RunnerStuckError,
+)
 from c64_test_harness.backends.ultimate64_helpers import (  # noqa: E402
     DEBUG_MODE_6510, get_debug_stream_mode, get_reu_config, get_turbo_mhz,
+    recover, runner_health_check,
     set_debug_stream_mode, set_reu, set_turbo_mhz,
 )
 
@@ -349,12 +354,29 @@ def main() -> int:
         log.info("label %-22s = $%04X", n, a)
 
     lock = DeviceLock(host)
-    if not lock.acquire(timeout=120.0):
-        _skip(f"could not acquire device lock for {host}")
+    try:
+        # 120s ceiling per c64-test skill — heartbeat extends deadline
+        # for live progressing holders; this only fires on wedged/dead.
+        lock.acquire_or_raise(timeout=120.0)
+    except DeviceLockTimeout as e:
+        log.error("DeviceLock acquire failed: host=%s holder_pid=%s "
+                  "pid_alive=%s lockfile_age=%.1fs reachable_rest=%s",
+                  e.device_host, e.holder_pid, e.pid_alive,
+                  e.lockfile_age_seconds, e.device_reachable_rest)
+        _skip(str(e))
 
     client = Ultimate64Client(host=host, password=password, timeout=10.0)
     tr = Ultimate64Transport(host=host, password=password, timeout=10.0,
                              client=client)
+
+    # Detect wedged-runner state before doing destructive work.
+    try:
+        runner_health_check(client)
+    except Ultimate64RunnerStuckError as exc:
+        log.warning("runner is wedged: %s — running recover()", exc)
+        step = recover(client)
+        log.info("recover() returned %r — re-checking runner", step)
+        runner_health_check(client)
 
     # Minimal setup: assume UCI is already enabled (via menu or prior
     # enable_uci). No reboot, no reset — just run the PRG on the

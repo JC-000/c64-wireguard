@@ -37,13 +37,15 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "tools"))
 
 from c64_test_harness import (  # noqa: E402
-    Labels, enable_uci, get_uci_enabled, probe_u64, write_bytes,
+    DeviceLock, DeviceLockTimeout, Labels, enable_uci, get_uci_enabled,
+    probe_u64, write_bytes,
 )
-from c64_test_harness.backends.device_lock import DeviceLock  # noqa: E402
 from c64_test_harness.backends.ultimate64 import Ultimate64Transport  # noqa: E402
-from c64_test_harness.backends.ultimate64_client import Ultimate64Client  # noqa: E402
+from c64_test_harness.backends.ultimate64_client import (  # noqa: E402
+    Ultimate64Client, Ultimate64RunnerStuckError,
+)
 from c64_test_harness.backends.ultimate64_helpers import (  # noqa: E402
-    set_reu, set_turbo_mhz,
+    recover, runner_health_check, set_reu, set_turbo_mhz,
 )
 
 # Reuse the trampoline helpers from the echo test (battle-tested).
@@ -343,14 +345,31 @@ def main() -> int:
 
     rc = 1
     lock = DeviceLock(args.host)
-    if not lock.acquire(timeout=120.0):
+    try:
+        # 120s is the new "ad-hoc work" ceiling per c64-test skill (the
+        # heartbeat extends the deadline for live, progressing holders).
+        lock.acquire_or_raise(timeout=120.0)
+    except DeviceLockTimeout as e:
         rt.stop()
-        _skip(f"could not acquire DeviceLock for {args.host}")
+        log.error("DeviceLock acquire failed: host=%s holder_pid=%s "
+                  "pid_alive=%s lockfile_age=%.1fs reachable_rest=%s",
+                  e.device_host, e.holder_pid, e.pid_alive,
+                  e.lockfile_age_seconds, e.device_reachable_rest)
+        _skip(str(e))
 
     try:
         client = Ultimate64Client(host=args.host, password=args.password, timeout=10.0)
         tr = Ultimate64Transport(host=args.host, password=args.password, timeout=10.0,
                                  client=client)
+        # Check the firmware's runner subsystem isn't wedged before we
+        # commit to a 15+ minute test. If wedged, recover() escalates.
+        try:
+            runner_health_check(client)
+        except Ultimate64RunnerStuckError as exc:
+            log.warning("runner is wedged: %s — running recover()", exc)
+            step = recover(client)
+            log.info("recover() returned %r — re-checking runner", step)
+            runner_health_check(client)
         if not get_uci_enabled(client):
             log.info("enabling UCI via REST")
             enable_uci(client)
