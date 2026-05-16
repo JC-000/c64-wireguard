@@ -253,6 +253,71 @@ def test_compute_mac1(transport, labels, rng):
     return passed, failed
 
 
+def test_sender_idx_entropy(transport, labels):
+    """Verify sender_idx gets fresh non-zero random bytes via entropy_fill.
+
+    This tests the fix for the Type 1 sender_idx bug: entropy_fill must write
+    a non-zero, non-constant 4-byte value to hs_sender_idx so it lands at
+    hs_packet+4..+7.  We call entropy_fill directly (bypassing X25519 which
+    takes ~100 minutes) and check two consecutive fills are (a) non-zero and
+    (b) differ from each other.
+    """
+    passed = failed = 0
+
+    def fill_sender_idx():
+        """Point zp_ptr1 at hs_sender_idx, call entropy_fill with Y=4."""
+        addr = labels["hs_sender_idx"]
+        write_bytes(transport, labels["zp_ptr1"],
+                    bytes([addr & 0xFF, addr >> 8]))
+        # entropy_fill uses Y as count (1-based: fills Y bytes starting at Y-1
+        # down to 0). Per the implementation: dey first, so ldy #4 fills 4 bytes.
+        # We use jsr directly; Y must be 4 on entry.
+        # jsr() doesn't let us set Y, so we manually write Y=4 into the CPU.
+        # We inject a tiny trampoline: ldy #4 / jsr entropy_fill / rts at a
+        # scratch location (input_buffer, which we own during the test).
+        tramp_addr = labels["input_buffer"]
+        entropy_addr = labels["entropy_fill"]
+        tramp = bytes([
+            0xA0, 0x04,                              # LDY #4
+            0x20, entropy_addr & 0xFF, entropy_addr >> 8,  # JSR entropy_fill
+            0x60,                                    # RTS
+        ])
+        write_bytes(transport, tramp_addr, tramp)
+        jsr(transport, tramp_addr, timeout=10.0)
+        return bytes(read_bytes(transport, labels["hs_sender_idx"], 4))
+
+    idx1 = fill_sender_idx()
+    idx2 = fill_sender_idx()
+
+    # (a) Both must be non-zero
+    if idx1 == b'\x00\x00\x00\x00':
+        failed += 1
+        print(f"  FAIL sender_idx #1 is all-zero (entropy_fill not working)")
+    else:
+        passed += 1
+        if VERBOSE:
+            print(f"  PASS sender_idx #1 non-zero: {idx1.hex()}")
+
+    if idx2 == b'\x00\x00\x00\x00':
+        failed += 1
+        print(f"  FAIL sender_idx #2 is all-zero (entropy_fill not working)")
+    else:
+        passed += 1
+        if VERBOSE:
+            print(f"  PASS sender_idx #2 non-zero: {idx2.hex()}")
+
+    # (b) Must differ (cryptographic uniqueness)
+    if idx1 == idx2:
+        failed += 1
+        print(f"  FAIL sender_idx values identical: {idx1.hex()} == {idx2.hex()}")
+    else:
+        passed += 1
+        if VERBOSE:
+            print(f"  PASS sender_idx values differ: {idx1.hex()} != {idx2.hex()}")
+
+    return passed, failed
+
+
 def test_tai64n_increment(transport, labels):
     """Test tai64n_increment routine."""
     passed = failed = 0
@@ -316,6 +381,7 @@ def run_tests(transport, labels, seed):
         ("hs_mix_hash", lambda: test_mix_hash(transport, labels, rng)),
         ("hs_compute_mac1", lambda: test_compute_mac1(transport, labels, rng)),
         ("tai64n_increment", lambda: test_tai64n_increment(transport, labels)),
+        ("sender_idx entropy", lambda: test_sender_idx_entropy(transport, labels)),
     ]
 
     if not SLOW:
@@ -384,7 +450,7 @@ def main():
         "wg_c_init", "wg_h_init", "wg_mac1_label",
         "b2s_hash", "b2s_remain", "b2s_data_ptr",
         "zp_ptr1", "input_buffer",
-        "tai64n_increment",
+        "tai64n_increment", "entropy_fill",
     ]
     for name in required:
         if labels.address(name) is None:
