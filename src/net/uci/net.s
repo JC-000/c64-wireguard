@@ -282,14 +282,18 @@ net_udp_send:
 @use_cap:
         lda #<UCI_DATA_QUEUE_MAX
         sta uci_chunk_len+0
-        lda #>UCI_DATA_QUEUE_MAX
-        sta uci_chunk_len+1
+        sta uci_write_resp+0    ; pre-stash: SOCKET_WRITE returns no count,
+        lda #>UCI_DATA_QUEUE_MAX ; so we treat the chunk we're about to push
+        sta uci_chunk_len+1     ; as authoritatively "written" (UDP is atomic).
+        sta uci_write_resp+1
         jmp @begin_chunk
 @use_rem:
         lda uci_send_rem+0
         sta uci_chunk_len+0
+        sta uci_write_resp+0    ; pre-stash (see @use_cap)
         lda uci_send_rem+1
         sta uci_chunk_len+1
+        sta uci_write_resp+1
 
 @begin_chunk:
         jsr uci_wait_idle
@@ -348,36 +352,21 @@ net_udp_send:
         rts
 
 @sb_no_err:
-        ; 2-byte written count response (LE).
-        ; Zero uci_write_resp before reading: if the firmware doesn't
-        ; return the written-count response in time (uci_read_resp_bytes
-        ; times out after a ~3 min spin at 1 MHz / ~150ms at 48 MHz),
-        ; we want uci_write_resp to read 0 so the bail-on-zero check
-        ; below fires instead of treating leftover RAM as a valid count
-        ; and looping forever (saw $FFFF in RAM stuck-loop in May 2026).
-        ; If the firmware DOES return a valid count, uci_read_resp_bytes
-        ; overwrites these zeros and the subtraction/loop math works.
-        lda #$00
-        sta uci_write_resp+0
-        sta uci_write_resp+1
-        lda #<uci_write_resp
-        sta uci_resp_dst
-        lda #>uci_write_resp
-        sta uci_resp_dst+1
-        lda #$02
-        sta uci_resp_max
-        jsr uci_read_resp_bytes
-
-        jsr uci_drain_resp
+        ; SOCKET_WRITE on U64E fw 3.14d does NOT put a written-count into
+        ; RESP_DATA ($DF1E); only a status string into STATUS_DATA ($DF1F).
+        ; The previous design spin-waited on RESP_DATA's DATA_AV bit, which
+        ; never asserts for SOCKET_WRITE — by the time the spin-wait timed
+        ; out, the firmware's TX window for the queued datagram had closed
+        ; and the packet was silently discarded (C64 saw no error but no
+        ; bytes reached the wire). Canonical pattern per c64-test-harness
+        ; build_socket_write: drain STATUS then wait_idle. UDP is atomic —
+        ; if uci_check_err didn't flag, the whole chunk went out.
+        ;
+        ; uci_write_resp was pre-stashed = uci_chunk_len at @use_cap/@use_rem,
+        ; so the bookkeeping below still advances net_send_ptr / decrements
+        ; uci_send_rem by the count we actually pushed.
         jsr uci_drain_status
-        jsr uci_ack
-
-        ; If written == 0 on a nonempty request, flag short-write.
-        lda uci_write_resp+0
-        ora uci_write_resp+1
-        bne @sb_had_write
-        lda #UCI_ERR_SHORT_WRITE
-        sta net_last_error
+        jsr uci_wait_idle
 @sb_had_write:
 
         ; Advance source pointer by actual written count.
