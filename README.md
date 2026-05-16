@@ -4,6 +4,8 @@ WireGuard Noise protocol implementation for the Commodore 64, written in 6502 as
 
 ## Status
 
+**Phase 9 in progress — first live WireGuard handshake reached the wire.** On 2026-05-16 a C64-built Type-1 packet was emitted from a U64E (UCI backend) and accepted by a Python responder over real UDP, with `wg_state` transitioning to `SESSION_HS_SENT` after `do_handshake` completed in 12 min 20 s on real hardware. Full `SESSION_ACTIVE` (Type-2 receipt + key derivation) is the remaining stage. See `docs/phase-9-handshake-milestone.md`.
+
 **Phase 8 complete**: Pre-Shared Key (PSK) support — IKpsk2 protocol compliance, optional PSK in disk config, backward-compatible with zero PSK.
 
 | Phase | Components | Tests |
