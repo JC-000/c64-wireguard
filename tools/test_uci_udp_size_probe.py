@@ -42,9 +42,10 @@ from c64_test_harness.backends.ultimate64_client import (
     Ultimate64Client, Ultimate64RunnerStuckError,
 )
 from c64_test_harness.backends.ultimate64_helpers import (
-    DEBUG_MODE_6510, get_debug_stream_mode, get_turbo_mhz,
-    recover, runner_health_check,
+    DEBUG_MODE_6510, check_measurement_environment, get_debug_stream_mode,
+    get_turbo_mhz, recover, runner_health_check,
     set_debug_stream_mode, set_reu, set_turbo_mhz,
+    Ultimate64MeasurementEnvironmentError,
 )
 
 # Reuse helpers from the echo test.
@@ -272,6 +273,11 @@ def main() -> int:
         cap.start()
         set_debug_stream_mode(client, DEBUG_MODE_6510)
         set_turbo_mhz(client, 1)
+        # Verify turbo stuck at 1 MHz (harness PR #106 footgun).
+        try:
+            check_measurement_environment(client)
+        except Ultimate64MeasurementEnvironmentError as exc:
+            print(f"SKIP: {exc}"); return 77
         _safe(set_reu, client, True, "512 KB")
         time.sleep(0.5)
         client.stream_debug_start(f"{local_ip}:{DEBUG_PORT}")

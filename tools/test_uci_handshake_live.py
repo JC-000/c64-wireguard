@@ -45,7 +45,8 @@ from c64_test_harness.backends.ultimate64_client import (  # noqa: E402
     Ultimate64Client, Ultimate64RunnerStuckError,
 )
 from c64_test_harness.backends.ultimate64_helpers import (  # noqa: E402
-    recover, runner_health_check, set_reu, set_turbo_mhz,
+    check_measurement_environment, recover, runner_health_check,
+    set_reu, set_turbo_mhz, Ultimate64MeasurementEnvironmentError,
 )
 
 # Reuse the trampoline helpers from the echo test (battle-tested).
@@ -385,6 +386,12 @@ def main() -> int:
             log.warning("set_reu failed (continuing): %s", exc)
         time.sleep(0.5)
         set_turbo_mhz(client, 1)
+        # Verify turbo actually stuck (harness PR #106 footgun: a prior
+        # session may have left turbo at 48 MHz and reset() doesn't clear it).
+        try:
+            check_measurement_environment(client)
+        except Ultimate64MeasurementEnvironmentError as exc:
+            _skip(f"unexpected turbo state: {exc}")
         time.sleep(0.2)
         # Load PRG and run.
         prg_bytes = prg_path.read_bytes()

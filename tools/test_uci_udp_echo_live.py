@@ -38,9 +38,10 @@ from c64_test_harness.backends.ultimate64_client import (  # noqa: E402
     Ultimate64Client, Ultimate64RunnerStuckError,
 )
 from c64_test_harness.backends.ultimate64_helpers import (  # noqa: E402
-    DEBUG_MODE_6510, get_debug_stream_mode, get_reu_config, get_turbo_mhz,
-    recover, runner_health_check,
+    DEBUG_MODE_6510, check_measurement_environment, get_debug_stream_mode,
+    get_reu_config, get_turbo_mhz, recover, runner_health_check,
     set_debug_stream_mode, set_reu, set_turbo_mhz,
+    Ultimate64MeasurementEnvironmentError,
 )
 
 DEFAULT_HOST = "10.43.23.81"
@@ -401,6 +402,12 @@ def main() -> int:
         cap.start()
         set_debug_stream_mode(client, DEBUG_MODE_6510)
         set_turbo_mhz(client, 1)
+        # Verify turbo stuck at 1 MHz (harness PR #106 footgun: prior 48 MHz
+        # session can survive reset() and silently warp our measurements).
+        try:
+            check_measurement_environment(client)
+        except Ultimate64MeasurementEnvironmentError as exc:
+            _skip(f"unexpected turbo state: {exc}")
         _safe(set_reu, client, True, "512 KB")  # reu_mul_init needs REU
         time.sleep(0.5)
         client.stream_debug_start(f"{local_ip}:{DEBUG_PORT}")
