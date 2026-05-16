@@ -62,6 +62,7 @@ SESSION_ACTIVE  = 2
 ; ---- External data buffers / state ------------------------------------------
 ; Handshake buffers
 .import hs_ephem_priv
+.import hs_sender_idx
 .import hs_packet
 .import hs_resp_packet
 ; UDP I/O buffers / flags
@@ -115,6 +116,14 @@ session_initiate:
         lda #>hs_ephem_priv
         sta zp_ptr1+1
         ldy #32
+        jsr entropy_fill
+
+        ; Generate sender index (4 fresh random bytes, WireGuard Type 1 offset 4)
+        lda #<hs_sender_idx
+        sta zp_ptr1
+        lda #>hs_sender_idx
+        sta zp_ptr1+1
+        ldy #4
         jsr entropy_fill
 
         ; Increment timestamp for replay protection

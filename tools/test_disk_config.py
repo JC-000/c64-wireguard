@@ -111,6 +111,27 @@ def build_read_trampoline(labels):
     return trampoline
 
 
+def build_load_trampoline(labels):
+    """Build a trampoline at $0350 that calls config_load (JSR only; no carry).
+
+    config_load never sets carry, so we just call it and return.
+    Returns the trampoline bytes.
+    """
+    addr = labels["config_load"]
+    trampoline = bytes([
+        0x20, addr & 0xFF, (addr >> 8) & 0xFF,  # JSR config_load
+        0x60,                                     # RTS
+    ])
+    return trampoline
+
+
+def call_config_load(transport, labels):
+    """Write and execute the config_load trampoline."""
+    trampoline = build_load_trampoline(labels)
+    write_bytes(transport, 0x0350, trampoline)
+    jsr(transport, 0x0350, timeout=10.0)
+
+
 def call_config_read(transport, labels):
     """Write and execute the config_read_file trampoline.
 
@@ -448,6 +469,46 @@ def test_edge_min(transport, labels):
 # Test group 6: Additional full config tests (4 tests)
 # ============================================================================
 
+# ============================================================================
+# Test group 7: wg_peer_port byte order after config_load (UCI fix check)
+#
+# wg_peer_port must be big-endian (network byte order) after config_load so
+# that uci/net.s::uci_udp_connect can swap to LE before pushing to firmware.
+# Port 51820 = 0xCA6C: expect wg_peer_port+0 = 0xCA, wg_peer_port+1 = 0x6C.
+# Port 256   = 0x0100: expect wg_peer_port+0 = 0x01, wg_peer_port+1 = 0x00.
+# This is also the byte order ip65/net.s depends on (it copies straight into
+# ip65_udp_snd_dport which uses network byte order).
+# ============================================================================
+
+def test_wg_peer_port_byte_order(transport, labels, port, test_label):
+    """After config_read_file + config_load, verify wg_peer_port is big-endian.
+
+    Returns (passed, failed).
+    """
+    passed = failed = 0
+
+    # config_read_file was already called before this function.
+    # Now call config_load to propagate cfg_peer_endpoint_port -> wg_peer_port.
+    call_config_load(transport, labels)
+
+    expected_hi = (port >> 8) & 0xFF
+    expected_lo = port & 0xFF
+    got = bytes(read_bytes(transport, labels["wg_peer_port"], 2))
+
+    if got[0] == expected_hi and got[1] == expected_lo:
+        passed += 1
+        if VERBOSE:
+            print(f"  PASS {test_label}: wg_peer_port BE "
+                  f"{got[0]:#04x},{got[1]:#04x} == {port} (0x{port:04X})")
+    else:
+        failed += 1
+        print(f"  FAIL {test_label}: wg_peer_port byte order wrong for port {port}")
+        print(f"    expected BE: {expected_hi:#04x},{expected_lo:#04x}")
+        print(f"    got:         {got[0]:#04x},{got[1]:#04x}")
+        print(f"    (if got[0]=={expected_lo:#04x} and got[1]=={expected_hi:#04x}"
+              f" the bytes are swapped — LE stored, not BE)")
+    return passed, failed
+
 def test_full_config_extras(transport, labels, rng):
     """Additional full config tests with the random-key config."""
     passed = failed = 0
@@ -545,10 +606,11 @@ def main():
     labels = Labels.from_file(LABELS_PATH)
 
     required = [
-        "config_read_file",
+        "config_read_file", "config_load",
         "cfg_static_priv", "cfg_static_pub", "cfg_peer_pub",
         "cfg_peer_endpoint_ip", "cfg_peer_endpoint_port",
         "tunnel_ip", "ping_target_ip",
+        "wg_peer_port",
     ]
     for name in required:
         if labels.address(name) is None:
@@ -674,6 +736,67 @@ def main():
             return p_total, f_total
 
         p, f = run_disk_test(disk_3, labels, instance_3_tests)
+        total_passed += p; total_failed += f
+
+        # ==================================================================
+        # Instance 4: wg_peer_port byte-order check (UCI fix regression)
+        # Two ports with distinct high/low bytes to catch byte-swap errors.
+        # ==================================================================
+        print("\n=== Instance 4: wg_peer_port byte order (UCI fix) ===")
+
+        content_4 = make_config_content(
+            bytes(32), bytes(32), bytes(32),
+            [10, 0, 0, 1], 51820, [10, 0, 0, 2], [10, 0, 0, 1],
+        )
+        disk_4 = create_disk_with_config(tmpdir, content_4, "port_be.d64")
+
+        def instance_4_tests(transport, labels):
+            p_total = f_total = 0
+
+            result = call_config_read(transport, labels)
+            if result != 0:
+                f_total += 1
+                print(f"  FAIL config_read_file returned {result}")
+
+            print("\n--- wg_peer_port BE after config_load (port 51820 = 0xCA6C) ---")
+            p, f = test_wg_peer_port_byte_order(
+                transport, labels, 51820,
+                "wg_peer_port BE: port 51820")
+            p_total += p; f_total += f
+            print(f"  {p} passed, {f} failed")
+
+            return p_total, f_total
+
+        p, f = run_disk_test(disk_4, labels, instance_4_tests)
+        total_passed += p; total_failed += f
+
+        # Instance 4b: port 256 = 0x0100 — catches swaps where hi==0 hides bug
+        print("\n=== Instance 4b: wg_peer_port byte order (port 256 = 0x0100) ===")
+
+        content_4b = make_config_content(
+            bytes(32), bytes(32), bytes(32),
+            [10, 0, 0, 1], 256, [10, 0, 0, 2], [10, 0, 0, 1],
+        )
+        disk_4b = create_disk_with_config(tmpdir, content_4b, "port_be2.d64")
+
+        def instance_4b_tests(transport, labels):
+            p_total = f_total = 0
+
+            result = call_config_read(transport, labels)
+            if result != 0:
+                f_total += 1
+                print(f"  FAIL config_read_file returned {result}")
+
+            print("\n--- wg_peer_port BE after config_load (port 256 = 0x0100) ---")
+            p, f = test_wg_peer_port_byte_order(
+                transport, labels, 256,
+                "wg_peer_port BE: port 256")
+            p_total += p; f_total += f
+            print(f"  {p} passed, {f} failed")
+
+            return p_total, f_total
+
+        p, f = run_disk_test(disk_4b, labels, instance_4b_tests)
         total_passed += p; total_failed += f
 
     # ==================================================================
