@@ -349,6 +349,17 @@ net_udp_send:
 
 @sb_no_err:
         ; 2-byte written count response (LE).
+        ; Zero uci_write_resp before reading: if the firmware doesn't
+        ; return the written-count response in time (uci_read_resp_bytes
+        ; times out after a ~3 min spin at 1 MHz / ~150ms at 48 MHz),
+        ; we want uci_write_resp to read 0 so the bail-on-zero check
+        ; below fires instead of treating leftover RAM as a valid count
+        ; and looping forever (saw $FFFF in RAM stuck-loop in May 2026).
+        ; If the firmware DOES return a valid count, uci_read_resp_bytes
+        ; overwrites these zeros and the subtraction/loop math works.
+        lda #$00
+        sta uci_write_resp+0
+        sta uci_write_resp+1
         lda #<uci_write_resp
         sta uci_resp_dst
         lda #>uci_write_resp
