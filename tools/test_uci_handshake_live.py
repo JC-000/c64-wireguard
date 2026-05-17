@@ -66,6 +66,48 @@ from wg_responder.responder import (  # noqa: E402
     T1_TOTAL, WireGuardResponder,
 )
 
+# Stage-2 AEAD-failure diagnostic: capture the responder's pre-AEAD state
+# (h, K) via monkey-patch so we can compare against the C64's view after
+# hs_process_response fails.
+_DIAG_CAPTURE: dict[str, Optional[bytes]] = {
+    "h_after_T1": None, "ck_after_T1": None,
+    "h_at_aead": None, "k_at_aead": None,
+    "type2_packet": None, "e_priv_resp": None, "e_pub_resp": None,
+}
+
+
+def _install_aead_capture_patch() -> None:
+    """Monkey-patch SymmetricState to record handshake-transcript state at
+    key boundaries:
+
+    * After each decrypt_and_hash (Type-1 ingestion): the last call's
+      post-state gives h/ck immediately after consuming Type-1 — i.e.
+      what the C64's hs_h/hs_c must be at hs_process_response entry.
+    * Before encrypt_and_hash (Type-2 emission's empty-payload encrypt):
+      h and the AEAD key K that the C64 must reproduce at AEAD verify
+      time."""
+    import noise.state as _ns  # noqa: PLC0415
+    _orig_eah = _ns.SymmetricState.encrypt_and_hash
+    _orig_dah = _ns.SymmetricState.decrypt_and_hash
+
+    def _capture_eah(self, plaintext):  # type: ignore[no-untyped-def]
+        if _DIAG_CAPTURE["h_at_aead"] is None:
+            _DIAG_CAPTURE["h_at_aead"] = bytes(self.h)
+            k = getattr(self.cipher_state, "k", None)
+            _DIAG_CAPTURE["k_at_aead"] = bytes(k) if k is not None else None
+        return _orig_eah(self, plaintext)
+
+    def _capture_dah(self, ciphertext):  # type: ignore[no-untyped-def]
+        out = _orig_dah(self, ciphertext)
+        # Last call wins — that's h/ck right after Type-1's timestamp
+        # is consumed (which is the final mutation in read_message).
+        _DIAG_CAPTURE["h_after_T1"] = bytes(self.h)
+        _DIAG_CAPTURE["ck_after_T1"] = bytes(self.ck)
+        return out
+
+    _ns.SymmetricState.encrypt_and_hash = _capture_eah
+    _ns.SymmetricState.decrypt_and_hash = _capture_dah
+
 DEFAULT_HOST = "10.43.23.81"
 
 # Custom step IDs for handshake-specific JSR targets.
@@ -97,12 +139,89 @@ REQUIRED_LABELS = (
     "cfg_static_priv", "cfg_static_pub", "cfg_peer_pub",
     "cfg_peer_endpoint_ip", "cfg_peer_endpoint_port",
     "cfg_preshared_key", "tunnel_ip", "ping_target_ip", "tai64n_base_time",
+    # AEAD-failure diagnostic state (read by _dump_aead_state).
+    "hs_h", "hs_c", "aead_key", "kdf_out1", "kdf_out2", "kdf_out3",
+    "hs_resp_packet", "hs_ephem_pub",
 )
 
 
 def _log_err(tr: Ultimate64Transport, L: dict[str, int], step: str) -> None:
     err = tr.read_memory(L["net_last_error"], 1)[0]
     log.info("%s: net_last_error=$%02X", step, err)
+
+
+def _dump_aead_state(tr: Ultimate64Transport, L: dict[str, int],
+                     dh1_ok: bool = False) -> None:
+    """Read the C64-side AEAD-verify inputs out of the failed hs_process_response
+    and compare against the responder's captured pre-AEAD state."""
+    # NB: aead_key was loaded from kdf_out3 just before aead_decrypt
+    # (handshake.s:829-834); both should still hold the same 32-byte K.
+    addrs = [
+        ("hs_h",          L["hs_h"],          32),
+        ("hs_c",          L["hs_c"],          32),
+        ("aead_key",      L["aead_key"],      32),
+        ("kdf_out1",      L["kdf_out1"],      32),
+        ("kdf_out2",      L["kdf_out2"],      32),
+        ("kdf_out3",      L["kdf_out3"],      32),
+        ("hs_resp_packet", L["hs_resp_packet"], 92),
+        ("hs_ephem_pub",  L["hs_ephem_pub"],  32),
+    ]
+    c64 = {name: bytes(tr.read_memory(addr, n)) for name, addr, n in addrs}
+    log.info("--- AEAD diagnostic ---")
+    for name, _, n in addrs:
+        log.info("C64 %-16s = %s", name, c64[name].hex())
+    log.info("--- responder captured ---")
+    for k in ("h_after_T1", "ck_after_T1", "h_at_aead", "k_at_aead",
+              "e_pub_resp", "e_priv_resp", "type2_packet"):
+        v = _DIAG_CAPTURE.get(k)
+        log.info("resp %-16s = %s",
+                 k, v.hex() if isinstance(v, (bytes, bytearray)) else "(none)")
+
+    log.info("--- comparisons ---")
+
+    def _cmp(label: str, c64_val: bytes, resp_val: Optional[bytes]) -> None:
+        if resp_val is None:
+            log.info("%-32s  RESP=NONE", label)
+            return
+        match = c64_val == resp_val
+        marker = "OK " if match else "MISMATCH"
+        log.info("%-32s  %s", label, marker)
+        if not match:
+            log.info("  C64 : %s", c64_val.hex())
+            log.info("  RESP: %s", resp_val.hex())
+
+    _cmp("Type-2 packet (92B)",
+         c64["hs_resp_packet"],
+         _DIAG_CAPTURE.get("type2_packet"))
+    if _DIAG_CAPTURE.get("e_pub_resp"):
+        _cmp("resp_e_pub vs packet[12..43]",
+             c64["hs_resp_packet"][12:44],
+             _DIAG_CAPTURE["e_pub_resp"])
+    _cmp("hs_h at AEAD",     c64["hs_h"],     _DIAG_CAPTURE.get("h_at_aead"))
+    _cmp("aead_key (=kdf_out3) vs K",
+         c64["aead_key"], _DIAG_CAPTURE.get("k_at_aead"))
+    _cmp("kdf_out3 vs K",
+         c64["kdf_out3"], _DIAG_CAPTURE.get("k_at_aead"))
+
+
+def _safe_read(tr: Ultimate64Transport, addr: int, n: int = 1,
+               attempts: int = 6, backoff: float = 1.0) -> bytes:
+    # The U64E REST stack occasionally drops TCP connections during long
+    # CPU-bound work on the 6502 (X25519 grind). Retry transient resets
+    # rather than letting a one-off RST kill a 25-minute test.
+    last_exc: Optional[BaseException] = None
+    for i in range(attempts):
+        try:
+            return tr.read_memory(addr, n)
+        except (ConnectionResetError, BrokenPipeError, OSError) as exc:
+            last_exc = exc
+            if i + 1 == attempts:
+                break
+            time.sleep(backoff * (i + 1))
+            log.warning("read_memory($%04X, %d) transient %s — retry %d/%d",
+                        addr, n, type(exc).__name__, i + 1, attempts)
+    assert last_exc is not None
+    raise last_exc
 
 
 logging.basicConfig(level=logging.INFO,
@@ -143,8 +262,8 @@ def _wait_step(
     deadline = started + timeout
     last_log = time.monotonic()
     while time.monotonic() < deadline:
-        if tr.read_memory(SENTINEL, 1)[0] == step_id:
-            carry = tr.read_memory(CARRY, 1)[0]
+        if _safe_read(tr, SENTINEL, 1)[0] == step_id:
+            carry = _safe_read(tr, CARRY, 1)[0]
             log.info("step $%02X done; carry=%d (%.1fs)", step_id, carry,
                      time.monotonic() - started)
             return carry
@@ -156,14 +275,14 @@ def _wait_step(
             if probes:
                 vals = []
                 for name, addr in probes.items():
-                    b = tr.read_memory(addr, 1)[0]
+                    b = _safe_read(tr, addr, 1)[0]
                     vals.append(f"{name}=${b:02X}")
                 extras = " [" + " ".join(vals) + "]"
             log.info("step $%02X still running (%.0fs elapsed)%s",
                      step_id, elapsed, extras)
             last_log = now
         time.sleep(poll_interval)
-    got = tr.read_memory(SENTINEL, 1)[0]
+    got = _safe_read(tr, SENTINEL, 1)[0]
     raise TimeoutError(
         f"step ${step_id:02X} timed out after {timeout}s (SENTINEL=${got:02X})"
     )
@@ -248,6 +367,15 @@ class _ResponderThread(threading.Thread):
             with self._lock:
                 self.last_error = f"type1: {exc}"
             return
+        # AEAD-failure diagnosis: type2_packet bytes are enough; h_at_aead/
+        # k_at_aead/h_after_T1/ck_after_T1 are already in _DIAG_CAPTURE from
+        # the monkey-patch on SymmetricState. handshake_state is gone by
+        # now (python-noise calls handshake_done() after split() in
+        # write_message), so don't reach into it.
+        _DIAG_CAPTURE["type2_packet"] = type2
+        # The responder's e_pub_resp is the unencrypted ephemeral at
+        # type2[12..44] per WireGuard's Type-2 layout.
+        _DIAG_CAPTURE["e_pub_resp"] = type2[12:44]
         with self._lock:
             self.type1_received_at = time.monotonic()
         log.info("responder: Type-1 OK (c64_sender_idx=%d); sending Type-2 (%dB)",
@@ -335,7 +463,16 @@ def main() -> int:
                         "(MAC1 check + early KDF). Saves trace to artifacts/. "
                         "Useful for diagnosing why wg_state doesn't advance to "
                         "SESSION_ACTIVE.")
+    p.add_argument("--dump-aead", action="store_true",
+                   help="In stage 2, after the first session_handle_packet "
+                        "returns, dump the C64-side AEAD verify inputs "
+                        "(hs_h, hs_c, aead_key, kdf_out1/2/3, hs_resp_packet) "
+                        "and compare against the responder's expected values "
+                        "captured via SymmetricState monkey-patch. Exits "
+                        "after one iteration regardless of outcome.")
     args = p.parse_args()
+    if args.dump_aead:
+        _install_aead_capture_patch()
 
     if os.environ.get("U64_ALLOW_MUTATE") != "1":
         _skip("U64_ALLOW_MUTATE != 1 — this test mutates the device")
@@ -509,6 +646,27 @@ def main() -> int:
             return 1
         log.info("STAGE 1 ✓ — Type-1 accepted by responder")
 
+        if args.dump_aead:
+            # Snapshot hs_h / hs_c immediately after Type-1 was emitted and
+            # accepted by the responder. These must match the responder's
+            # h_after_T1 / ck_after_T1 — if they don't, the Type-1 emission
+            # transcript itself has diverged (even though the responder
+            # accepted the message). If they do match but the post-AEAD
+            # values still mismatch, the bug is in hs_process_response.
+            post_t1_h = bytes(tr.read_memory(L["hs_h"], 32))
+            post_t1_c = bytes(tr.read_memory(L["hs_c"], 32))
+            log.info("post-Type-1: hs_h=%s", post_t1_h.hex())
+            log.info("post-Type-1: hs_c=%s", post_t1_c.hex())
+            log.info("resp        h_after_T1=%s",
+                     (_DIAG_CAPTURE.get("h_after_T1") or b"").hex())
+            log.info("resp        ck_after_T1=%s",
+                     (_DIAG_CAPTURE.get("ck_after_T1") or b"").hex())
+            h_ok = post_t1_h == _DIAG_CAPTURE.get("h_after_T1")
+            c_ok = post_t1_c == _DIAG_CAPTURE.get("ck_after_T1")
+            log.info("post-Type-1 hs_h match: %s | hs_c match: %s",
+                     "OK" if h_ok else "MISMATCH",
+                     "OK" if c_ok else "MISMATCH")
+
         if args.stage == 1:
             log.info("STAGE 1 only — done")
             rc = 0
@@ -573,6 +731,10 @@ def main() -> int:
                          dt, carry)
                 state = tr.read_memory(L["wg_state"], 1)[0]
                 log.info("wg_state = %d", state)
+                if args.dump_aead and first_handle:
+                    _dump_aead_state(tr, L, dh1_ok=False)
+                    rc = 0 if state == SESSION_ACTIVE else 1
+                    return rc
                 if state == SESSION_ACTIVE:
                     log.info("STAGE 2 ✓ — SESSION_ACTIVE reached")
                     rc = 0
