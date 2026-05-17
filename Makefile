@@ -18,11 +18,15 @@ CFG_DIR    = cfg
 PRG     = $(BUILD_DIR)/wireguard.prg
 LABELS  = $(BUILD_DIR)/labels.txt
 MAP     = $(BUILD_DIR)/wireguard.map
+DBG     = $(BUILD_DIR)/wireguard.dbg
 IP65_BIN = $(IP65_BUILD)/ip65-c64.bin
 CFG_FILE := $(CFG_DIR)/c64-wireguard-$(BACKEND).cfg
 
 CA65FLAGS = -I $(SRC_DIR) -I $(SRC_DIR)/net/$(BACKEND) --debug-info
-LD65FLAGS = -C $(CFG_FILE) -Ln $(LABELS) -m $(MAP)
+# --dbgfile pairs with ca65 --debug-info to emit a source-level debug
+# file VICE's monitor can load (`load_labels`/`source-line` commands)
+# for stepping by source line and showing local symbol scopes.
+LD65FLAGS = -C $(CFG_FILE) -Ln $(LABELS) -m $(MAP) --dbgfile $(DBG)
 
 # Common ca65 source set — shared by every backend.
 COMMON_SRCS = $(SRC_DIR)/loadaddr.s \
@@ -110,7 +114,7 @@ run: $(PRG)
 
 # Clean both backends' artifacts so switching BACKEND values is safe.
 clean:
-	rm -f $(PRG) $(LABELS) $(MAP)
+	rm -f $(PRG) $(LABELS) $(MAP) $(DBG)
 	rm -rf $(BUILD_DIR)/net $(BUILD_DIR)/crypto $(BUILD_DIR)/wg
 	rm -f $(BUILD_DIR)/*.o
 	rm -f $(IP65_BUILD)/ip65_stub.o $(IP65_BUILD)/ip65-c64.bin $(IP65_BUILD)/ip65-c64.map
