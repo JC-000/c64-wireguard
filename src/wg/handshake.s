@@ -663,6 +663,15 @@ hs_compute_mac1:
 
         jsr blake2s_final
 
+        ; Restore the default 32-byte output length. hs_init / hs_mix_hash /
+        ; hmac_blake2s all call blake2s_init without setting b2s_out_len
+        ; themselves (see data.s comment on b2s_out_len) — they rely on the
+        ; "default 32" convention. Without this restore, every BLAKE2s call
+        ; in hs_process_response would truncate to 16 bytes, leaving stale
+        ; b2s_h bytes in positions 16-31 of kdf_out1/2/3 and silently
+        ; corrupting the chaining-key / AEAD-key transcript.
+        lda #32
+        sta b2s_out_len
         rts
 
 ; =============================================================================

@@ -314,6 +314,11 @@ hs_set_mac2:
         dex
         bpl @copy_mac2
 
+        ; Restore default 32-byte BLAKE2s output length (see comment on
+        ; b2s_out_len in data.s and matching restore in hs_compute_mac1).
+        lda #32
+        sta b2s_out_len
+
         ; Clear cookie_valid
         lda #0
         sta cookie_valid
