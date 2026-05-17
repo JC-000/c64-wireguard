@@ -44,18 +44,20 @@ from c64_test_harness.backends.ultimate64 import Ultimate64Transport  # noqa: E4
 from c64_test_harness.backends.ultimate64_client import (  # noqa: E402
     Ultimate64Client, Ultimate64RunnerStuckError,
 )
+from c64_test_harness.backends.u64_debug_capture import DebugCapture  # noqa: E402
 from c64_test_harness.backends.ultimate64_helpers import (  # noqa: E402
-    check_measurement_environment, recover, runner_health_check,
+    DEBUG_MODE_6510, check_measurement_environment, get_debug_stream_mode,
+    recover, runner_health_check, set_debug_stream_mode,
     set_reu, set_turbo_mhz, Ultimate64MeasurementEnvironmentError,
 )
 
 # Reuse the trampoline helpers from the echo test (battle-tested).
 from test_uci_udp_echo_live import (  # noqa: E402
-    BOOT_TIMEOUT, CARRY, GO_FLAG, SENTINEL, STEP_ID, TRAMP,
+    BOOT_TIMEOUT, CARRY, DEBUG_PORT, GO_FLAG, SENTINEL, STEP_ID, TRAMP,
     SMC_REG_A, SMC_REG_X, SMC_TARG_LO, SMC_TARG_HI,
     STEP_INIT, STEP_DHCP, STEP_LISTEN, STEP_POLL, STEP_TIMEOUT,
     _build_trampoline, _build_uci, _install_trampoline, _local_ip_for,
-    _run_step, _wait_boot,
+    _persist_trace, _run_step, _safe, _wait_boot,
 )
 
 from wg_responder.keys import generate_keypair  # noqa: E402
@@ -113,16 +115,14 @@ def _skip(reason: str) -> None:
     sys.exit(77)
 
 
-def _run_step_slow(
+def _kick_step(
     tr: Ultimate64Transport, *, step_id: int, target: int,
-    reg_a: int = 0, reg_x: int = 0, timeout: float = 600.0,
-    poll_interval: float = 1.0,
-    probes: Optional[dict[str, int]] = None,
-) -> int:
-    """Like _run_step but polls less aggressively for multi-minute JSRs.
+    reg_a: int = 0, reg_x: int = 0,
+) -> None:
+    """Fire the trampoline for `target` without waiting.
 
-    `probes` is an optional ``{label: address}`` mapping read at each
-    heartbeat to expose C64-side progress (e.g. {'wg_state': $7912}).
+    Pairs with `_wait_step`. The C64-side JSR runs synchronously inside
+    the trampoline; from the host we observe completion via SENTINEL.
     """
     t = bytearray(_build_trampoline())
     t[SMC_REG_A], t[SMC_REG_X] = reg_a & 0xFF, reg_x & 0xFF
@@ -130,18 +130,28 @@ def _run_step_slow(
     write_bytes(tr, TRAMP, bytes(t))
     write_bytes(tr, SENTINEL, bytes([0, 0, step_id]))   # SENT, CARRY, STEP_ID
     write_bytes(tr, GO_FLAG, bytes([1]))
-    deadline = time.monotonic() + timeout
+
+
+def _wait_step(
+    tr: Ultimate64Transport, *, step_id: int, timeout: float = 600.0,
+    poll_interval: float = 1.0,
+    probes: Optional[dict[str, int]] = None,
+    start_time: Optional[float] = None,
+) -> int:
+    """Poll SENTINEL until it equals `step_id`; return CARRY."""
+    started = start_time if start_time is not None else time.monotonic()
+    deadline = started + timeout
     last_log = time.monotonic()
     while time.monotonic() < deadline:
         if tr.read_memory(SENTINEL, 1)[0] == step_id:
             carry = tr.read_memory(CARRY, 1)[0]
             log.info("step $%02X done; carry=%d (%.1fs)", step_id, carry,
-                     timeout - (deadline - time.monotonic()))
+                     time.monotonic() - started)
             return carry
         # Heartbeat log every 30s so we can see the test isn't wedged.
         now = time.monotonic()
         if now - last_log >= 30.0:
-            elapsed = timeout - (deadline - now)
+            elapsed = now - started
             extras = ""
             if probes:
                 vals = []
@@ -157,6 +167,21 @@ def _run_step_slow(
     raise TimeoutError(
         f"step ${step_id:02X} timed out after {timeout}s (SENTINEL=${got:02X})"
     )
+
+
+def _run_step_slow(
+    tr: Ultimate64Transport, *, step_id: int, target: int,
+    reg_a: int = 0, reg_x: int = 0, timeout: float = 600.0,
+    poll_interval: float = 1.0,
+    probes: Optional[dict[str, int]] = None,
+) -> int:
+    """Kick + wait; thin wrapper for the common case where capture
+    isn't needed and the trampoline can be polled to completion."""
+    started = time.monotonic()
+    _kick_step(tr, step_id=step_id, target=target, reg_a=reg_a, reg_x=reg_x)
+    return _wait_step(tr, step_id=step_id, timeout=timeout,
+                      poll_interval=poll_interval, probes=probes,
+                      start_time=started)
 
 
 # ── Patient responder (UDP loop in a daemon thread) ──────────────────────
@@ -303,6 +328,13 @@ def main() -> int:
                    help="1=Type-1 accepted; 2=SESSION_ACTIVE (default)")
     p.add_argument("--host", default=os.environ.get("U64_HOST", DEFAULT_HOST))
     p.add_argument("--password", default=os.environ.get("U64_PASSWORD"))
+    p.add_argument("--debug-capture", action="store_true",
+                   help="In stage 2, wrap the first session_handle_packet "
+                        "call in a 30s DebugCapture window to record the "
+                        "C64 bus trace through the start of hs_process_response "
+                        "(MAC1 check + early KDF). Saves trace to artifacts/. "
+                        "Useful for diagnosing why wg_state doesn't advance to "
+                        "SESSION_ACTIVE.")
     args = p.parse_args()
 
     if os.environ.get("U64_ALLOW_MUTATE") != "1":
@@ -319,7 +351,8 @@ def main() -> int:
     if not labels_path.exists() or not prg_path.exists():
         log.error("build artifacts missing")
         return 1
-    L = dict(Labels.from_file(str(labels_path)))
+    labels = Labels.from_file(str(labels_path))
+    L = dict(labels)
     missing = [n for n in REQUIRED_LABELS if n not in L]
     if missing:
         log.error("missing labels: %s", missing)
@@ -494,14 +527,47 @@ def main() -> int:
             polls += 1
             ready = tr.read_memory(L["udp_recv_ready"], 1)[0]
             if ready != 0:
-                if type2_seen_at is None:
+                first_handle = type2_seen_at is None
+                if first_handle:
                     type2_seen_at = time.monotonic()
                     log.info("udp_recv_ready set after %d polls — driving "
                              "session_handle_packet", polls)
                 t0 = time.monotonic()
-                carry = _run_step_slow(tr, step_id=STEP_HANDLE,
-                                       target=L["session_handle_packet"],
-                                       timeout=HANDLE_TIMEOUT)
+                if first_handle and args.debug_capture:
+                    # Wrap the first 30s of session_handle_packet in a
+                    # cycle-accurate debug capture. hs_process_response
+                    # starts here; if it silently fails (no carry, no
+                    # state transition), the trace will show exactly
+                    # which path the C64 took. The first 30s covers
+                    # MAC1 verification + the first part of
+                    # hs_process_response's KDF chain.
+                    log.info("debug-capture: starting 30s window over "
+                             "session_handle_packet entry")
+                    cap = DebugCapture(port=DEBUG_PORT)
+                    cap.start()
+                    _safe(set_debug_stream_mode, client, DEBUG_MODE_6510)
+                    client.stream_debug_start(f"{local_ip}:{DEBUG_PORT}")
+                    _kick_step(tr, step_id=STEP_HANDLE,
+                               target=L["session_handle_packet"])
+                    time.sleep(30.0)
+                    _safe(client.stream_debug_stop)
+                    time.sleep(0.3)
+                    cap_result = cap.stop()
+                    trace_path = _persist_trace(cap_result, labels,
+                                                mhz=1, mode=DEBUG_MODE_6510)
+                    log.info("debug-capture: trace saved to %s "
+                             "(packets=%d dropped=%d cycles=%d)",
+                             trace_path, cap_result.packets_received,
+                             cap_result.packets_dropped,
+                             cap_result.total_cycles)
+                    # Continue waiting for session_handle_packet to finish.
+                    carry = _wait_step(tr, step_id=STEP_HANDLE,
+                                       timeout=HANDLE_TIMEOUT - 30,
+                                       start_time=t0)
+                else:
+                    carry = _run_step_slow(tr, step_id=STEP_HANDLE,
+                                           target=L["session_handle_packet"],
+                                           timeout=HANDLE_TIMEOUT)
                 dt = time.monotonic() - t0
                 log.info("session_handle_packet returned in %.1fs (carry=%d)",
                          dt, carry)
