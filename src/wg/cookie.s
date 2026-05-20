@@ -34,7 +34,13 @@
 ; ChaCha20 state buffers
 ; Note: cc20_round, cc20_qr_idx are ZP equates in constants.inc (not imported)
 .import cc20_state
+.ifndef USE_CHACHA_SIBLING
+; cc20_work is an absolute BSS buffer in the in-tree build (defined in
+; wg/data.s); imported as an external symbol. Under USE_CHACHA_SIBLING=1
+; the sibling pins cc20_work to ZP $40 (see src/zp_config.inc), making
+; it a local equate that must NOT be re-imported.
 .import cc20_work
+.endif
 .import cc20_key
 .import cc20_counter
 .import cc20_nonce

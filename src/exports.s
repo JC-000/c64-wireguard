@@ -39,11 +39,29 @@
 ; --- mult66 pointers (aliased with cc20_*) ---
 .exportzp lmul0, lmul1
 
+; --- ChaCha20-Poly1305 sibling Profile B ct_mul_8x8 scratch ($1e/$1f) ---
+; Always exported so the chacha sibling's .importzp ct_diff_raw /
+; ct_sign_mask resolves even when USE_CHACHA_SIBLING=0 (harmless: the
+; in-tree poly1305.s doesn't reference these). Same byte range as
+; fe_src1 ($1e-$1f); time-share applies — see zp_config.inc.
+.exportzp ct_diff_raw, ct_sign_mask
+
+; --- ChaCha20 ZP-pinned working buffer ($40-$7F, sibling-only) ---
+; cc20_work / cc20_keystream are non-ZP BSS labels in the in-tree
+; build (defined in wg/data.s); the sibling pins them to ZP $40.
+; Exported as ZP only when USE_CHACHA_SIBLING=1 so the in-tree linker
+; still sees the BSS definitions otherwise.
+.ifdef USE_CHACHA_SIBLING
+.exportzp cc20_work, cc20_keystream
+.endif
+
 ; --- fe25519 ZP ---
 .exportzp fe_src1, fe_src2, fe_dst, fe_misc, fe_carry, fe_loop
 .exportzp fe_mul_i, fe_mul_j
 
 ; --- fe25519 ZP ABI-aligned aliases (match c64-x25519 library naming) ---
+; Mandatory under USE_X25519_SIBLING=1 (sibling's .importzp targets);
+; left unconditional so test-harness Labels.from_file() always sees them.
 fe25519_src1 = fe_src1
 fe25519_src2 = fe_src2
 fe25519_dst  = fe_dst
@@ -51,6 +69,36 @@ fe25519_dst  = fe_dst
 
 ; --- X25519 ZP ---
 .exportzp x25_prev_bit, x25_bit_ctr, x25_byte_idx, x25_bit_mask
+
+; --- Sibling fe25519 / x25519 imports satisfied via host-side equates ---
+; The c64-x25519 sibling's .importzp set (mul_pending, mul_bound,
+; mul_ripple_start, fe_sqr_pairs, fe_cmp_mask, fe_subp_rhs,
+; fe_add_carry_mask) is resolved by reusing WG's existing ZP slots
+; via the sibling's own zp_config.s defaults — those defaults are not
+; redefined here, so the .ifndef-guarded equates in the staged
+; libs/x25519/src/zp_config.s take effect at sibling assemble time.
+; (Staged with ZP_CONFIG_NO_EXPORTS=1 in the integration script so the
+; sibling's .o does not duplicate-export them.)
+
+; --- Quarter-square table at $8000-$83FF (runtime-built by sqtab_init) ---
+; Address-only equates; the table itself is built at runtime by
+; either the in-tree src/crypto/poly1305.s:sqtab_init or the sibling
+; libs/chacha20poly1305/src/lib/poly1305_lib.s:sqtab_init. The sibling
+; x25519's x25519_init.s .imports sqtab_lo / sqtab_hi to clear /
+; verify the table region. Without this fallback, USE_X25519_SIBLING=1
+; combined with USE_CHACHA_SIBLING=1 would leave sqtab_lo/hi
+; unresolved (in-tree poly1305.s is dropped under USE_CHACHA_SIBLING,
+; and the chacha sibling treats sqtab_lo/hi as private equates). The
+; equate values match both in-tree and sibling private definitions.
+;
+; Only emitted under USE_CHACHA_SIBLING=1 — otherwise the in-tree
+; src/crypto/poly1305.s already exports them and ld65 would flag a
+; duplicate-export error.
+.ifdef USE_CHACHA_SIBLING
+sqtab_lo = $8000
+sqtab_hi = $8200
+.export sqtab_lo, sqtab_hi
+.endif
 
 ; --- Non-ZP constants the test harness or tools may reference ---
 .export blake2s_block_size, blake2s_hash_size, blake2s_rounds
