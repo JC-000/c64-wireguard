@@ -146,17 +146,43 @@ prevents reliable iteration.
 ### Bug #3: `uci_wait_idle` STATE-bit wedge — filed as test-harness#112
 
 `uci_wait_idle` in `src/net/uci/uci_cmd.s` is an unbounded spin loop.
-After 2–3 successful test runs of a session, the U64E FPGA's UCI STATE
-bit stays set for ~161 s after `SOCKET_WRITE`, the wait_idle wedges, the
-queued Type-1 datagram is silently dropped, and the responder times out.
-`client.reboot()` does not clear the wedge — only a physical
+After ~3 successful `run_prg` cycles per physical power-cycle, the U64E
+FPGA's UCI STATE bit stays set for ~178 s after the next `SOCKET_WRITE`;
+`uci_wait_idle` wedges, the queued datagram is silently dropped
+(`net_last_error = $00`, `carry = 0`), and any responder times out.
+`client.reboot()` does not clear the state — only a physical
 power-cycle. Filed as
 [c64-test-harness#112](https://github.com/JC-000/c64-test-harness/issues/112).
 
-Proper fix: port the TOD-bounded `uci_wait_idle` and `uci_wait_not_busy`
-from `c64-https/src/net/uci/uci_cmd.s` (5 s CIA1 TOD budget; returns
-`C=1` on timeout with `net_last_error = UCI_ERR_WAIT_TIMEOUT`). Callers
-in `src/net/uci/net.s` will need to propagate the carry-flag error.
+**Deterministic reproduction** is now available via
+[`tools/test_uci_wedge_repro.py`](../tools/test_uci_wedge_repro.py),
+which isolates the trigger. Controlled arms showed:
+
+* 80 × `SOCKET_WRITE` in a single PRG-load session: **0 wedges**
+  (max latency 0.82 s).
+* 80 × `SOCKET_WRITE` + 651 concurrent `writemem` POSTs: **0 wedges**
+  (max latency 0.71 s).
+* 5 × back-to-back `run_prg` sessions (10 sends each): clean through
+  session 3, **wedge at session 4 iter-0 for 178.12 s**, session 5
+  wedges identically — state persists across fresh `run_prg`.
+
+So the trigger is **cumulative `run_prg` count**, not UCI command volume
+and not arbitrary REST POST volume. Each `run_prg` issues a chunked
+writemem burst plus a `runners` start control POST; repetition of that
+specific REST sequence is what walks the FPGA UCI STATE machine into
+the silent-wedge condition.
+
+Practical budget: **≤3 `run_prg` cycles per physical power-cycle.**
+Plan instrumented test runs accordingly until #112 yields a software
+UCI-state-reset primitive.
+
+Proper C64-side fix (still required): port the TOD-bounded
+`uci_wait_idle` and `uci_wait_not_busy` from
+`c64-https/src/net/uci/uci_cmd.s` (5 s CIA1 TOD budget; returns
+`C=1` on timeout with `net_last_error = UCI_ERR_WAIT_TIMEOUT`).
+Callers in `src/net/uci/net.s` need to propagate the carry-flag error.
+This turns the 178 s silent wedge into a fast-fail error code but
+does not recover the underlying FPGA state — that still needs #112.
 
 ## What's still ahead
 
@@ -182,5 +208,5 @@ captured in persistent memory:
 |---|---|---|
 | `SOCKET_READ` size cap | Truncates 600–1280 → 512; returns `0xFFFF` for ≥1500 | Always request 512 |
 | `SOCKET_WRITE` response | No written-count to RESP_DATA, status-only to STATUS_DATA | Use the harness pattern |
-| `uci_wait_idle` wedge | C64-side spin on stuck STATE bit | `client.reboot()` direct (not `recover()`) |
+| `uci_wait_idle` wedge | Deterministic after ~3 `run_prg` cycles; ~178 s silent drop | Physical power-cycle; ≤3 cycles/budget |
 | `writemem` POST degradation | Transient: >128 B body returns 404 "Could not read data from attachment" | Physical power-cycle |
