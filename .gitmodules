@@ -1,0 +1,8 @@
+[submodule "libs/x25519"]
+	path = libs/x25519
+	url = https://github.com/JC-000/c64-x25519.git
+	branch = master
+[submodule "libs/chacha20poly1305"]
+	path = libs/chacha20poly1305
+	url = https://github.com/JC-000/c64-ChaCha20-Poly1305.git
+	branch = main
