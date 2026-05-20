@@ -65,7 +65,13 @@
 .export hmac_data_ptr
 .export hmac_data_len
 
-; --- ChaCha20 state ---
+; --- ChaCha20 / Poly1305 / AEAD state ---
+; Owned by c64-ChaCha20-Poly1305/src/lib/data_lib.s when USE_CHACHA_SIBLING=1
+; (sibling archive exports cc20_*, poly_*, aead_* at its own addresses,
+; with cc20_work/cc20_keystream pinned to ZP $40 via the sibling's
+; zp_config.s). The in-tree exports + reservations are suppressed in
+; that case to avoid duplicate-symbol link errors.
+.ifndef USE_CHACHA_SIBLING
 .export cc20_state
 .export cc20_work
 .export cc20_keystream
@@ -73,15 +79,11 @@
 .export cc20_nonce
 .export cc20_counter
 .export cc20_remain_hi
-
-; --- Poly1305 state ---
 .export poly_h
 .export poly_r
 .export poly_s
 .export poly_product
 .export poly1305_tag
-
-; --- AEAD state ---
 .export aead_key
 .export aead_nonce
 .export aead_aad_ptr
@@ -90,8 +92,17 @@
 .export aead_data_len
 .export aead_tag
 .export aead_scratch
+.endif
 
-; --- fe25519 field arithmetic ---
+; --- fe25519 / X25519 / fe25519-mul support ---
+; Owned by c64-x25519/src/data.s + sibling fe25519/x25519 when
+; USE_X25519_SIBLING=1. The integration build script (tools/integration/
+; build_x25519.sh) emits the sibling equivalents into CRYPTO_BSS +
+; CRYPTO_RODATA. fe_p, mul38_lo/hi_tab, mul_dma_lo/hi, mul_src2_buf,
+; mul_cached_a, x25_basepoint, x25_scalar/u/result, x25_x2/z2/x3/z3/a/b/
+; da/cb/e are the sibling-owned set; fe_wide moves to ZP $40 in the
+; sibling. Suppressed here in that case to avoid duplicates.
+.ifndef USE_X25519_SIBLING
 .export fe_wide
 .export fe_tmp1
 .export fe_tmp2
@@ -99,17 +110,13 @@
 .export fe_tmp4
 .export fe_p
 
-; --- Squaring / multiplication support ---
 .export mul_src2_buf
 .export mul_cached_a
 .export mul_dma_lo
 .export mul_dma_hi
-.export sqtab2_lo
-.export sqtab2_hi
 .export mul38_lo_tab
 .export mul38_hi_tab
 
-; --- X25519 state ---
 .export x25_scalar
 .export x25_u
 .export x25_result
@@ -123,6 +130,17 @@
 .export x25_cb
 .export x25_e
 .export x25_basepoint
+.endif
+
+; --- Quarter-square table for in-tree fe25519 / poly1305 mult66 path ---
+; sqtab2_lo / sqtab2_hi are used only by the in-tree mult66 micro-multiply
+; in src/crypto/fe25519.s. The c64-x25519 sibling uses a different
+; multiply (sqr_lo/sqr_hi from data_x25519_rodata) and does NOT import
+; sqtab2_*, so they become dead when the x25519 sibling is active.
+; Keep the exports unconditional — labels.txt callers in the test harness
+; reference them by name; ld65 happily emits unreferenced exports.
+.export sqtab2_lo
+.export sqtab2_hi
 
 ; --- Handshake state ---
 .export hs_c
@@ -231,16 +249,23 @@
 ; =============================================================================
 .segment "CRYPTO_RODATA"
 
+.ifndef USE_X25519_SIBLING
 ; p = 2^255 - 19 in little-endian
 fe_p:
         .byte $ed
         .res 30, $ff
         .byte $7f
+.endif
 
 ; --- mult66 second quarter-square table ---
 ; sqtab2[0] = 0
 ; sqtab2[n] = floor((256-n)^2 / 4) - 1  for n=1..255
 ; The -1 compensates for carry being clear in the negative-difference path
+;
+; Used only by the in-tree fe25519.s mult66 path. The sibling x25519 uses
+; sqr_lo/sqr_hi tables instead, so this is dead under USE_X25519_SIBLING=1
+; — but kept emitted so the test harness can still look it up by label
+; (the harness's Labels reader cross-references both backends).
 sqtab2_lo:
         .byte 0
         .repeat 255, i
@@ -253,6 +278,7 @@ sqtab2_hi:
                 .byte >((((256-(i+1))*(256-(i+1)))/4) - 1)
         .endrepeat
 
+.ifndef USE_X25519_SIBLING
 ; --- mul_by_38 lookup tables ---
 ; mul38_lo_tab[i] = low byte of (i * 38)
 ; mul38_hi_tab[i] = high byte of (i * 38)
@@ -272,6 +298,7 @@ mul38_hi_tab:
 x25_basepoint:
         .byte 9
         .res 31, 0
+.endif
 
 ; Bit mask lookup (index 0-7 -> bit mask)
 rw_bit_mask:
@@ -411,6 +438,7 @@ hmac_data_ptr:
 hmac_data_len:
         .res 1                 ; HMAC data length
 
+.ifndef USE_CHACHA_SIBLING
 ; --- ChaCha20 state (RFC 7539) ---
 ; Initial state: 16 x 32-bit words = 64 bytes
 cc20_state:
@@ -480,7 +508,9 @@ aead_tag:
 ; Poly1305 padding/length block scratch (16 bytes)
 aead_scratch:
         .res 16, 0
+.endif
 
+.ifndef USE_X25519_SIBLING
 ; --- fe25519 field arithmetic ---
 fe_wide:
         .res 64, 0             ; 512-bit product from multiply
@@ -533,6 +563,7 @@ x25_cb:
         .res 32, 0
 x25_e:
         .res 32, 0
+.endif
 
 
 ; =============================================================================

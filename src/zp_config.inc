@@ -113,6 +113,41 @@ lmul0           = cc20_round
 lmul1           = cc20_data_ptr
 .endif
 
+; --- ChaCha20-Poly1305 sibling Profile B scratch ($1e/$1f) ---
+; Used by libs/chacha20poly1305/src/lib/poly1305_lib.s:ct_mul_8x8 when
+; USE_CHACHA_SIBLING=1 (Profile B). Aliases the same byte range as
+; fe_src1 ($1e-$1f, a 2-byte pointer); ChaCha20-Poly1305 AEAD and
+; fe25519 never co-run in the WG handshake (DH completes before AEAD
+; encryption/decryption), so the alias is safe. Declared unconditionally
+; so exports.s can .exportzp them without a USE_CHACHA_SIBLING gate.
+.ifndef ct_diff_raw
+ct_diff_raw     = $1e
+.endif
+.ifndef ct_sign_mask
+ct_sign_mask    = $1f
+.endif
+
+; --- ChaCha20-Poly1305 sibling ZP-pinned working buffer ($40-$7F) ---
+; The c64-ChaCha20-Poly1305 library pins its 64-byte ChaCha20 working
+; state (cc20_work) to ZP $40-$7F for speed (zp,X is 1 byte / 1 cycle
+; cheaper than abs,X). cc20_keystream is an alias of cc20_work so the
+; XOR step reads the keystream directly from the working buffer (saves
+; the per-block 64-byte copy). Only declared as ZP equates under
+; USE_CHACHA_SIBLING=1; otherwise the in-tree wg/data.s reserves the
+; BSS slots at the absolute address inherited from the ACME build.
+;
+; Shares ZP $40-$7F with the in-tree fe25519's fe_wide buffer and (when
+; USE_X25519_SIBLING=1) the sibling x25519's fe_wide. Time-share: AEAD
+; and fe25519 never co-run.
+.ifdef USE_CHACHA_SIBLING
+.ifndef cc20_work
+cc20_work       = $40
+.endif
+.ifndef cc20_keystream
+cc20_keystream  = cc20_work
+.endif
+.endif
+
 ; --- fe25519 field arithmetic ---
 .ifndef fe_src1
 fe_src1         = $1e
