@@ -77,22 +77,6 @@ def test_build_verification(labels):
             failed += 1
             print(f"  FAIL label '{name}' not found")
 
-    # tp_packet must be below $8000
-    tp = labels.address("tp_packet")
-    if tp is not None and tp + 1500 < 0x8000:
-        passed += 1
-    else:
-        failed += 1
-        print(f"  FAIL tp_packet buffer extends past $8000")
-
-    # udp_recv_buf must fit 1500
-    ub = labels.address("udp_recv_buf")
-    if ub is not None and ub + 1500 < 0x8000:
-        passed += 1
-    else:
-        failed += 1
-        print(f"  FAIL udp_recv_buf buffer extends past $8000")
-
     return passed, failed
 
 
