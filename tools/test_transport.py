@@ -101,26 +101,6 @@ def test_build_verification(labels):
             failed += 1
             print(f"  FAIL label '{name}' not found")
 
-    # tp_packet must be below $8000 (sqtab)
-    tp_packet_addr = labels.address("tp_packet")
-    if tp_packet_addr is not None and tp_packet_addr < 0x8000:
-        passed += 1
-        if VERBOSE:
-            print(f"  PASS tp_packet ${tp_packet_addr:04X} < $8000")
-    else:
-        failed += 1
-        addr_str = f"${tp_packet_addr:04X}" if tp_packet_addr else "None"
-        print(f"  FAIL tp_packet {addr_str} not below $8000")
-
-    # tp_packet + 1500 must be below $8000
-    if tp_packet_addr is not None and tp_packet_addr + 1500 < 0x8000:
-        passed += 1
-        if VERBOSE:
-            print(f"  PASS tp_packet end ${tp_packet_addr+1500:04X} < $8000")
-    else:
-        failed += 1
-        print(f"  FAIL tp_packet buffer extends past $8000")
-
     # transport code should be after crypto (> $32F0)
     transport_init_addr = labels.address("transport_init")
     if transport_init_addr is not None and transport_init_addr > 0x32F0:

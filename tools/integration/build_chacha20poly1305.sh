@@ -15,6 +15,60 @@
 # which collides with WG's REU bank 0-1 allocation for x25519 mul tables
 # (see src/crypto/shared/reu_layout.inc).
 #
+# Integration path — Option A (staged-source + sed, NOT `make lib-aead-only`)
+# ---------------------------------------------------------------------------
+# Two integration paths were considered against the sibling's new SPEC §6
+# library archive targets (`make lib` / `make lib-aead-only`, landed in
+# JC-000/c64-ChaCha20-Poly1305 PRs #35/#36/#38/#39/#41 — see CHANGELOG).
+#
+#   Option A (chosen): keep WG's existing staging+sed pipeline and add
+#     ca65 `-D` overrides for the new size knobs. Required because
+#     (a) the sibling Makefile emits `.segment "CODE"` / `.segment "DATA"`
+#         which WG must rewrite to CHACHA_CODE / CHACHA_BSS / CHACHA_RODATA
+#         (no `--segment-rename` flag in the sibling Make rules), and
+#     (b) WG cannot enable Alt 1 (`-DLIB_VARIANT_AEAD_ONLY=1`) because WG
+#         imports both `chacha20_quarter_round` (src/wg/cookie.s, for the
+#         HChaCha20 cookie derivation) and `mul_8x8` (src/crypto/fe25519.s,
+#         the in-tree x25519 implementation when USE_X25519_SIBLING=0).
+#         The aead-only variant strips both symbol bodies, not just the
+#         `.export` lines. Re-evaluate when WG drops the in-tree fe25519
+#         (covered by PR #37) and either drops the HChaCha20 cookie path
+#         or restores `chacha20_quarter_round` as a full-archive export.
+#
+#   Option B (deferred): invoke the sibling's `make lib-aead-only` and
+#     copy the resulting `.a`. Blocked on (a) and (b) above. Would
+#     require either upstreaming a segment-rename knob to the sibling
+#     Makefile or accepting Alt 1's symbol stripping.
+#
+# Size-reduction switches opted into here (per PR #36 / supervisor's
+# "combined D" measurement target):
+#   -D POLY1305_MULTIPLY_ROLLED_OUTER=1
+#       PR #36 alt 2-partial: rolls the outer 16-iteration j loop of
+#       poly1305_multiply; the 17 inner partial products stay inlined.
+#       Cost: +4.08% cycles on aead_encrypt n=1024. Saves ~8 KB linked.
+#       This is the right elbow for WG (we're size-bound, not cy-bound).
+#
+#   -D LIB_SHARED_SQTAB_BASE=$8000
+#       PR #39 / SPEC §8.1 canonical sqtab equate. The sibling's default
+#       is already $8000, but pass it explicitly for symmetry with the
+#       x25519 sibling integration script and to defend against a future
+#       upstream default change.
+#
+# Size-reduction switches DELIBERATELY NOT opted into:
+#   -D POLY1305_MULTIPLY_ROLLED=1
+#       PR #36 alt 2-full: rolls both outer and inner loops. Saves an
+#       additional ~576 B but costs +17.4% cycles on aead_encrypt n=1024.
+#       Wrong elbow for WG: the AEAD path dominates handshake cost on the
+#       transport encrypt/decrypt critical path; +17% would be visible.
+#
+#   -D LIB_VARIANT_AEAD_ONLY=1
+#       PR #35 alt 1: see Option-A rationale above. WG imports symbols
+#       this gate strips bodies of (chacha20_quarter_round, mul_8x8).
+#
+#   -D POLY1305_PROFILE_LONG=1
+#       Profile A. WG runs Profile B exclusively (REU bank 0 collision
+#       with x25519 mul tables — see reu_layout.inc plan).
+#
 # Included in the archive:
 #   - libs/chacha20poly1305/src/lib/word32_lib.s        (32-bit add/xor/rotate)
 #   - libs/chacha20poly1305/src/lib/chacha20_lib.s      (ChaCha20 core)
@@ -201,10 +255,19 @@ STAGED=(word32_lib_raw chacha20_lib_raw poly1305_lib_raw
 for src in "${STAGED[@]}"; do
     # -I $STAGING resolves the staged constants_lib.s.
     # -I $LIB_SRC/include resolves smc.inc.
+    # -D POLY1305_MULTIPLY_ROLLED_OUTER=1 : PR #36 alt 2-partial size
+    #     reduction (see header). Only poly1305_lib.s reads it, but
+    #     passing it uniformly keeps every staged .o under the same
+    #     define set, which simplifies reasoning about cross-module
+    #     equate consistency.
+    # -D LIB_SHARED_SQTAB_BASE=$8000     : PR #39 canonical sqtab equate
+    #     pinned explicitly (header rationale).
     "$CA65" \
         -g \
         -I "$STAGING" \
         -I "$LIB_SRC/include" \
+        -D POLY1305_MULTIPLY_ROLLED_OUTER=1 \
+        -D 'LIB_SHARED_SQTAB_BASE=$8000' \
         -o "$OBJ_DIR/$src.o" "$STAGING/$src.s"
 done
 
