@@ -10,7 +10,28 @@
 # Adapted from c64-https/tools/integration/build_x25519.sh — same
 # staged-source pattern, retargeted at WG's segment names
 # (CRYPTO_CODE / CRYPTO_RODATA / CRYPTO_BSS) and pinned to the c64-x25519
-# master SHA recorded in the libs/x25519 submodule.
+# v0.6.0 tag recorded in the libs/x25519 submodule.
+#
+# v0.6.0 deltas (vs the v0.5.0 / 4d1c752 pin this script originally
+# targeted) that this script accounts for:
+#   - PR #54 (bank-2 drop): sibling's LIB_X25519_REU_BANKS_USED manifest
+#     mask flipped from $3F to $3B (banks 0,1,3,4,5; bank 2 released).
+#     Resolves WG's latent overlay-store collision documented in
+#     src/crypto/shared/reu_layout.inc — no script change needed; the
+#     fix is purely on the sibling side.
+#   - PR #56 (§8.1 shared sqtab adoption): sibling now sources sqtab_lo
+#     / sqtab_hi from `LIB_SHARED_SQTAB_BASE` (default $7800 in the
+#     sibling). WG places sqtab at $8000 (see src/exports.s and the
+#     linker cfg sqtab hole), so we MUST pass
+#     `-D LIB_SHARED_SQTAB_BASE=$8000` to every staged TU so
+#     the sibling's SMC patch sites resolve to the same page WG's
+#     runtime sqtab_init writes. Page-alignment + page-delta are hard-
+#     asserted in the sibling's constants.s; a missed override fails
+#     at assemble time, not as a silent runtime table corruption.
+#   - PR #55 (`make lib-x25519-1764` build variant): size-reduced 1764B
+#     archive variant for tightly-budgeted consumers. WG isn't size-
+#     constrained on the x25519 surface (we exclude bench/util/main and
+#     re-export ZP slots in-tree) so we keep the standard build.
 #
 # Excluded from the archive:
 #   - libs/x25519/src/mul_8x8.s : c64-wireguard's in-tree src/crypto/poly1305.s
@@ -30,7 +51,10 @@
 #     X25519_REU_BANK / X25519_REU_OFFSET are equates pulled in via
 #     constants.s. WG owns REU banks 0-1 for the in-tree fe25519 mul
 #     tables — sibling default X25519_REU_BANK=0 matches that allocation,
-#     so no override needed.
+#     so no override needed. (v0.6.0 narrows the claim from banks 0-5 to
+#     banks 0,1,3,4,5 via LIB_X25519_REU_BANKS_USED=$3B; bank 2 is now
+#     free for WG's overlay store. See PR #54 and the updated comment
+#     block in src/crypto/shared/reu_layout.inc.)
 #   - libs/x25519/src/lib_version.s : exports LIB_VERSION_*, LIB_X25519_*
 #     manifest equates. Not currently used by WG; leaving them out
 #     avoids a "linked but unreferenced" warning and keeps the archive
@@ -269,9 +293,20 @@ mkdir -p "$OBJ_DIR" "$OUT_DIR"
 
 STAGED=(fe25519_raw x25519_raw x25519_init_raw data_x25519_bss_raw data_x25519_rodata_raw)
 
+# -D LIB_SHARED_SQTAB_BASE=$8000 pins the sibling's §8.1
+# shared-sqtab equate to WG's existing sqtab runtime window ($8000-$83FF;
+# see src/exports.s and the cfg/ sqtab hole). Sibling default is $7800;
+# every staged TU must see the same value or the sibling's SMC patch
+# sites would resolve to a different page than WG's sqtab_init writes.
+# Page-alignment + page-delta are hard-asserted in the sibling's
+# constants.s, so a missed override here is a hard assemble-time error,
+# not a silent runtime corruption.
+# Note: the c64-lib-contract docs and sibling comments reference the
+# cl65-driver-style `--asm-define` spelling; ca65 itself takes `-D`.
 for src in "${STAGED[@]}"; do
     "$CA65" \
         -g \
+        -D LIB_SHARED_SQTAB_BASE='$8000' \
         -I "$STAGING" \
         -o "$OBJ_DIR/$src.o" "$STAGING/$src.s"
 done
