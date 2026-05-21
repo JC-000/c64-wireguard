@@ -15,26 +15,33 @@
 ;
 ; Bank map (REU 24-bit address):
 ;   $00000-$1FFFF  (banks 0-1, 128 KB)  x25519 mul tables   (in-tree default)
-;   $00000-$5FFFF  (banks 0-5, 384 KB)  x25519 sibling      (USE_X25519_SIBLING=1)
+;   $00000-$1FFFF + $30000-$5FFFF  (banks 0,1,3,4,5)  x25519 sibling
+;                                                     (USE_X25519_SIBLING=1, v0.6.0)
 ;   $20000-$2FFFF  (bank 2,    64 KB)   overlay store (3x 8 KB slots + slack)
 ;   $30000-$3FFFF  (bank 3,    64 KB)   P-256 precompute    (RESERVED)
 ;   $40000-$7FFFF  (banks 4-7, 256 KB)  P-384 precompute + headroom (RESERVED)
 ;
-; ** Latent collision under USE_X25519_SIBLING=1 **
-; The c64-x25519 sibling (post-c64-lib-contract §3) reserves SIX
-; contiguous banks at `X25519_REU_BANK` (default $00), giving
-; `LIB_X25519_REU_BANKS_USED = $3F << X25519_REU_BANK`. With the default
-; pin, banks 0-5 are claimed, which overlaps:
-;   - bank 2: overlay store (unused at runtime today; latent)
-;   - bank 3: P-256 (reserved-not-allocated; latent)
-;   - banks 4-5: P-384 (reserved-not-allocated; latent)
-; All four overlapping reservations are aspirational — the overlay
-; dispatcher hasn't been vendored, and P-256/P-384 are RESERVED-not-
-; ALLOCATED. The collision becomes a real bug the first time WG
-; activates any of those reservations. Plan when that day comes:
-; pin `--asm-define X25519_REU_BANK=$08` (requires 1750-class REU,
-; 16 banks) OR contract the x25519 sibling at a non-zero base after
-; rewriting reu_layout.inc to compress the reservation map.
+; ** Bank-2 collision RESOLVED in c64-x25519 v0.6.0 (PR #54) **
+; The sibling at v0.5.0 reserved SIX contiguous banks at `X25519_REU_BANK`
+; (default $00), giving `LIB_X25519_REU_BANKS_USED = $3F << X25519_REU_BANK`
+; — banks 0-5, which overlapped WG's bank-2 overlay store.
+; v0.6.0 drops the bank-2 claim: the manifest mask is now
+; `$3B << X25519_REU_BANK` (banks 0,1,3,4,5; bank 2 released because
+; the sibling's bench/precompute caches were moved). WG's overlay store
+; at bank 2 ($20000-$2FFFF) is therefore no longer at risk.
+;
+; ** Remaining latent collisions (narrower scope than v0.5.0) **
+; Banks 3 (P-256) and 4-5 (P-384) are still in `$3B`. Both are
+; RESERVED-not-ALLOCATED today (the precompute generators have not been
+; vendored), so the collision is purely aspirational. Plan when WG
+; activates either:
+;   - bank 3 (P-256): pin `--asm-define X25519_REU_BANK=$08` (requires
+;     1750-class REU, 16 banks) so the sibling's $3B mask shifts above
+;     the P-256 region, OR carve P-256 precompute into bank 8+.
+;   - banks 4-5 (P-384): same plan; alternatively, rewrite reu_layout
+;     to host P-384 above bank 8.
+; Scope is narrower than the v0.5.0 framing because the overlay-store
+; collision (the only one with an in-flight consumer) is fully gone.
 ;
 ; Each declared overlay image is 8 KB. The live overlay slot in main RAM
 ; (CRYPTO_OVERLAY region in the linker cfg) is paged in by a future
