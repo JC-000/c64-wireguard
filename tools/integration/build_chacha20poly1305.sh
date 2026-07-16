@@ -189,10 +189,11 @@ cp "$LIB_SRC"/lib/constants_lib.s         "$STAGING/constants_lib.s"
 # fill=yes / fillval=$00).
 for f in word32_lib_raw chacha20_lib_raw poly1305_lib_raw \
          chacha20poly1305_lib_raw data_lib_raw; do
-    sed -i '' \
-        -e 's/^\.segment "CODE"$/.segment "CHACHA_CODE"/' \
+    # tmp+mv instead of sed -i: BSD and GNU sed disagree on -i's syntax
+    sed -e 's/^\.segment "CODE"$/.segment "CHACHA_CODE"/' \
         -e 's/^\.segment "DATA"$/.segment "CHACHA_BSS"/' \
-        "$STAGING/$f.s"
+        "$STAGING/$f.s" > "$STAGING/$f.s.tmp"
+    mv "$STAGING/$f.s.tmp" "$STAGING/$f.s"
 done
 
 # data_lib_raw.s ends with a `.segment "CODE"` block for the

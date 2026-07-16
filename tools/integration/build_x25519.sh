@@ -275,7 +275,10 @@ RODATA_EOF
 # CRYPTO_CODE so the sibling lands in MAIN_AREA_LO alongside the rest
 # of the crypto code, not in the BASIC-stub LOADER region.
 for src in fe25519_raw x25519_raw x25519_init_raw; do
-    sed -i '' 's/^\.segment "CODE"$/.segment "CRYPTO_CODE"/' "$STAGING/$src.s"
+    # tmp+mv instead of sed -i: BSD and GNU sed disagree on -i's syntax
+    sed 's/^\.segment "CODE"$/.segment "CRYPTO_CODE"/' "$STAGING/$src.s" \
+        > "$STAGING/$src.s.tmp"
+    mv "$STAGING/$src.s.tmp" "$STAGING/$src.s"
 done
 
 # --- Sanity: no leftover CODE segments in patched sources ---
