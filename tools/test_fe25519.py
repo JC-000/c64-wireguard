@@ -629,7 +629,16 @@ def main():
     print(f"Labels loaded: {len(required)} required labels verified")
 
     # Launch VICE
-    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
+    # fe25519_mul does table lookups against REU-resident product rows
+    # (src/crypto/fe25519.s reu_mul_init / reu_fetch_mul_row). The harness
+    # does not attach an REU by default, and without one the REU registers
+    # read back open-bus and the "fetched" rows are stale RAM — issue #34's
+    # non-deterministic fe_mul/fe_inv failures. 512 KiB covers banks 0-7
+    # per src/crypto/shared/reu_layout.inc (sibling uses banks up to 5).
+    config = ViceConfig(
+        prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
+        extra_args=["-reu", "-reusize", "512"],
+    )
 
     with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
@@ -651,6 +660,15 @@ def main():
         write_bytes(transport, labels["poly_s"], bytes(16))
         jsr(transport, labels["poly1305_init"], timeout=30.0)
         print("sqtab ready")
+
+        # Rebuild the REU-resident mul rows too: boot.s prints the menu
+        # (including "Q=QUIT") BEFORE sqtab_init/reu_mul_init run, so the
+        # wait_for_text() above returns while reu_mul_init is still mid-
+        # flight and the takeover interrupts it (issue #34). Same reason
+        # the poly1305_init sqtab rebuild above is mandatory.
+        print("Initializing REU mul tables...")
+        jsr(transport, labels["reu_mul_init"], timeout=120.0)
+        print("REU mul tables ready")
 
         passed, failed = run_tests(transport, labels, seed)
 
