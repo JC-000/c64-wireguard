@@ -1,0 +1,50 @@
+# Per-PR CI gate (Phase E).
+#
+# Every PR gets: a default build (BACKEND=uci — the ip65 backend needs a
+# locally prepared ip65 checkout + prebuilt blob, so it is not CI-buildable)
+# and the ABI drift gate, so silent sibling-API drift fails CI even on PRs
+# that don't touch libs/. The full sibling build matrix runs separately in
+# sibling-bump.yml when libs/** or .gitmodules change.
+#
+# NOT covered in CI: the VICE regression suite. It depends on the private
+# c64-test-harness repo (cross-repo checkout token), an x64sc binary-monitor
+# session, and per-suite wall-clocks up to 30 min — see sibling-bump.yml for
+# the full rationale. Regression stays a local pre-merge step for now.
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: build (BACKEND=uci, siblings off)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install cc65
+        run: sudo apt-get update && sudo apt-get install -y cc65
+      - name: Build default PRG
+        run: make BACKEND=uci
+      - name: Show artifact sizes
+        run: ls -l build/wireguard.prg build/wireguard.map
+
+  abi-drift:
+    name: ABI drift gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      # The script's built-in defaults point at local sibling checkouts;
+      # in CI the submodules are the authoritative export surface.
+      - name: check_abi_drift.py against submodule pins
+        run: |
+          python3 tools/check_abi_drift.py \
+            --abi-inc src/crypto_abi.inc \
+            --x25519-inc libs/x25519/src \
+            --chacha-dir libs/chacha20poly1305/src/lib

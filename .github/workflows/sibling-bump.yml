@@ -1,0 +1,86 @@
+# Sibling-bump CI (Phase E).
+#
+# Runs the full sibling build matrix whenever a PR touches the vendored
+# libraries (libs/**, .gitmodules), the integration build scripts, or the
+# ABI contract header — i.e. exactly the surface a submodule bump changes.
+# Apply the `sibling-bump` label to re-trigger via the `labeled` event.
+#
+# A weekly cron runs the version probe so a new sibling release upstream
+# turns this workflow red instead of sitting unnoticed (exit 2 on STALE).
+#
+# Deliberately NOT here: the VICE regression suite (tools/run_regression.py).
+# It needs (a) the private JC-000/c64-test-harness repo, so a cross-repo
+# token secret; (b) x64sc running under xvfb with the binary monitor —
+# feasible on ubuntu-latest but unproven and timing-sensitive (suite
+# timeouts are 30 min each, staggered VICE boots); (c) half the harness's
+# 10-slot port pool. Until someone validates the harness under Actions,
+# regression on sibling bumps stays a local step; this workflow gates on
+# what CI can prove: all four toggle combinations still build, and the
+# ABI surface still matches.
+name: sibling-bump
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+    paths:
+      - 'libs/**'
+      - '.gitmodules'
+      - 'tools/integration/**'
+      - 'src/crypto_abi.inc'
+  schedule:
+    # Mondays 06:17 UTC — probe upstream for new sibling releases.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  build-matrix:
+    name: build x25519=${{ matrix.x25519 }} chacha=${{ matrix.chacha }}
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { x25519: 0, chacha: 0 }
+          - { x25519: 1, chacha: 0 }
+          - { x25519: 0, chacha: 1 }
+          - { x25519: 1, chacha: 1 }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install cc65
+        run: sudo apt-get update && sudo apt-get install -y cc65
+      - name: Build (BACKEND=uci)
+        run: |
+          make BACKEND=uci \
+            USE_X25519_SIBLING=${{ matrix.x25519 }} \
+            USE_CHACHA_SIBLING=${{ matrix.chacha }}
+      - name: Show artifact sizes
+        run: ls -l build/wireguard.prg build/wireguard.map
+
+  abi-drift:
+    name: ABI drift gate
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: check_abi_drift.py against submodule pins
+        run: |
+          python3 tools/check_abi_drift.py \
+            --abi-inc src/crypto_abi.inc \
+            --x25519-inc libs/x25519/src \
+            --chacha-dir libs/chacha20poly1305/src/lib
+
+  probe-versions:
+    name: probe sibling pins vs upstream
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Exit 2 (STALE) fails the scheduled run — that red X *is* the
+      # notification that a sibling has released something newer.
+      - name: Probe upstream versions
+        run: bash tools/integration/probe_sibling_versions.sh
