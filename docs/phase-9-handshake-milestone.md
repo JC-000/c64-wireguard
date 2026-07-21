@@ -120,28 +120,39 @@ The shared suffix is the stale `b2s_h` state from a previous BLAKE2s
 finalisation; only the first 16 bytes of each "32-byte" value are valid
 output. Fix: restore `b2s_out_len = 32` before `rts`.
 
-### Bug #2: AEAD-verify state still diverges after Bug #1 — UNRESOLVED
+### Bug #2: `b2s_key_len` not restored after keyed BLAKE2s — FIXED (2026-07-21)
 
-With the b2s_out_len fix in place, all C64 outputs become full 32 bytes
-(no shared tail), but the values still don't match the responder's view
-at AEAD-verify time:
+The exact sibling of Bug #1, one ZP cell over. `blake2s_init` reads *both*
+its output length and its **key length** from module ZP cells
+(`b2s_out_len`, `b2s_key_len = $12`) — not from registers, so the `ldx #0`
+that appears before every unkeyed `blake2s_init` call is a dead load. The
+two keyed callers, `hs_compute_mac1` (`src/wg/handshake.s`) and the MAC2
+hash (`src/wg/cookie.s`), set `b2s_key_len = 32/16`. Bug #1's fix added a
+`b2s_out_len = 32` restore to both — but neither restored `b2s_key_len = 0`.
 
-```
-C64 hs_h       = 4de2dc4463471356a7c744c22555a6496df40cee1979abadd92450e779083de6
-resp h_at_aead = f9fda1c1b96c47d3dce26cf7b8882e4a737700b2dd55cd1b8041f0e1f568b4ed
+`hs_compute_mac1` is the last operation of Type-1 emission. So when
+`hs_process_response` runs its first hash (`mix_hash` on the Type-2
+ephemeral), it inherits `b2s_key_len = 32` and runs *keyed* against the
+stale MAC1 key. Every message-2 hash — the whole chaining-key / AEAD-key
+transcript — diverges.
 
-C64 aead_key   = 7567193cfd0161ae81d26bacfcff96a76dac7250ec762a6215de952c6380eb73
-resp k_at_aead = 85ebb7147f1a8e024c4c421ec0a8ecac8714341a9d94bf5d5a63bc4cc5babde7
-```
+Proof, from a device-RAM dump of the failing run: the C64's first
+message-2 hash equals `BLAKE2s(hs_h ‖ resp_e_pub, key=mac1_key,
+out_len=32, key_len=32)` byte-for-byte, and the live ZP snapshot read
+`$12 = $20` (32) at `hs_process_response` entry.
 
-Type-2 packet bytes match between C64 (`hs_resp_packet`) and the
-responder's transmitted bytes, so the divergence is in the transcript
-computation, not the wire. The next step is to read C64's `hs_h` and
-`hs_c` immediately after `do_handshake` (post-Type-1 emit, pre-Type-2
-receive) and compare against the responder's `h_after_T1` / `ck_after_T1`
-captured via SymmetricState monkey-patch. The instrumentation is in
-`tools/test_uci_handshake_live.py --dump-aead` but Bug #3 (below)
-prevents reliable iteration.
+The bug is **firmware-independent** — pure 6502 state, nothing to do with
+the REU, UCI, or DMA. It only ever surfaced on the live handshake because
+that is the only path that runs a keyed hash (MAC1) immediately before an
+unkeyed one (message-2 `mix_hash`) on the same machine: the VICE Type-2
+tests inject the response without running Type-1 emission, and every unit
+KAT re-writes `b2s_key_len` before each init, so both were structurally
+blind to it.
+
+Fix: restore `b2s_key_len = 0` beside the existing `b2s_out_len = 32`
+restore in both keyed callers. Guarded by
+`tools/test_blake2s_keylen_regression.py` (asserts `b2s_key_len == 0`
+after `hs_compute_mac1`; fails without the fix).
 
 ### Bug #3: `uci_wait_idle` STATE-bit wedge — filed as test-harness#112
 
@@ -158,16 +169,22 @@ from `c64-https/src/net/uci/uci_cmd.s` (5 s CIA1 TOD budget; returns
 `C=1` on timeout with `net_last_error = UCI_ERR_WAIT_TIMEOUT`). Callers
 in `src/net/uci/net.s` will need to propagate the carry-flag error.
 
+## Stage 2 reached — `SESSION_ACTIVE` (2026-07-21)
+
+With Bug #2 fixed, the full handshake completes on hardware: a C64
+Ultimate running the UCI backend built Type-1, the host responder
+replied with Type-2, and `hs_process_response` derived transport keys
+matching the responder's `split()` output — `wg_state` reached
+`SESSION_ACTIVE`. This is the first end-to-end WireGuard handshake
+completed by a Commodore 64. (Hardware session details, including the
+new C64 Ultimate device profile and the full Bug #2 investigation, are
+in `artifacts/hw_session_20260719_ledger.md`.)
+
 ## What's still ahead
 
-- **Bug #2: locate AEAD transcript divergence point** — re-run
-  `--dump-aead` with post-Type-1 hs_h/hs_c snapshot and the `uci_wait_idle`
-  fix from #112 in place. If post-T1 state matches responder's, the bug
-  is inside `hs_process_response`; otherwise it's in `hs_create_initiation`
-  (despite the responder accepting Type-1).
-- **Stage 2 — `SESSION_ACTIVE`**: dependent on Bug #2.
 - **Stage 3 — Type-4 transport round-trip**: send one ICMP-over-Type-4
-  packet through the tunnel and verify the responder decrypts it.
+  packet through the tunnel and verify the responder decrypts it. This is
+  the next milestone now that the handshake completes.
 - **Real-`wg` interop**: a future milestone — the custom responder
   exists specifically because real `wg` won't wait the 12 minutes.
   Interop requires either a smaller-budget handshake (turbo-mode

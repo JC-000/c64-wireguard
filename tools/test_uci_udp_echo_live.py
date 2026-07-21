@@ -35,7 +35,7 @@ from c64_test_harness import (  # noqa: E402
 from c64_test_harness.backends.u64_debug_capture import DebugCapture  # noqa: E402
 from c64_test_harness.backends.ultimate64 import Ultimate64Transport  # noqa: E402
 from c64_test_harness.backends.ultimate64_client import (  # noqa: E402
-    Ultimate64Client, Ultimate64RunnerStuckError,
+    Ultimate64Client, Ultimate64Error, Ultimate64RunnerStuckError,
 )
 from c64_test_harness.backends.ultimate64_helpers import (  # noqa: E402
     DEBUG_MODE_6510, check_measurement_environment, get_debug_stream_mode,
@@ -104,19 +104,34 @@ def _build_trampoline() -> bytes:
 
 
 def _wait_boot(tr: Ultimate64Transport, mul_dma_hi: int) -> None:
-    """Wait for reu_mul_init to finish: ``mul_dma_hi[255]`` becomes
-    ``(255*255) >> 8 = $FE`` only after the last outer iteration."""
+    """Wait for reu_mul_init to finish.
+
+    Terminal RAM-table signatures, checked as the ([128], [255]) byte
+    pair — a single byte is ambiguous because plain row 253 transiently
+    shows $FC at [255] mid-init (the PR #40 takeover-during-init race):
+
+    - in-tree init ends with plain row 255 in RAM:
+        [128] = (255*128)>>8 = $7F, [255] = (255*255)>>8 = $FE
+    - c64-x25519 sibling init ends with the pre-doubled row 255:
+        [128] = (510*128)>>8 = $FF, [255] = (2*255*255 & $FFFF)>>8 = $FC
+      No plain row can put $FF at [128] (a*128 < 32768 for a <= 255),
+      so the pair is unambiguous.
+    """
     deadline = time.monotonic() + BOOT_TIMEOUT
-    last = 0
+    pair = (0, 0)
     while time.monotonic() < deadline:
-        last = tr.read_memory(mul_dma_hi + 255, 1)[0]
-        if last == 0xFE:
-            log.info("boot complete — mul_dma_hi[255]=$FE (reu_mul_init done)")
+        b128 = tr.read_memory(mul_dma_hi + 128, 1)[0]
+        b255 = tr.read_memory(mul_dma_hi + 255, 1)[0]
+        pair = (b128, b255)
+        if pair in ((0x7F, 0xFE), (0xFF, 0xFC)):
+            variant = "in-tree" if pair[1] == 0xFE else "x25519-sibling"
+            log.info("boot complete — mul_dma_hi[128,255]=($%02X,$%02X) "
+                     "(%s reu_mul_init done)", b128, b255, variant)
             return
         time.sleep(0.5)
     raise TimeoutError(
         f"reu_mul_init not finished within {BOOT_TIMEOUT}s; "
-        f"mul_dma_hi[255]=${last:02X}"
+        f"mul_dma_hi[128,255]=(${pair[0]:02X},${pair[1]:02X})"
     )
 
 
@@ -410,8 +425,15 @@ def main() -> int:
             _skip(f"unexpected turbo state: {exc}")
         _safe(set_reu, client, True, "512 KB")  # reu_mul_init needs REU
         time.sleep(0.5)
-        client.stream_debug_start(f"{local_ip}:{DEBUG_PORT}")
-        streamed = True
+        try:
+            client.stream_debug_start(f"{local_ip}:{DEBUG_PORT}")
+            streamed = True
+        except Ultimate64Error as exc:
+            # C64 Ultimate fw 1.1.0 has no 6510 debug stream (HTTP 500 on
+            # /v1/streams/debug:start) — the echo test is still valid, just
+            # without a cycle trace.
+            log.warning("debug stream unavailable — continuing without "
+                        "cycle capture: %s", exc)
         with open(prg_path, "rb") as f:
             client.run_prg(f.read())
         log.info("PRG sent; waiting for boot...")

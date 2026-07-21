@@ -124,6 +124,13 @@ b2s_my_ptr:     .res 2
 ; Input: b2s_out_len = output length (1-32), pre-set by caller
 ;        b2s_key_len = key length (0 = unkeyed, 1-32 = keyed), pre-set
 ;        If keyed, key data must already be at input_buffer
+;
+; INVARIANT: both parameters come from the ZP CELLS, not from A/X. A caller
+; that runs the KEYED path (b2s_key_len != 0 or b2s_out_len != 32) MUST
+; restore (b2s_out_len, b2s_key_len) = (32, 0) before returning, or the next
+; unkeyed caller inherits the stale values. Getting this wrong caused Bug #1
+; (out_len) and Bug #2 (key_len); see the restores in hs_compute_mac1 and
+; the MAC2 hash, and tools/test_blake2s_keylen_regression.py.
 ; =============================================================================
 blake2s_init:
         ; zero counter and flags
