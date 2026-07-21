@@ -126,6 +126,8 @@ DEFAULT_HOST = "10.43.23.81"
 # Custom step IDs for handshake-specific JSR targets.
 STEP_HS_INIT = 0x66        # session_initiate (Type-1 build & send)
 STEP_HANDLE = 0x77         # session_handle_packet (Type-2 process)
+STEP_SEND_TEST = 0x88      # do_send_test (stage 3: send Type-4 forward)
+STEP_HANDLE_T4 = 0x99      # session_handle_packet (stage 3: reverse Type-4)
 
 # Timeouts (wall-clock seconds). Empirically do_handshake at 1 MHz takes
 # ~18-20 min (the README's "~9 min" figure was either at turbo or a
@@ -155,6 +157,9 @@ REQUIRED_LABELS = (
     # AEAD-failure diagnostic state (read by _dump_aead_state).
     "hs_h", "hs_c", "aead_key", "kdf_out1", "kdf_out2", "kdf_out3",
     "hs_resp_packet", "hs_ephem_pub",
+    # Stage-3 Type-4 transport round-trip.
+    "do_send_test", "tp_send_counter", "tp_packet", "tp_packet_len",
+    "tp_payload_len",
 )
 
 
@@ -353,6 +358,12 @@ class _ResponderThread(threading.Thread):
     def stop(self) -> None:
         self._stop.set()
 
+    def send_raw(self, data: bytes) -> None:
+        """Send a raw datagram to the C64 from the responder's bound socket
+        (so it arrives from the peer address the C64 connected to)."""
+        if self.c64_addr is not None:
+            self._sock.sendto(data, self.c64_addr)
+
     def run(self) -> None:
         log.info("responder bound on 0.0.0.0:%d", self.port)
         while not self._stop.is_set():
@@ -426,6 +437,77 @@ class _ResponderThread(threading.Thread):
                  len(pt), pt[:16].hex())
 
 
+# ── Stage 3: Type-4 transport round-trip ──────────────────────────────────
+
+def _run_stage3(tr: Ultimate64Transport, L: dict[str, int],
+                rt: "_ResponderThread", responder: WireGuardResponder) -> int:
+    """On an ACTIVE session, exercise Type-4 transport data both ways.
+
+    Forward (C64 -> responder) is the pass gate: JSR do_send_test, which
+    encrypts "HELLO WIREGUARD" into a Type-4 (counter 0) and sends it to
+    the peer; assert the responder decrypts it. Reverse (responder -> C64)
+    is a bonus that does not fail the test: the responder encrypts a Type-4,
+    we drive net_poll + session_handle_packet, and read the decrypted
+    plaintext out of tp_packet+16.
+    """
+    # ── Forward: C64 encrypts + sends a Type-4 ──
+    pre = bytes(tr.read_memory(L["tp_send_counter"], 8))
+    log.info("stage 3 forward: JSR do_send_test (encrypt + send Type-4)...")
+    carry = _run_step_slow(tr, step_id=STEP_SEND_TEST,
+                           target=L["do_send_test"], timeout=120.0)
+    post = bytes(tr.read_memory(L["tp_send_counter"], 8))
+    plen = int.from_bytes(bytes(tr.read_memory(L["tp_packet_len"], 2)),
+                          "little")
+    log.info("do_send_test carry=%d tp_send_counter %s->%s tp_packet_len=%d",
+             carry, pre.hex(), post.hex(), plen)
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline and rt.type4_received_at is None:
+        time.sleep(0.25)
+    if rt.type4_received_at is None:
+        log.error("STAGE 3 forward FAILED — responder never decrypted a "
+                  "Type-4 (last_error=%s)", rt.last_error)
+        return 1
+    log.info("STAGE 3 forward ✓ — responder decrypted the C64's Type-4 "
+             "transport packet (tunnel carries data)")
+
+    # ── Reverse: responder encrypts a Type-4 to the C64 (bonus) ──
+    try:
+        if rt.c64_addr is None:
+            log.warning("stage 3 reverse: no c64_addr; skipping bonus")
+            return 0
+        # plaintext[9] must not be IP_PROTO_ICMP(1)/UDP(17) so the C64 routes
+        # it to display_payload rather than an IP parser. 16 ASCII bytes.
+        rev_pt = b"PONG-FROM-PY-C64"
+        rev_pkt = responder.encrypt_transport(rev_pt)
+        rt.send_raw(rev_pkt)
+        log.info("stage 3 reverse: sent %dB Type-4 to C64; polling...",
+                 len(rev_pkt))
+        got = False
+        for _ in range(60):
+            _run_step(tr, step_id=STEP_POLL, target=L["net_poll"])
+            if tr.read_memory(L["udp_recv_ready"], 1)[0] != 0:
+                got = True
+                break
+            time.sleep(0.25)
+        if not got:
+            log.warning("stage 3 reverse: C64 never saw the Type-4 (bonus)")
+            return 0
+        _run_step_slow(tr, step_id=STEP_HANDLE_T4,
+                       target=L["session_handle_packet"], timeout=120.0)
+        dec = bytes(tr.read_memory(L["tp_packet"] + 16, len(rev_pt)))
+        dlen = int.from_bytes(bytes(tr.read_memory(L["tp_payload_len"], 2)),
+                              "little")
+        if dec == rev_pt:
+            log.info("STAGE 3 reverse ✓ — C64 decrypted responder Type-4: %r "
+                     "(tp_payload_len=%d)", dec, dlen)
+        else:
+            log.warning("stage 3 reverse: decrypt mismatch (bonus) dlen=%d "
+                        "got=%s want=%s", dlen, dec.hex(), rev_pt.hex())
+    except Exception as exc:
+        log.warning("stage 3 reverse raised %s (bonus, not failing)", exc)
+    return 0
+
+
 # ── C64-side staging ──────────────────────────────────────────────────────
 
 def _stage_config(tr: Ultimate64Transport, L: dict[str, int],
@@ -474,8 +556,9 @@ def _stage_net_ports(tr: Ultimate64Transport, L: dict[str, int],
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--stage", type=int, choices=[1, 2], default=2,
-                   help="1=Type-1 accepted; 2=SESSION_ACTIVE (default)")
+    p.add_argument("--stage", type=int, choices=[1, 2, 3], default=2,
+                   help="1=Type-1 accepted; 2=SESSION_ACTIVE (default); "
+                        "3=Type-4 transport round-trip")
     p.add_argument("--host", default=os.environ.get("U64_HOST", DEFAULT_HOST))
     p.add_argument("--password", default=os.environ.get("U64_PASSWORD"))
     p.add_argument("--debug-capture", action="store_true",
@@ -769,8 +852,11 @@ def main() -> int:
                     return rc
                 if state == SESSION_ACTIVE:
                     log.info("STAGE 2 ✓ — SESSION_ACTIVE reached")
-                    rc = 0
-                    return 0
+                    if args.stage < 3:
+                        rc = 0
+                        return 0
+                    rc = _run_stage3(tr, L, rt, responder)
+                    return rc
                 if state == SESSION_IDLE:
                     log.error("wg_state reverted to IDLE after handle_packet")
                     return 1
