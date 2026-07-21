@@ -258,8 +258,17 @@ hs_mix_hash:
         lda b2s_remain
         pha
 
+        ; Unkeyed, 32-byte output. blake2s_init reads b2s_out_len and
+        ; b2s_key_len from the ZP cells (NOT A/X), so set the cells — the
+        ; bare `ldx #0` that used to be here was a dead load and is exactly
+        ; the trap that produced Bug #2 (a keyed caller left b2s_key_len
+        ; nonzero and this, the first hash of hs_process_response, silently
+        ; ran keyed). Keyed callers also restore the cells, but this makes
+        ; the highest-traffic unkeyed hash self-sufficient.
         lda #32
-        ldx #0
+        sta b2s_out_len
+        lda #0
+        sta b2s_key_len
         jsr blake2s_init
 
         ; Feed H (32 bytes)
@@ -663,15 +672,26 @@ hs_compute_mac1:
 
         jsr blake2s_final
 
-        ; Restore the default 32-byte output length. hs_init / hs_mix_hash /
-        ; hmac_blake2s all call blake2s_init without setting b2s_out_len
-        ; themselves (see data.s comment on b2s_out_len) — they rely on the
-        ; "default 32" convention. Without this restore, every BLAKE2s call
-        ; in hs_process_response would truncate to 16 bytes, leaving stale
-        ; b2s_h bytes in positions 16-31 of kdf_out1/2/3 and silently
-        ; corrupting the chaining-key / AEAD-key transcript.
+        ; Restore the default BLAKE2s param convention. hs_init /
+        ; hs_mix_hash / hmac_blake2s all call blake2s_init WITHOUT setting
+        ; b2s_out_len or b2s_key_len themselves (the `ldx #0` at those sites
+        ; is a dead load — blake2s_init reads both from the ZP cells, not
+        ; from registers). They rely on (b2s_out_len, b2s_key_len) = (32, 0).
+        ;
+        ; This is a KEYED init (key_len=32, out_len=16), so BOTH cells must
+        ; be restored:
+        ;   - b2s_out_len: without the restore, every hash in
+        ;     hs_process_response truncates to 16 bytes (Bug #1).
+        ;   - b2s_key_len: without the restore, the first hash in
+        ;     hs_process_response (mix_hash on the Type-2 ephemeral) runs
+        ;     KEYED against the stale MAC1 key and the entire message-2
+        ;     transcript diverges (Bug #2). This only manifests on the live
+        ;     initiate->respond path, so VICE Type-2 tests and the crypto
+        ;     KATs never caught it — see tools/test_blake2s_keylen_regression.py.
         lda #32
         sta b2s_out_len
+        lda #0
+        sta b2s_key_len
         rts
 
 ; =============================================================================

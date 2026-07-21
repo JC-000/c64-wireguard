@@ -529,8 +529,11 @@ def main() -> int:
         _skip(str(e))
 
     try:
-        client = Ultimate64Client(host=args.host, password=args.password, timeout=10.0)
-        tr = Ultimate64Transport(host=args.host, password=args.password, timeout=10.0,
+        # 30 s: the C64 Ultimate (fw 1.1.0) takes >10 s to answer the first
+        # run_prg POST after a cold boot (the PRG loads fine; only the HTTP
+        # response is late). 10 s was fine on the U64E but times out here.
+        client = Ultimate64Client(host=args.host, password=args.password, timeout=30.0)
+        tr = Ultimate64Transport(host=args.host, password=args.password, timeout=30.0,
                                  client=client)
         # Check the firmware's runner subsystem isn't wedged before we
         # commit to a 15+ minute test. If wedged, recover() escalates.
@@ -583,8 +586,15 @@ def main() -> int:
             log.error("net_init failed")
             return 1
         if _run_step(tr, step_id=STEP_DHCP, target=L["net_dhcp"]) != 0:
-            log.error("net_dhcp failed")
-            return 1
+            # C64 Ultimate fw 1.1.0: GET_IPADDR reports 0.0.0.0
+            # (net_last_error=$83) even though the socket path works — the
+            # local IP is display-only (net_print_ip); UDP_CONNECT uses the
+            # staged peer ip/port. Verified end-to-end by
+            # test_uci_udp_echo_live on this firmware, so continue.
+            err = tr.read_memory(L["net_last_error"], 1)[0]
+            log.warning("net_dhcp failed (net_last_error=$%02X) — continuing: "
+                        "socket path does not need the local IP on this "
+                        "firmware", err)
         # net_udp_listen takes A=lo, X=hi. Use a fixed C64-side local port
         # (arbitrary; firmware picks the actual ephemeral source port).
         local_port = 51820

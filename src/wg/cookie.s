@@ -324,6 +324,10 @@ hs_set_mac2:
         ; b2s_out_len in data.s and matching restore in hs_compute_mac1).
         lda #32
         sta b2s_out_len
+        ; Symmetric restore of b2s_key_len after this KEYED init (see the
+        ; matching restore + rationale in hs_compute_mac1).
+        lda #0
+        sta b2s_key_len
 
         ; Clear cookie_valid
         lda #0

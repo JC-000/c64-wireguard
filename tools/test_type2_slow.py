@@ -385,7 +385,10 @@ def main():
     effective_workers = min(workers, len(trials))
     print(f"\nLaunching {effective_workers} VICE instances...")
 
-    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
+    # REU cartridge + post-takeover reu_mul_init re-run per PR #40 — without
+    # these, fe25519 REU row fetches read open-bus garbage in VICE.
+    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
+                        extra_args=["-reu", "-reusize", "512"])
     mgr = ViceInstanceManager(config=config)
 
     with mgr:
@@ -401,6 +404,9 @@ def main():
                 print(f"FATAL: Main menu did not appear on instance {idx}")
                 sys.exit(1)
             write_bytes(inst.transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
+            # Menu prints before reu_mul_init finishes (PR #40): re-run it
+            # deterministically after takeover.
+            jsr(inst.transport, labels["reu_mul_init"], timeout=180.0)
             jsr(inst.transport, labels["entropy_init"])
 
         print(f"All {effective_workers} instances ready\n")
