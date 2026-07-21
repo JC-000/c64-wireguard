@@ -72,6 +72,11 @@ from wg_responder.responder import (  # noqa: E402
 _DIAG_CAPTURE: dict[str, Optional[bytes]] = {
     "h_after_T1": None, "ck_after_T1": None,
     "h_at_aead": None, "k_at_aead": None,
+    # h AFTER the Type-2 encrypt_and_hash mixes the tag ciphertext in. The
+    # C64's hs_h is only readable post-run (after hs_process_response's
+    # final mix_hash(tag) ratchet), so this is the directly-comparable
+    # value; h_at_aead (pre-verify) is not readable without instrumentation.
+    "h_after_aead": None,
     "type2_packet": None, "e_priv_resp": None, "e_pub_resp": None,
 }
 
@@ -91,11 +96,19 @@ def _install_aead_capture_patch() -> None:
     _orig_dah = _ns.SymmetricState.decrypt_and_hash
 
     def _capture_eah(self, plaintext):  # type: ignore[no-untyped-def]
-        if _DIAG_CAPTURE["h_at_aead"] is None:
+        first = _DIAG_CAPTURE["h_at_aead"] is None
+        if first:
+            # h/K as used for the AEAD tag (h is the AAD) — the pre-verify
+            # state the C64 must reproduce at aead_decrypt time.
             _DIAG_CAPTURE["h_at_aead"] = bytes(self.h)
             k = getattr(self.cipher_state, "k", None)
             _DIAG_CAPTURE["k_at_aead"] = bytes(k) if k is not None else None
-        return _orig_eah(self, plaintext)
+        out = _orig_eah(self, plaintext)
+        if first:
+            # h AFTER mixing the tag ciphertext — matches the C64's hs_h once
+            # hs_process_response has run its final mix_hash(tag) ratchet.
+            _DIAG_CAPTURE["h_after_aead"] = bytes(self.h)
+        return out
 
     def _capture_dah(self, ciphertext):  # type: ignore[no-untyped-def]
         out = _orig_dah(self, ciphertext)
@@ -171,8 +184,8 @@ def _dump_aead_state(tr: Ultimate64Transport, L: dict[str, int],
     for name, _, n in addrs:
         log.info("C64 %-16s = %s", name, c64[name].hex())
     log.info("--- responder captured ---")
-    for k in ("h_after_T1", "ck_after_T1", "h_at_aead", "k_at_aead",
-              "e_pub_resp", "e_priv_resp", "type2_packet"):
+    for k in ("h_after_T1", "ck_after_T1", "h_at_aead", "h_after_aead",
+              "k_at_aead", "e_pub_resp", "e_priv_resp", "type2_packet"):
         v = _DIAG_CAPTURE.get(k)
         log.info("resp %-16s = %s",
                  k, v.hex() if isinstance(v, (bytes, bytearray)) else "(none)")
@@ -197,7 +210,16 @@ def _dump_aead_state(tr: Ultimate64Transport, L: dict[str, int],
         _cmp("resp_e_pub vs packet[12..43]",
              c64["hs_resp_packet"][12:44],
              _DIAG_CAPTURE["e_pub_resp"])
-    _cmp("hs_h at AEAD",     c64["hs_h"],     _DIAG_CAPTURE.get("h_at_aead"))
+    # The C64's hs_h is read AFTER hs_process_response completes, which
+    # includes the final mix_hash(tag ciphertext) ratchet — so compare it
+    # against the responder's h AFTER its matching encrypt_and_hash, not the
+    # pre-verify h_at_aead. Both sides mix the same tag into the same
+    # pre-AEAD h, so on a correct transcript these match. (The pre-verify
+    # hs_h is checked implicitly by the AEAD tag verifying at all, since h
+    # is the AEAD AAD; it isn't separately readable post-run without
+    # instrumentation.)
+    _cmp("hs_h after transcript",
+         c64["hs_h"], _DIAG_CAPTURE.get("h_after_aead"))
     _cmp("aead_key (=kdf_out3) vs K",
          c64["aead_key"], _DIAG_CAPTURE.get("k_at_aead"))
     _cmp("kdf_out3 vs K",
