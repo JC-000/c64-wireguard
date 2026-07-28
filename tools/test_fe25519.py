@@ -306,7 +306,12 @@ def test_mul(transport, labels, rng):
     for name, a, b in cases:
         expected = fe_mul_ref(a, b)
         result = c64_fe_mul(transport, labels, a, b)
-        if result == expected:
+        # The c64-x25519 sibling's mul/sqr contract is lazy reduction:
+        # outputs are congruent representatives in [0, 2p); only
+        # fe25519_reduce_final canonicalizes (see libs/x25519/src/
+        # fe25519.s "R <= 2*p" invariant). Accept any in-range
+        # representative; test_reduce_final covers canonicalization.
+        if result % P == expected and result < 2 * P:
             passed += 1
             if VERBOSE: print(f"  PASS mul {name}")
         else:
@@ -329,7 +334,8 @@ def test_sqr(transport, labels, rng):
     for i, a in enumerate(cases):
         expected = fe_sqr_ref(a)
         result = c64_fe_sqr(transport, labels, a)
-        if result == expected:
+        # Lazy-reduction contract: see comment in test_mul.
+        if result % P == expected and result < 2 * P:
             passed += 1
             if VERBOSE: print(f"  PASS sqr #{i}")
         else:
@@ -666,9 +672,14 @@ def main():
         # wait_for_text() above returns while reu_mul_init is still mid-
         # flight and the takeover interrupts it (issue #34). Same reason
         # the poly1305_init sqtab rebuild above is mandatory.
-        print("Initializing REU mul tables...")
-        jsr(transport, labels["reu_mul_init"], timeout=120.0)
-        print("REU mul tables ready")
+        # The label is absent in the REU=0 build (x25519 onchip profile
+        # has no §8.2 surface at all) — mul works without any table.
+        if "reu_mul_init" in labels:
+            print("Initializing REU mul tables...")
+            jsr(transport, labels["reu_mul_init"], timeout=120.0)
+            print("REU mul tables ready")
+        else:
+            print("no reu_mul_init label — REU=0 (onchip) build, skipping")
 
         passed, failed = run_tests(transport, labels, seed)
 
