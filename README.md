@@ -4,7 +4,9 @@ WireGuard Noise protocol implementation for the Commodore 64, written in 6502 as
 
 ## Status
 
-**Phase 9 in progress — first live WireGuard handshake reached the wire.** On 2026-05-16 a C64-built Type-1 packet was emitted from a U64E (UCI backend) and accepted by a Python responder over real UDP, with `wg_state` transitioning to `SESSION_HS_SENT` after `do_handshake` completed in 12 min 20 s on real hardware. Full `SESSION_ACTIVE` (Type-2 receipt + key derivation) is the remaining stage. See `docs/phase-9-handshake-milestone.md`.
+**Milestone reached (2026-07-21): a Commodore 64 completed a full WireGuard IKpsk2 handshake to `SESSION_ACTIVE` and exchanged encrypted Type-4 transport data in both directions on real hardware** (C64 Ultimate, fw 1.1.0, UCI backend, against a Python responder). See `docs/phase-9-handshake-milestone.md` for the campaign log, including the two BLAKE2s key-length state bugs it flushed out.
+
+The shipped build links the sibling crypto libraries [c64-x25519](https://github.com/JC-000/c64-x25519) (v0.8.0) and [c64-ChaCha20-Poly1305](https://github.com/JC-000/c64-ChaCha20-Poly1305) (v0.6.0) as archives per the [c64-lib-contract](https://github.com/JC-000/c64-lib-contract) conventions — every reachable multiply on the X25519 and Poly1305 paths is the contract's constant-time `ct_mul_8x8` body. The in-tree crypto remains available behind `USE_*_SIBLING=0` as a legacy/dev configuration.
 
 **Phase 8 complete**: Pre-Shared Key (PSK) support — IKpsk2 protocol compliance, optional PSK in disk config, backward-compatible with zero PSK.
 
@@ -31,12 +33,23 @@ Requires:
 - [ip65](https://github.com/cc65/ip65) source tree — symlinked at `ip65/`
 
 ```bash
-make            # build ip65 blob + build/wireguard.prg + build/labels.txt
-make run        # build and launch in VICE (x64sc)
+make                 # ip65/RR-Net backend, REU profile, sibling crypto (default)
+make BACKEND=uci     # Ultimate 64 / C64U UCI backend instead of ip65
+make REU=0           # no-REU build (x25519 onchip profile) — runs on a stock C64
+make release         # all 4 PRG variants + 2 D64 images + SHA256SUMS in build/release/
+make run             # build and launch in VICE (x64sc)
 make clean
 ```
 
-The project was originally written in ACME syntax; a migration to ca65/ld65 (see git log for phases 0-6) aligned the crypto public ABI with the sibling libraries `c64-x25519` and `c64-ChaCha20-Poly1305` so those libraries can be dropped in later as a link-line-only change. The networking layer sits behind `src/net_abi.inc`, mirroring the `c64-https` pattern — the `c64-https` ip65/UCI backends (proven on Ultimate 64 at 48 MHz / 1 MHz and on VICE) can be swapped in the same way.
+Build knobs (combine freely):
+
+| Knob | Values | Meaning |
+|---|---|---|
+| `BACKEND` | `ip65` (default) / `uci` | RR-Net via ip65 blob, or Ultimate Command Interface ($DF1B-$DF1F) |
+| `REU` | `1` (default) / `0` | `1`: REU-DMA multiply tables (banks 0,1,3,4,5; ~4.3 min/scalarmult). `0`: constant-time on-chip multiply, zero REU use anywhere (~7.3 min/scalarmult) |
+| `USE_X25519_SIBLING` / `USE_CHACHA_SIBLING` | `1`/`1` (default) or `0`/`0` | Sibling archives vs legacy in-tree crypto. Must match — mixed configs are refused |
+
+The sibling archives are built by the libraries' own `make lib` targets (contract §6) via `tools/integration/build_*.sh` — no source staging, with one documented interim exception ([chacha #47](https://github.com/JC-000/c64-ChaCha20-Poly1305/issues/47)). The networking layer sits behind `src/net_abi.inc`; both backends share the WG core.
 
 ## Memory Layout
 
