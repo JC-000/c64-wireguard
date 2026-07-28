@@ -9,24 +9,52 @@ VICE = x64sc
 #   uci   — Ultimate 64 UCI ($DF1B-$DF1F) adapter; no ip65 dependency
 BACKEND ?= ip65
 
-# --- Sibling-library integration (Phase D) ---
+# --- Sibling-library integration ---
 # When USE_X25519_SIBLING=1, the in-tree src/crypto/fe25519.s +
 # src/crypto/x25519.s are dropped from the link and replaced by
-# build/lib/x25519.a (assembled from libs/x25519/ pinned to the SHA
-# recorded in .gitmodules). The in-tree X25519/fe25519 buffers in
-# src/wg/data.s are suppressed via .ifdef USE_X25519_SIBLING so the
-# sibling archive's data_x25519_*_raw exports satisfy the imports.
+# build/lib/x25519.a — the c64-x25519 archive built by the library's own
+# contract-§6 `make lib` target (see tools/integration/build_x25519.sh).
+# The in-tree X25519/fe25519 buffers in src/wg/data.s are suppressed via
+# .ifdef USE_X25519_SIBLING; the archive carries its own data segment.
 #
 # When USE_CHACHA_SIBLING=1, the same swap happens for
 # src/crypto/chacha20.s + poly1305.s + aead.s + word32.s, replaced by
-# build/lib/chacha20poly1305.a (Profile B — no POLY1305_PROFILE_LONG /
-# POLY1305_REU). word32.s is dropped because the sibling supplies its
-# own word32_lib.s.
+# build/lib/chacha20poly1305.a (Profile B, rolled-outer multiply; see
+# tools/integration/build_chacha20poly1305.sh).
 #
-# Both default OFF — the in-tree implementations remain the shipped
-# default until the sibling integration is signed off.
-USE_X25519_SIBLING ?= 0
-USE_CHACHA_SIBLING ?= 0
+# Both default ON since the contract-aligned release: the siblings are
+# the shipped implementation (the two-archive link is also what makes
+# every reachable multiply constant-time — in-tree poly1305.s carries
+# the issue #16 non-CT mul_8x8). Set both to 0 for the legacy all-in-tree
+# build. Mixed configs are refused below: the archives cross-resolve
+# (x25519 provides sqtab_init/ct_mul_8x8, chacha defers to it), so each
+# half-on combination hits duplicate-export or unresolved-import errors.
+USE_X25519_SIBLING ?= 1
+USE_CHACHA_SIBLING ?= 1
+
+ifneq ($(USE_X25519_SIBLING),$(USE_CHACHA_SIBLING))
+$(error USE_X25519_SIBLING and USE_CHACHA_SIBLING must match (both 1 or both 0); mixed sibling configs no longer link — see tools/integration/*.sh headers)
+endif
+
+# --- REU knob ---
+# REU=1 (default): c64-x25519 REU profile — mul tables in REU banks
+#   0,1,3,4,5; fastest at 1 MHz (~4.3 min scalarmult). Requires an REU
+#   (real 1750-class, or Ultimate REU emulation).
+# REU=0: X25519_ONCHIP_MUL profile — zero REU anywhere in the PRG
+#   (chacha v0.6.0 issues no REU DMA on any path either); runs on a
+#   stock C64. ~1.7x slower scalarmult at 1 MHz.
+# Only meaningful with the siblings ON (the in-tree fe25519 is REU-only).
+REU ?= 1
+
+ifeq ($(REU),0)
+ifeq ($(USE_X25519_SIBLING),0)
+$(error REU=0 requires the sibling build (USE_X25519_SIBLING=1); the in-tree fe25519 has no REU-less multiply)
+endif
+X25519_PROFILE = onchip
+else
+X25519_PROFILE = default
+endif
+export X25519_PROFILE
 
 SRC_DIR    = src
 BUILD_DIR  = build
@@ -60,12 +88,16 @@ endif
 ifeq ($(USE_CHACHA_SIBLING),1)
 CA65FLAGS += -D USE_CHACHA_SIBLING=1
 endif
+ifeq ($(REU),0)
+CA65FLAGS += -D WG_NO_REU=1
+endif
 
 # Common ca65 source set — shared by every backend. The in-tree crypto
 # modules that the siblings replace are filtered out below.
 COMMON_SRCS_ALL = $(SRC_DIR)/loadaddr.s \
                   $(SRC_DIR)/boot.s \
                   $(SRC_DIR)/exports.s \
+                  $(SRC_DIR)/contract_asserts.s \
                   $(SRC_DIR)/crypto/word32.s \
                   $(SRC_DIR)/crypto/entropy.s \
                   $(SRC_DIR)/crypto/blake2s.s \
@@ -144,12 +176,18 @@ PRG_DEPS     := $(CA65_OBJS) $(SIBLING_ARCHIVES)
 OBJ_EXTRADEP :=
 endif
 
-.PHONY: all clean run ip65-libs
+.PHONY: all clean run ip65-libs release
 
 # `make` produces build/wireguard.prg + build/labels.txt via ca65/ld65.
 # The legacy ACME pipeline was retired after Phase 6 (see git log for
 # the migration history).
 all: $(PRG)
+
+# Build the full release artifact set (4 PRG variants + 2 D64 images +
+# SHA256SUMS) into build/release/. See tools/release/build_release.sh.
+# (Declared after `all` — the first rule in the file is the default goal.)
+release:
+	bash tools/release/build_release.sh
 
 $(PRG): $(PRG_DEPS) | $(BUILD_DIR)
 	$(LD65) $(LD65FLAGS) -o $@ $(CA65_OBJS) $(SIBLING_ARCHIVES)
@@ -165,10 +203,16 @@ $(LIB_DIR):
 	mkdir -p $(LIB_DIR)
 
 # --- Sibling archive build rules ---
-$(X25519_ARCHIVE): | $(LIB_DIR)
+# FORCE-driven: incrementality lives in the sibling Makefiles (cheap
+# no-op when up to date), and the REU/profile knob changes what the
+# x25519 script produces without changing any prerequisite timestamp.
+.PHONY: FORCE
+FORCE:
+
+$(X25519_ARCHIVE): FORCE | $(LIB_DIR)
 	bash tools/integration/build_x25519.sh
 
-$(CHACHA_ARCHIVE): | $(LIB_DIR)
+$(CHACHA_ARCHIVE): FORCE | $(LIB_DIR)
 	bash tools/integration/build_chacha20poly1305.sh
 
 # Build ip65 libraries (only if not already built)

@@ -67,6 +67,10 @@
 .import fe25519_cmp_p
 .import fe25519_reduce_wide
 
-; REU setup — called once at boot
+; REU setup — called once at boot. reu_mul_init does not exist in the
+; REU-less build (x25519 onchip profile drops the whole §8.2 surface),
+; so the import is gated with the boot call.
 .import sqtab_init
+.ifndef WG_NO_REU
 .import reu_mul_init
+.endif
