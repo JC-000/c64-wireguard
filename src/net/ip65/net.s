@@ -45,7 +45,9 @@
 .import zp_save_buf
 
 ; =============================================================================
-.segment "CODE"
+; BOOT_CODE (not bare CODE): CODE is ceded to the chacha sibling archive
+; (contract §4 gap, upstream issue #48); this wrapper stays in LOADER.
+.segment "BOOT_CODE"
 
 ; =============================================================================
 ; net_init - initialize ip65 + ethernet (RR-Net CS8900a)

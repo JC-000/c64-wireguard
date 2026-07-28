@@ -86,7 +86,12 @@ bas_end:
 ; =============================================================================
 ; Main program entry point
 ; =============================================================================
-        .segment "CODE"
+; BOOT_CODE (not bare CODE): the bare CODE segment name is ceded to the
+; c64-ChaCha20-Poly1305 sibling archive, which has not adopted the
+; contract §4 prefixed segment names yet (upstream issue #48). The cfg
+; places BOOT_CODE in LOADER directly after EXEHDR so `start:` stays at
+; $080D — the BASIC stub's hardcoded SYS 2061 depends on it.
+        .segment "BOOT_CODE"
 
 start:
         ; bank out BASIC ROM to use $A000-$BFFF as RAM
@@ -124,8 +129,10 @@ start:
         ; Initialize quarter-square table (needed by mul_8x8 and fe_sqr)
         jsr     sqtab_init
 
+.ifndef WG_NO_REU
         ; Initialize REU multiplication tables (precompute all 256x256 products)
         jsr     reu_mul_init
+.endif
 
         ; fall through to main loop
 main_loop:
