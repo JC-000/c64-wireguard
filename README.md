@@ -6,31 +6,33 @@ WireGuard Noise protocol implementation for the Commodore 64, written in 6502 as
 
 **Milestone reached (2026-07-21): a Commodore 64 completed a full WireGuard IKpsk2 handshake to `SESSION_ACTIVE` and exchanged encrypted Type-4 transport data in both directions on real hardware** (C64 Ultimate, fw 1.1.0, UCI backend, against a Python responder). See `docs/phase-9-handshake-milestone.md` for the campaign log, including the two BLAKE2s key-length state bugs it flushed out.
 
+**[v1.0.0](https://github.com/JC-000/c64-wireguard/releases/tag/v1.0.0) is the first tagged release** (2026-07-28): ready-to-run `.prg` and `.d64` artifacts for both network backends in REU and stock-C64 (no-REU) variants. The released UCI/REU build repeated the full handshake + bidirectional transport on hardware post-tag (`docs/RELEASE_NOTES_v1.0.0.md` §Verification).
+
 The shipped build links the sibling crypto libraries [c64-x25519](https://github.com/JC-000/c64-x25519) (v0.8.0) and [c64-ChaCha20-Poly1305](https://github.com/JC-000/c64-ChaCha20-Poly1305) (v0.6.0) as archives per the [c64-lib-contract](https://github.com/JC-000/c64-lib-contract) conventions — every reachable multiply on the X25519 and Poly1305 paths is the contract's constant-time `ct_mul_8x8` body. The in-tree crypto remains available behind `USE_*_SIBLING=0` as a legacy/dev configuration.
 
 **Phase 8 complete**: Pre-Shared Key (PSK) support — IKpsk2 protocol compliance, optional PSK in disk config, backward-compatible with zero PSK.
 
-| Phase | Components | Tests |
-|-------|-----------|-------|
-| 1 | BLAKE2s-256, HMAC-BLAKE2s, WireGuard KDF | 64 |
-| 2 | ChaCha20, Poly1305 MAC, ChaCha20-Poly1305 AEAD | 55 |
-| 3 | Field arithmetic mod 2^255-19, X25519, Noise handshake | 87 |
-| 4 | UDP networking (ip65, RR-Net, DHCP, ZP time-sharing) | 64 |
-| 5 | Transport data packets (Type 4 encrypt/decrypt, replay protection) | 54 |
-| 6 | Session state machine (entropy, config, handshake, packet dispatch) | 49 |
-| 7 | Application layer (IP packets, disk config, cookies, timers) | 116 |
-| 8 | Pre-Shared Key support (IKpsk2 compliance, config, disk parsing) | 24 |
-| MTU | 16-bit payload transport encrypt/decrypt/round-trip (0–1468 bytes) | 37 |
-| TAI64N | Real-time timestamp init, elapsed seconds, monotonic sequence | 19 |
-| MAC2 | Cookie decryption → MAC2 integration end-to-end flow | 6 |
-| Replay | 2048-bit sliding window, key rotation limits, endpoint update | 67 |
-| **Total** | | **642** |
+Development-phase history (per-suite test counts have drifted since; `tools/run_regression.py` reports current totals):
+
+| Phase | Components |
+|-------|-----------|
+| 1 | BLAKE2s-256, HMAC-BLAKE2s, WireGuard KDF |
+| 2 | ChaCha20, Poly1305 MAC, ChaCha20-Poly1305 AEAD |
+| 3 | Field arithmetic mod 2^255-19, X25519, Noise handshake |
+| 4 | UDP networking (ip65, RR-Net, DHCP, ZP time-sharing) |
+| 5 | Transport data packets (Type 4 encrypt/decrypt, replay protection) |
+| 6 | Session state machine (entropy, config, handshake, packet dispatch) |
+| 7 | Application layer (IP packets, disk config, cookies, timers) |
+| 8 | Pre-Shared Key support (IKpsk2 compliance, config, disk parsing) |
+| MTU / TAI64N / MAC2 / Replay | large payloads, timestamps, cookies→MAC2, 2048-bit sliding window |
 
 ## Building
 
 Requires:
-- [cc65](https://cc65.github.io/) toolchain (ca65 + ld65) — assembles WG and the ip65 binary blob
-- [ip65](https://github.com/cc65/ip65) source tree — symlinked at `ip65/`
+- [cc65](https://cc65.github.io/) toolchain (ca65 + ld65 + ar65 + od65) — assembles WG and the sibling archives
+- git submodules initialized (`git submodule update --init`) — the sibling crypto libraries in `libs/`
+- [ip65](https://github.com/cc65/ip65) source tree symlinked at `ip65/` — only for `BACKEND=ip65`
+- VICE's `c1541` — only for `make release` (D64 packaging)
 
 ```bash
 make                 # ip65/RR-Net backend, REU profile, sibling crypto (default)
@@ -54,18 +56,26 @@ The sibling archives are built by the libraries' own `make lib` targets (contrac
 ## Memory Layout
 
 ```
-$0801-$1FFF  LOADER:       BASIC stub + boot + net wrapper + RODATA tables
-$2000-$32EF  NET_CODE:     ip65 binary blob (UDP-only, ~4.8 KB)
-$32F0-$7FFF  MAIN_AREA_LO: crypto + app code + BSS (emitted as zeros)
-$8000-$83FF  SQTAB:        quarter-square multiply tables (runtime-built
-                            by sqtab_init; no PRG bytes here)
-$8400-$9FFF  MAIN_AREA_HI: overflow region for extra app data
-$A000-$BFFF  ip65 BSS:     private to ip65 (BASIC ROM banked out)
+$0801-$1FFF  LOADER:       BASIC stub + BOOT_CODE (boot + net wrapper) +
+                            RODATA tables + LIB_X25519_DATA (~3.5 KB of
+                            x25519 archive buffers/tables)
+$2000-$32EF  NET_CODE:     ip65 binary blob (~4.8 KB) or UCI adapter (~2 KB)
+$32F0-$7FFF  MAIN_AREA_LO: crypto + app code + BSS, plus the chacha archive
+                            (bare CODE/DATA segments, CODE page-aligned — a
+                            constant-time requirement) and LIB_X25519_CODE
+$8000-$83FF  SQTAB_HOLE:   quarter-square table window, runtime-built by
+                            sqtab_init. Emitted into the PRG as ZERO FILL —
+                            a PRG is one contiguous stream, so a file gap
+                            here would load everything above it $400 low
+$8400-$9FFF  MAIN_AREA_HI: LIB_X25519_INIT_CODE (cold init, reclaimable
+                            after boot) + APP_BSS overflow
+$A000-$BFFF  ip65 BSS:     private to ip65 (BASIC ROM banked out); unused
+                            under BACKEND=uci
 ```
 
 ip65 uses zero page $02-$1B (cc65 standard). These overlap our crypto ZP variables. The `src/net/ip65/net.s` wrapper saves and restores $02-$1B around every ip65 call (~60 cycles overhead, negligible vs network latency).
 
-The full memory layout is defined in `cfg/c64-wireguard-ip65.cfg` (the ld65 linker config). Code and data sections declare their target segment with ca65's `.segment` directive; ld65 resolves absolute addresses at link time.
+The full memory layout is defined in `cfg/c64-wireguard-ip65.cfg` and `cfg/c64-wireguard-uci.cfg` (identical MEMORY maps, so PRG offsets match across backends). Code and data sections declare their target segment with ca65's `.segment` directive; ld65 resolves absolute addresses at link time.
 
 ## Source Files
 
@@ -77,15 +87,13 @@ The full memory layout is defined in `cfg/c64-wireguard-ip65.cfg` (the ld65 link
 | `src/constants.inc` | Zero page variables, hardware equates (header, not assembled directly) |
 | `src/crypto_abi.inc` | Public crypto ABI contract (fe25519_*, x25519_*, chacha20_*, poly1305_*, aead_*, blake2s_*) matching the sibling libraries |
 | `src/net_abi.inc` | Public UDP networking ABI contract (net_init, net_dhcp, net_poll, net_udp_*) |
-| `src/crypto/word32.s` | 32-bit arithmetic: add, xor, rotate (7/8/12/16), copy, zero |
-| `src/crypto/blake2s.s` | BLAKE2s-256: init, update, final, compress, G function, keyed hashing |
+| `src/contract_asserts.s` | Link-time c64-lib-contract checks: REU bank masks disjoint, §8.0 shared-primitive ownership, sibling ABI version |
+| `libs/x25519/` | c64-x25519 submodule (v0.8.0) — X25519 + fe25519, the shipped implementation; built via its own `make lib` |
+| `libs/chacha20poly1305/` | c64-ChaCha20-Poly1305 submodule (v0.6.0) — ChaCha20/Poly1305/AEAD/word32, the shipped implementation |
+| `src/crypto/blake2s.s` | BLAKE2s-256: init, update, final, compress, G function, keyed hashing (in-tree by design — no sibling library) |
 | `src/crypto/blake2s_kdf.s` | HMAC-BLAKE2s and WireGuard KDF (kdf_1, kdf_2, kdf_3) |
-| `src/crypto/chacha20.s` | ChaCha20 stream cipher (RFC 7539) |
-| `src/crypto/poly1305.s` | Poly1305 MAC (130-bit modular arithmetic, quarter-square multiply) |
-| `src/crypto/aead.s` | ChaCha20-Poly1305 AEAD encrypt/decrypt |
-| `src/crypto/fe25519.s` | Field arithmetic mod 2^255-19 (add, sub, mul, sqr, inv, cswap, REU DMA) |
-| `src/crypto/x25519.s` | X25519 scalar multiplication (Montgomery ladder, RFC 7748) |
 | `src/crypto/entropy.s` | Hardware RNG: SID voice 3 noise XOR CIA1 timer |
+| `src/crypto/word32.s`, `chacha20.s`, `poly1305.s`, `aead.s`, `fe25519.s`, `x25519.s` | **Legacy in-tree crypto** — links only under `USE_*_SIBLING=0` (dev/bisection builds; not shipped — the in-tree `mul_8x8` is non-constant-time, issue #16) |
 | `src/wg/handshake.s` | WireGuard IKpsk2 Noise handshake (Type 1/Type 2 packets) |
 | `src/wg/transport.s` | Transport data packets: Type 4 encrypt/decrypt, replay protection |
 | `src/wg/session.s` | Session state machine: initiate, handle packet, reset, display |
@@ -100,6 +108,11 @@ The full memory layout is defined in `cfg/c64-wireguard-ip65.cfg` (the ld65 link
 | `src/net/ip65/net.s` | ip65 wrapper: ZP save/restore, init, DHCP, UDP listen/send/recv |
 | `src/net/ip65/ip65_blob.s` | `.incbin` wrapper around the pre-built ip65 binary blob |
 | `src/net/ip65/ip65_symbols.inc` | ip65 jump-table + variable-pointer equates |
+| `src/net/uci/net.s` | UCI backend: net ABI over the Ultimate Command Interface sockets (the hardware-proven backend) |
+| `src/net/uci/uci_cmd.s` | UCI register-level command primitives ($DF1B-$DF1F) |
+| `src/crypto/shared/reu_layout.inc` | Authoritative REU bank-allocation ledger |
+| `tools/integration/build_*.sh` | Sibling archive builds via the libraries' own `make lib` (contract §6) |
+| `tools/release/build_release.sh` | `make release` — PRG/D64 artifact matrix + checksums |
 
 ### ip65 Build
 
@@ -116,11 +129,12 @@ The full memory layout is defined in `cfg/c64-wireguard-ip65.cfg` (the ld65 link
 | $04-$09 | w32_src1/src2/dst | Word32 operand pointers |
 | $0A-$13 | b2s_* | BLAKE2s working variables |
 | $14-$1D | cc20_*/lmul*/poly_* | ChaCha20, mult66 pointers (aliased), Poly1305 |
-| $1E-$29 | fe_* | Field element arithmetic |
+| $1E-$29 | fe_* | Field element arithmetic ($1E-$1F also alias the chacha archive's ct_diff_raw/ct_sign_mask — time-shared, DH and AEAD never co-run) |
 | $2A-$2D | x25_* | X25519 ladder state |
+| $40-$7F | fe_wide / cc20_work | 64-byte ZP work block: x25519 archive's fe_wide (SMC-pinned, not relocatable) aliasing the chacha archive's cc20_work/keystream — time-shared per call, no state persists |
 | $FB-$FE | zp_ptr1/2 | General-purpose pointers |
 
-Note: $02-$1B overlaps with ip65's cc65 ZP usage. The `src/net/ip65/net.s` wrapper handles time-sharing via save/restore.
+Note: $02-$1B overlaps with ip65's cc65 ZP usage. The `src/net/ip65/net.s` wrapper handles time-sharing via save/restore. Sibling ZP slots are satisfied by `src/exports.s` (`src/zp_config.inc` is the relocatable slot manifest).
 
 ## Testing
 
@@ -129,67 +143,42 @@ Tests use the [c64-test-harness](https://github.com/JC-000/c64-test-harness) pac
 ```bash
 pip install c64-test-harness
 
-# Phase 1: BLAKE2s, HMAC, KDF
-python3 tools/test_blake2s.py                    # 64 tests
-
-# Phase 2: ChaCha20, Poly1305, AEAD
-python3 tools/test_chacha20_poly1305.py          # 55 tests
-
-# Phase 3: Field arithmetic, X25519, handshake
-python3 tools/test_fe25519.py                    # 64 tests
-python3 tools/test_x25519.py                     # 4 tests (--slow for scalarmult)
-python3 tools/test_handshake.py                  # 19 tests
-
-# Phase 4: Networking infrastructure
-python3 tools/test_networking.py                 # 64 tests
-
-# Phase 5: Transport data packets
-python3 tools/test_transport.py                  # 54 tests
-
-# Phase 6: Session state machine
-python3 tools/test_session.py                    # 49 tests
-
-# Phase 7: Application layer
-python3 tools/test_phase7.py                     # 85 tests
-python3 tools/test_disk_config.py                # 31 tests
-
-# Phase 8: Pre-Shared Key support
-python3 tools/test_phase8_psk.py                 # 24 tests
-
-# MTU: Large payload transport (16-bit lengths)
-python3 tools/test_mtu.py                        # 37 tests
-
-# TAI64N: Real-time timestamps
-python3 tools/test_tai64n.py                     # 19 tests
-
-# MAC2: Cookie → handshake integration
-python3 tools/test_mac2_integration.py           # 6 tests
-
-# All suites in parallel (builds once, staggered launch)
+# All suites in parallel (builds once, staggered launch) — the canonical run
 python3 tools/run_regression.py
 
-# VICE write chunking validation
-python3 tools/test_write_bytes_limit.py
+# Individual suites (per-suite counts drift; the runner reports totals):
+python3 tools/test_blake2s.py                    # BLAKE2s, HMAC, KDF
+python3 tools/test_chacha20_poly1305.py          # ChaCha20, Poly1305, AEAD
+python3 tools/test_fe25519.py                    # field arithmetic (accepts the sibling's lazy-reduction [0,2p) contract)
+python3 tools/test_x25519.py                     # --slow for full scalarmult
+python3 tools/test_handshake.py                  # IKpsk2 Type 1/2
+python3 tools/test_networking.py                 # UDP / DHCP / ZP time-sharing
+python3 tools/test_transport.py                  # Type 4 + replay
+python3 tools/test_session.py                    # state machine
+python3 tools/test_phase7.py                     # application layer
+python3 tools/test_disk_config.py                # WG.CFG parser
+python3 tools/test_phase8_psk.py                 # IKpsk2 PSK
+python3 tools/test_mtu.py                        # large payloads (16-bit lengths)
+python3 tools/test_tai64n.py                     # timestamps
+python3 tools/test_mac2_integration.py           # cookie → MAC2 end-to-end
+python3 tools/test_write_bytes_limit.py          # VICE write chunking
+
+# Live hardware (C64U/U64, DeviceLock-aware; needs U64_ALLOW_MUTATE=1):
+U64_ALLOW_MUTATE=1 python3 tools/test_uci_handshake_live.py --stage 3 --host <device-ip>
 ```
 
 All tests use the direct-memory `jsr()` pattern. Use `--seed N` to reproduce specific runs. The MTU suite uses a flag-based `jsr_flag()` that polls a completion flag instead of relying on VICE breakpoints, which become unreliable during long warp-mode computations (>~1000 byte payloads).
 
 ### Performance
 
-On real C64 hardware (~1 MHz), with REU-accelerated field arithmetic:
-- BLAKE2s compress: ~22 ms
-- ChaCha20 block: ~65 ms
-- Poly1305 block: ~110 ms
-- Field multiply (`fe25519_mul`): ~110 ms (REU DMA table lookup)
-- Field square (`fe25519_sqr`): ~83 ms (dedicated squaring with symmetry)
-- X25519 scalar multiply: ~3 minutes (255 ladder steps)
-- Full handshake (3 X25519 ops): ~9 minutes
+At 1 MHz (hardware-anchored numbers from the c64-x25519 v0.8.0 release and the v1.0.0 hardware runs):
 
-Optimizations imported from the [c64-x25519](https://github.com/JC-000/c64-x25519) project:
-- **REU DMA `fe25519_mul`**: Precomputed 128KB multiplication tables in REU expansion memory, fetched via DMA per outer loop iteration. Self-modifying accumulation addresses, 2x inner loop unroll. REU bank allocation is documented in [`src/crypto/shared/reu_layout.inc`](src/crypto/shared/reu_layout.inc), which also reserves bank-2 slots for future overlay-paged crypto modules.
-- **Dedicated `fe25519_sqr`**: Exploits a[i]*a[j] = a[j]*a[i] symmetry to halve cross-term multiplies. Uses mult66 indirect-indexed quarter-square multiply with shift-before-accumulate for implicit doubling.
-- **Self-modifying `fe25519_cswap`**: Patches absolute,Y addresses at entry to replace indirect-indexed loads. 4x loop unroll. 38 cycles/byte vs 49 cycles/byte.
-- **mul38 lookup tables**: 512-byte compile-time tables replace `jsr mul_8x8` in `fe25519_reduce_wide`. 8 cycles vs 58 cycles per byte (7x speedup, called ~720 times per scalarmult).
+- X25519 scalar multiply: **~4.3 min** (REU build, 262M cycles) / **~7.3 min** (no-REU build, constant-time on-chip multiply)
+- Full handshake wall-clock to `SESSION_ACTIVE`: **~23 min** measured on hardware (initiation ~14 min + Type-2 processing ~9 min; REU build, includes responder round-trips)
+- Type-4 transport encrypt/decrypt: ~1-2 s per small packet
+- Symmetric primitives (order of magnitude, in-tree-era measurements): BLAKE2s compress ~22 ms, ChaCha20 block ~65 ms, Poly1305 block ~110 ms
+
+The heavy lifting lives in the sibling libraries since v1.0.0 — REU DMA multiply tables (128 KB precompute, banks per [`src/crypto/shared/reu_layout.inc`](src/crypto/shared/reu_layout.inc)), dedicated squaring, SMC cswap, mul38 tables, and the constant-time `ct_mul_8x8` all come from [c64-x25519](https://github.com/JC-000/c64-x25519); the AEAD side from [c64-ChaCha20-Poly1305](https://github.com/JC-000/c64-ChaCha20-Poly1305) (rolled-outer multiply — the size/speed elbow WG opts into). On turbo hosts (Ultimate at 16-48 MHz) the no-REU build scales nearly linearly with clock; the REU build hits a DMA wall-clock floor.
 
 ## Architecture
 
@@ -220,11 +209,11 @@ Each packet is encrypted with ChaCha20-Poly1305 AEAD using the transport key der
 
 ### Networking
 
-UDP packets are sent and received via [ip65](https://github.com/cc65/ip65), driving the RR-Net CS8900a ethernet adapter. The ip65 library is built as a standalone binary blob (ca65/ld65) and linked into the final PRG at $2000 via ca65's `.incbin` directive in `src/net/ip65/ip65_blob.s`. A 10-entry jump table provides: init, process, DHCP, DNS, UDP add/remove listener, UDP send, and helper wrappers.
+Two interchangeable backends sit behind the `src/net_abi.inc` façade (`net_init`, `net_dhcp`, `net_poll`, `net_udp_listen`, `net_udp_send`, `net_udp_recv_cb`); higher-level modules (handshake, transport, session) only use these ABI names. Select with `make BACKEND=ip65|uci`.
 
-The UDP receive callback fires during `ip65_process` while ip65 owns the zero page. It copies incoming packet data to `udp_recv_buf` and sets a flag for the main loop — no crypto ZP is touched.
+**ip65 / RR-Net** (`BACKEND=ip65`, the default — VICE-testable): UDP via [ip65](https://github.com/cc65/ip65), driving the RR-Net CS8900a ethernet adapter. The ip65 library is built as a standalone binary blob (ca65/ld65) and linked into the final PRG at $2000 via ca65's `.incbin` directive in `src/net/ip65/ip65_blob.s`. A 10-entry jump table provides: init, process, DHCP, DNS, UDP add/remove listener, UDP send, and helper wrappers. The UDP receive callback fires during `ip65_process` while ip65 owns the zero page; it copies incoming data to `udp_recv_buf` and sets a flag for the main loop — no crypto ZP is touched.
 
-All ip65 calls go through the `src/net_abi.inc` façade (`net_init`, `net_dhcp`, `net_poll`, `net_udp_listen`, `net_udp_send`, `net_udp_recv_cb`). Higher-level modules (handshake, transport, session) use these ABI names rather than calling into ip65 directly — the same pattern `c64-https` uses for its UCI/ip65 backend swap. Dropping in the `c64-https` networking stack (proven on Ultimate 64 at 48 MHz / 1 MHz and on VICE at normal speed) is a link-line change only.
+**UCI** (`BACKEND=uci` — the hardware-proven backend for the milestone and v1.0.0 runs): the same ABI implemented over the Ultimate 64 / C64 Ultimate Command Interface sockets ($DF1B-$DF1F, `src/net/uci/`), no ip65 dependency. Firmware caveats: inbound `SOCKET_READ` is capped at 512 bytes (larger datagrams are truncated — #46 tracks pinning the WG MTU accordingly), and the busy-wait loops are currently unbounded (#45). See `docs/hardware-validation-runbook.md`.
 
 ### Session State Machine
 
