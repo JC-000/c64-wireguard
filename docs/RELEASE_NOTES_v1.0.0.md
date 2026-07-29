@@ -100,10 +100,14 @@ survives only in the non-shipped `USE_*_SIBLING=0` dev build.)
   the shipped default (ip65 + REU + siblings) at the release commit.
 - All four artifact variants + the legacy `0/0` build link clean with
   the contract asserts active.
-- Hardware validation: the 2026-07-21 milestone runs (handshake +
-  bidirectional transport) on C64 Ultimate fw 1.1.0 predate this
-  branch's crypto swap; the sibling implementations passed their own
-  hardware suites upstream (x25519 v0.8.0 oracle-gated RFC 7748 runs
-  on U64E + C64U; chacha v0.6.0 hardware bench/tests). A post-release
-  on-hardware smoke of the v1.0.0 UCI PRG is the first item in the
-  next hardware session.
+- **Hardware validation (2026-07-28, post-tag)**: the released
+  `wireguard-uci-reu.prg` (byte-identical rebuild) completed the full
+  stage-3 run on the C64 Ultimate (fw 1.1.0) over a remote link
+  (~65 ms RTT): Type-1 accepted (~14 min), `SESSION_ACTIVE` reached
+  (~23 min total), and the encrypted Type-4 round-trip passed in both
+  directions ("HELLO WIREGUARD" out / "PONG-FROM-PY-C64" back) —
+  `tools/test_uci_handshake_live.py --stage 3`, PASS. This is the
+  first hardware run with the sibling crypto as the linked
+  implementation. The sibling libraries additionally carry their own
+  upstream hardware suites (x25519 v0.8.0 oracle-gated RFC 7748 on
+  U64E + C64U; chacha v0.6.0 hardware bench/tests).
