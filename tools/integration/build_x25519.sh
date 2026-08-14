@@ -17,11 +17,22 @@
 #                           stock C64; ~1.7x slower scalarmult at 1 MHz
 #
 # Defines passed to every library TU:
-#   -D LIB_SHARED_SQTAB_BASE=$8000  WG's sqtab window is $8000-$83FF (the
+#   -D LIB_SHARED_SQTAB_BASE=32768  WG's sqtab window is $8000-$83FF (the
 #       cfg hole). The library default is $7800 — without this override
-#       sqtab_init would clobber the top of MAIN_AREA_LO. ca65 gotcha:
-#       X25519_ONCHIP_MUL must be spelled `=1`; a bare -D defines it 0 and
-#       silently builds the REU profile.
+#       sqtab_init would clobber the top of MAIN_AREA_LO.
+#       DECIMAL, NOT $8000 — see the FLAGS block below. Writing the hex
+#       form here would be copied into a command line and silently build
+#       the table over zero page, the stack and the IRQ vector.
+#       Separate ca65 gotcha: X25519_ONCHIP_MUL must be spelled `=1`; a
+#       bare -D defines it 0 and silently builds the REU profile.
+#   -D LIB_NO_BARE_EXPORTS=1        contract SPEC §1/§8.4. Suppresses the
+#       DEPRECATED unprefixed exports (LIB_VERSION_*, LIB_ABI_VERSION,
+#       LIB_PRECALC_<name>_*) that every contract library emits identically,
+#       leaving only the LIB_X25519_*-prefixed forms. Mandatory for a
+#       consumer linking two or more contract libraries: without it, ld65
+#       rejects the link with "Duplicate external identifier" as soon as
+#       both manifests enter it. The chacha ingestion script passes the
+#       same define — the two MUST agree or the collision returns.
 #
 # Separate BUILD_DIRs per profile so switching REU=1 <-> REU=0 can never
 # reuse stale objects assembled under the other profile's defines.
@@ -48,11 +59,11 @@ PROFILE="${X25519_PROFILE:-default}"
 case "$PROFILE" in
     default)
         BUILD_DIR="build"
-        FLAGS='-D LIB_SHARED_SQTAB_BASE=32768'
+        FLAGS='-D LIB_SHARED_SQTAB_BASE=32768 -D LIB_NO_BARE_EXPORTS=1'
         ;;
     onchip)
         BUILD_DIR="build-onchip"
-        FLAGS='-D X25519_ONCHIP_MUL=1 -D LIB_SHARED_SQTAB_BASE=32768'
+        FLAGS='-D X25519_ONCHIP_MUL=1 -D LIB_SHARED_SQTAB_BASE=32768 -D LIB_NO_BARE_EXPORTS=1'
         ;;
     *)
         echo "error: X25519_PROFILE must be 'default' or 'onchip' (got '$PROFILE')" >&2
@@ -73,12 +84,28 @@ make -C "$LIB_ROOT" lib \
 mkdir -p "$OUT_DIR"
 cp "$LIB_ROOT/$BUILD_DIR/lib/libx25519.a" "$ARCHIVE"
 
-# Version sanity (od65 instead of link-time .import: the unprefixed
-# LIB_VERSION_* equates collide between siblings if both lib_version.o
-# members enter the link — contract gap, see c64-lib-contract SPEC §1).
+# Version sanity. Checks the PREFIXED symbol: under LIB_NO_BARE_EXPORTS the
+# unprefixed LIB_VERSION_MAJOR no longer exists, so grepping for it would
+# warn on every successful build.
+#
+# The collision that forced this out-of-band (both siblings exporting the
+# same unprefixed LIB_VERSION_* / LIB_PRECALC_* names, so only one manifest
+# could enter the link) was fixed upstream in x25519 v0.9.0 + chacha v0.7.0
+# per c64-lib-contract SPEC §1/§8.4. A link-time `.import
+# LIB_X25519_VERSION_MAJOR` + `.assert` in src/contract_asserts.s is now
+# possible and strictly better; this check is kept as a cheap build-time
+# canary that the archive was assembled with the expected define set at all.
 ver_dump=$(od65 --dump-exports "$LIB_ROOT/$BUILD_DIR/lib/lib_version.o" 2>/dev/null || true)
-if ! grep -q '"LIB_VERSION_MAJOR"' <<<"$ver_dump"; then
+if ! grep -q '"LIB_X25519_VERSION_MAJOR"' <<<"$ver_dump"; then
     echo "warning: could not verify x25519 lib version via od65" >&2
+fi
+# The bare forms MUST be absent — their presence means LIB_NO_BARE_EXPORTS
+# did not reach ca65, and the two-sibling link will fail at ld65 with
+# "Duplicate external identifier" once the chacha manifest joins it.
+if grep -q '"LIB_VERSION_MAJOR"' <<<"$ver_dump"; then
+    echo "ERROR: x25519 archive still exports the bare LIB_VERSION_MAJOR —" >&2
+    echo "       LIB_NO_BARE_EXPORTS=1 did not take effect (SPEC §1)." >&2
+    exit 1
 fi
 
 echo "built $ARCHIVE (profile: $PROFILE)"
