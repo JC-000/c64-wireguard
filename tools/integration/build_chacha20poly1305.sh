@@ -9,37 +9,41 @@
 # this library defers both:
 #   -D SHARED_SQTAB_INIT=1    drops the lib's sqtab_init export, imports
 #                             mul_tables_init (satisfied by x25519)
-#   -D SHARED_CT_MUL_8X8=1    clears the §8.3 manifest bit
+#   -D SHARED_CT_MUL_8X8=1    clears the §8.3 manifest bit AND gates the
+#                             mul_8x8 / poly_prod_* exports (v0.7.0, #47)
 #   -D POLY1305_MULTIPLY_ROLLED_OUTER=1
 #                             size elbow: -8 KB linked, +4.08% cycles on
 #                             aead_encrypt n=1024 (right trade for WG)
+#   -D LIB_NO_BARE_EXPORTS=1  contract SPEC §1/§8.4 — suppress the
+#                             deprecated unprefixed LIB_VERSION_* /
+#                             LIB_PRECALC_<name>_* exports so this archive
+#                             and x25519's can co-link. build_x25519.sh
+#                             passes the same define; the two MUST agree.
 # LIB_SHARED_SQTAB_BASE stays at the lib default $8000 == WG's window.
 #
-# Segments: the lib has not adopted contract §4 yet (upstream issue #48) —
-# it emits bare CODE / DATA, which WG's cfg maps directly (WG's own boot
-# code moved to BOOT_CODE to free the names). CODE carries the two
-# page-aligned nibswap LUTs read on secret indexes: the cfg MUST keep
-# align=$100 on CODE or constant-time is silently lost. DATA cells must
-# PRG-load as zero, so DATA stays type=rw in a file-emitting region.
+# Segments (contract §4, adopted upstream in v0.7.0 — issue #48 CLOSED):
+# the library now emits LIB_CHACHA20_POLY1305_CODE / _DATA and puts ZERO
+# bytes in bare CODE / DATA (measured at v0.7.0: 8094 B of _CODE across
+# five members, 295 B of _DATA; the bare names appear in the segment table
+# at size 0, as ca65 always lists them).
 #
-# INTERIM member swap (upstream issue #47): SHARED_CT_MUL_8X8=1 gates the
-# manifest bit but not the legacy mul_8x8 / poly_prod_lo / poly_prod_hi
-# exports, which collide with x25519's — ld65: "Duplicate external
-# identifier". Until #47 lands we re-assemble poly1305_lib.s with those
-# two .export lines wrapped in .ifndef SHARED_CT_MUL_8X8 and swap the
-# member in OUR COPY of the archive (the submodule tree and the library's
-# own build output are never touched). The swap auto-disables itself once
-# upstream ships the gate.
+#   *** CT HAZARD — the align=$100 requirement MOVED WITH THE BYTES. ***
+#   The two page-aligned nibswap LUTs read on secret indexes now live in
+#   LIB_CHACHA20_POLY1305_CODE (data_lib.o contributes 512 B of it, and the
+#   object declares Alignment: 256). It is THAT segment the cfg must place
+#   with align = $100 — an align on the now-empty bare CODE protects
+#   nothing. ld65 only WARNS on an under-aligned segment, so getting this
+#   wrong loses constant-time silently. WG's cfgs still describe the old
+#   arrangement; see cfg/c64-wireguard-*.cfg.
 # =============================================================================
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 LIB_ROOT="$PROJECT_ROOT/libs/chacha20poly1305"
 OUT_DIR="$PROJECT_ROOT/build/lib"
-STAGING="$OUT_DIR/chacha_staging"
 ARCHIVE="$OUT_DIR/chacha20poly1305.a"
 
-DEFS='-D SHARED_SQTAB_INIT=1 -D SHARED_CT_MUL_8X8=1 -D POLY1305_MULTIPLY_ROLLED_OUTER=1'
+DEFS='-D SHARED_SQTAB_INIT=1 -D SHARED_CT_MUL_8X8=1 -D POLY1305_MULTIPLY_ROLLED_OUTER=1 -D LIB_NO_BARE_EXPORTS=1'
 
 # Force a full sibling rebuild: their Makefile tracks source timestamps,
 # not the CA65 override's define set, so a define change would silently
@@ -51,40 +55,26 @@ make -C "$LIB_ROOT" lib CA65="ca65 $DEFS"
 mkdir -p "$OUT_DIR"
 cp "$LIB_ROOT/build/lib/c64-chacha20-poly1305.a" "$ARCHIVE"
 
-# --- Interim export-gating member swap (issue #47) ---
-SRC="$LIB_ROOT/src/lib/poly1305_lib.s"
-if grep -q '^\.ifndef SHARED_CT_MUL_8X8$' "$SRC"; then
-    echo "upstream #47 gate detected in poly1305_lib.s — skipping member swap"
-else
-    rm -rf "$STAGING"
-    mkdir -p "$STAGING"
-    # Gate exactly the two unconditional export lines; anything else is a
-    # layout change upstream and must fail loudly rather than mis-patch.
-    for pat in '^\.export poly_prod_lo, poly_prod_hi$' '^\.export mul_8x8$'; do
-        if [[ $(grep -c "$pat" "$SRC") -ne 1 ]]; then
-            echo "ERROR: expected exactly one line matching $pat in $SRC" >&2
-            echo "       (upstream layout changed — revisit issue #47 status)" >&2
-            exit 1
-        fi
-    done
-    sed -e 's/^\.export poly_prod_lo, poly_prod_hi$/.ifndef SHARED_CT_MUL_8X8\n.export poly_prod_lo, poly_prod_hi\n.endif/' \
-        -e 's/^\.export mul_8x8$/.ifndef SHARED_CT_MUL_8X8\n.export mul_8x8\n.endif/' \
-        "$SRC" > "$STAGING/poly1305_lib_gated.s"
-    ca65 -t c64 -g \
-        -I "$LIB_ROOT/src/include" -I "$LIB_ROOT/src/lib" -I "$LIB_ROOT/src" \
-        $DEFS \
-        "$STAGING/poly1305_lib_gated.s" -o "$STAGING/poly1305_lib.o"
-    ar65 d "$ARCHIVE" poly1305_lib.o
-    ar65 a "$ARCHIVE" "$STAGING/poly1305_lib.o"
-fi
+# The interim poly1305_lib.o member swap that lived here is GONE. It gated
+# the legacy mul_8x8 / poly_prod_lo / poly_prod_hi exports behind
+# `.ifndef SHARED_CT_MUL_8X8` to stop them colliding with x25519's; upstream
+# shipped exactly that gate in v0.7.0 (issue #47), so the swap had already
+# become a no-op via its own probe before being deleted here.
 
 # --- Build-time manifest verification (od65) ---
-# The link-time contract asserts (src/contract_asserts.s) can only pull
-# ONE archive's manifest member — both export unprefixed common symbols
-# (LIB_PRECALC_sqtab_*, LIB_VERSION_*) that collide. So the chacha-side
-# §3/§8.0 obligations are checked here instead, numerically:
+# Historically this was the ONLY place the chacha-side §3/§8.0 obligations
+# could be checked: both archives exported the same unprefixed symbols
+# (LIB_PRECALC_sqtab_*, LIB_VERSION_*), so src/contract_asserts.s could pull
+# only ONE manifest member into the link. v0.7.0 + x25519 v0.9.0 fixed that
+# (SPEC §1/§8.4), and with LIB_NO_BARE_EXPORTS both manifests now co-link,
+# so these are ALSO expressible as link-time asserts. Kept here as a cheap
+# fail-fast that runs before the 30-min build/test cycle:
 #   REU_BANKS_USED must be $00 (zero REU DMA since v0.6.0)
 #   SHARED_PRIMITIVES must be $0000 (both bits deferred to x25519)
+# NOTE: LIB_CHACHA20_POLY1305_SHARED_CONSUMES (new in v0.7.0) is $0005 here,
+# NOT zero — it must never be added to the zero-checking loop below. It is
+# the mask that lets the consumer assert every deferred primitive still has
+# an owner in the link; that check belongs in src/contract_asserts.s.
 manifest_dump=$(od65 --dump-exports "$LIB_ROOT/build/lib/objs/lib_manifest.o")
 for sym in LIB_CHACHA20_POLY1305_REU_BANKS_USED LIB_CHACHA20_POLY1305_SHARED_PRIMITIVES; do
     hex=$(grep -A1 "\"$sym\"" <<<"$manifest_dump" | sed -n 's/.*Value:[[:space:]]*0x\([0-9A-Fa-f]*\).*/\1/p')
@@ -98,9 +88,20 @@ for sym in LIB_CHACHA20_POLY1305_REU_BANKS_USED LIB_CHACHA20_POLY1305_SHARED_PRI
     fi
 done
 
+# Version sanity. Checks the PREFIXED symbol: under LIB_NO_BARE_EXPORTS the
+# unprefixed LIB_VERSION_MAJOR no longer exists, so grepping for it would
+# warn on every successful build.
 ver_dump=$(od65 --dump-exports "$LIB_ROOT/build/lib/objs/lib_version.o" 2>/dev/null || true)
-if ! grep -q '"LIB_VERSION_MAJOR"' <<<"$ver_dump"; then
+if ! grep -q '"LIB_CHACHA20_POLY1305_VERSION_MAJOR"' <<<"$ver_dump"; then
     echo "warning: could not verify chacha lib version via od65" >&2
+fi
+# The bare forms MUST be absent — their presence means LIB_NO_BARE_EXPORTS
+# did not reach ca65, and the two-sibling link will fail at ld65 with
+# "Duplicate external identifier" once both manifests enter it.
+if grep -q '"LIB_VERSION_MAJOR"' <<<"$ver_dump"; then
+    echo "ERROR: chacha archive still exports the bare LIB_VERSION_MAJOR —" >&2
+    echo "       LIB_NO_BARE_EXPORTS=1 did not take effect (SPEC §1)." >&2
+    exit 1
 fi
 
 echo "built $ARCHIVE (Profile B, rolled-outer, sqtab+ct_mul deferred to x25519)"

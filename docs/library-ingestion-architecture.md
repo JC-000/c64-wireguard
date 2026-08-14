@@ -1,16 +1,14 @@
 # Library-ingestion architecture
 
 How c64-wireguard consumes the sibling crypto libraries `c64-x25519`
-(v0.8.0) and `c64-ChaCha20-Poly1305` (v0.6.0) **as the shipped
+(v0.10.1) and `c64-ChaCha20-Poly1305` (v0.7.0) **as the shipped
 default**, linking the libraries' own contract-§6 archive products with
-zero source staging (one documented interim exception).
+zero source staging: each sibling builds itself via its own `make lib`
+target, and WG links the resulting `.a` unmodified.
 
 The companion piece is the [c64-lib-contract](https://github.com/JC-000/c64-lib-contract)
-repo (SPEC v0.4.1), which pins the cross-project ZP / REU / segment /
-shared-primitive conventions. The pre-release staged-source pipeline
-(PRs #35-#38, submodule pins x25519 v0.6.0 / chacha `8cc3ab3`) is
-retired; see git history of this file and of
-`tools/integration/*.sh` for that design.
+repo (SPEC v0.7.5), which pins the cross-project ZP / REU / segment /
+shared-primitive conventions.
 
 ## Scope
 
@@ -27,19 +25,19 @@ debugging a duplicate-symbol / unresolved-import link error.
 | `USE_CHACHA_SIBLING` | **1** | `c64-ChaCha20-Poly1305` (`libs/chacha20poly1305`) | `.gitmodules` |
 
 The toggles must match (both 1 or both 0); the Makefile refuses mixed
-configs. That is new versus the staged-source era, where each toggle
-composed independently: the archives now cross-resolve — x25519
-provides `sqtab_init`/`mul_tables_init` and the §8.3 `ct_mul_8x8`
-body, chacha defers to it — so a half-on link hits duplicate-export
-(x25519 + in-tree poly1305 both export `mul_8x8`/`sqtab_init`) or
-unresolved-import (chacha's deferred `mul_tables_init` with no x25519)
-errors. `0/0` remains the legacy all-in-tree dev build.
+configs. The two archives cross-resolve — x25519 provides
+`sqtab_init`/`mul_tables_init` and the §8.3 `ct_mul_8x8` body, and
+chacha is built to defer to it — so a half-on link fails either way:
+duplicate-export (x25519 and the in-tree poly1305 both exporting
+`mul_8x8`/`sqtab_init`) or unresolved-import (chacha's deferred
+`mul_tables_init` with no x25519 to supply it). `0/0` is the legacy
+all-in-tree dev build.
 
 ## §8.0 composition: who owns what
 
 | Shared primitive | Provider | Mechanism |
 | --- | --- | --- |
-| §8.1 sqtab (1 KB quarter-square table at `$8000`) | c64-x25519 | `sqtab_init`/`mul_tables_init` exported in both profiles; both libs assemble with `LIB_SHARED_SQTAB_BASE=$8000` (x25519's default is `$7800` — the override is load-bearing) |
+| §8.1 sqtab (1 KB quarter-square table at `$8000`) | c64-x25519 | `sqtab_init`/`mul_tables_init` exported in both profiles; both libs assemble with `LIB_SHARED_SQTAB_BASE=32768` (= `$8000`; x25519's default is `$7800`, so the override is load-bearing — and it must be written in **decimal**, see below) |
 | §8.2 reu_mul (REU DMA row tables) | c64-x25519 (REU profile only) | absent entirely under `REU=0` (onchip profile) |
 | §8.3 `ct_mul_8x8` (constant-time multiply) | c64-x25519 | chacha built with `-D SHARED_CT_MUL_8X8=1`; x25519's body is the canonical CT implementation, byte-identical to chacha's internal one |
 
@@ -56,18 +54,31 @@ into its archive but is unreferenced in the link.
 
 ## Verification layers
 
-1. **Link-time** — `src/contract_asserts.s`: REU bank masks disjoint
-   (x25519 vs WG's own claims), x25519 owns `$0005` minimum,
-   `LIB_ABI_VERSION = 1`. Uses `&`, never `.and` (boolean in ca65 —
-   contract issue #41).
-2. **Archive-build-time** — `tools/integration/build_chacha20poly1305.sh`
-   verifies chacha's `REU_BANKS_USED=$00` and `SHARED_PRIMITIVES=$0000`
-   numerically via `od65 --dump-exports`. Done there, not at link,
-   because both archives' manifest members export unprefixed common
-   symbols (`LIB_PRECALC_sqtab_*`, `LIB_VERSION_*`) that collide if
-   both are pulled — contract issue #43.
-3. **ABI drift** — `tools/check_abi_drift.py` (unchanged): imports in
-   `src/crypto_abi.inc` vs sibling exports.
+1. **Link-time** — `src/contract_asserts.s` imports **both** libraries'
+   manifests and checks the whole composition:
+   - §3 REU bank masks pairwise disjoint across x25519, chacha and WG's
+     own claims.
+   - §8.0 no double ownership of a shared primitive.
+   - §8.0 (SPEC v0.5.0) **coverage**: every primitive any library
+     declares it *consumes* has exactly one owner in the link —
+     `((A_CONSUMES | B_CONSUMES) & ~(A_OWNED | B_OWNED)) = 0`. This is
+     the assert that matters most for WG's composition: chacha defers
+     both its primitives to x25519, so the failure it guards is an
+     x25519 profile change silently dropping an ownership bit, which
+     would otherwise surface as a table read with no init.
+   - §8.0 subset invariant per library (`OWNED & ~CONSUMES = 0`).
+   - §1 per-library ABI pins: `LIB_X25519_ABI_VERSION = 2` and
+     `LIB_CHACHA20_POLY1305_ABI_VERSION = 1`.
+
+   Both libraries are built with `-D LIB_NO_BARE_EXPORTS=1` so each
+   exports only its `LIB_<X>_`-prefixed manifest. That is what lets one
+   translation unit import both. Masks are combined with `&`, never
+   `.and` — `.and` is *boolean* in ca65, so it evaluates true whenever
+   both operands are nonzero and inverts the meaning of every
+   disjointness check.
+2. **ABI drift** — `tools/check_abi_drift.py`: imports declared in
+   `src/crypto_abi.inc` versus what the sibling archives actually
+   export.
 
 ## Integration scripts
 
@@ -76,24 +87,33 @@ Both scripts invoke the sibling's own Makefile and copy the archive to
 make is the incrementality layer).
 
 **`build_x25519.sh`** — `make -C libs/x25519 lib` with
-`CA65FLAGS='-D LIB_SHARED_SQTAB_BASE=$8000'`, plus
-`-D X25519_ONCHIP_MUL=1` under `X25519_PROFILE=onchip` (WG `REU=0`).
-Separate sibling `BUILD_DIR`s per profile (`build` / `build-onchip`)
-so profile switches can never reuse stale objects. ca65 gotcha: a bare
-`-D X25519_ONCHIP_MUL` defines the symbol **0** and silently builds
-the REU profile — always `=1`.
+`CA65FLAGS='-D LIB_SHARED_SQTAB_BASE=32768 -D LIB_NO_BARE_EXPORTS=1'`,
+plus `-D X25519_ONCHIP_MUL=1` under `X25519_PROFILE=onchip` (WG
+`REU=0`). Separate sibling `BUILD_DIR`s per profile
+(`build` / `build-onchip`) so profile switches can never reuse stale
+objects.
+
+Two ca65/make traps this flag list exists to avoid, both of which fail
+**silently**:
+
+- **Write the sqtab base in decimal.** `32768`, never `$8000`. The
+  value crosses WG's make, the sibling's make, *and* `/bin/sh` before
+  ca65 sees it: `$8000` loses `$8` to make (`$(8)` is empty) and
+  `$$8000` is then eaten by the shell as a positional parameter.
+  Either way ca65 receives `BASE=000` and `sqtab_init` builds its
+  table over zero page, the stack and the IRQ vector at boot — the
+  observed signature is `($0314) = $4A4A` followed by a KIL jam.
+  Decimal has no metacharacters and survives both layers.
+- **Always write `=1` on the profile switch.** A bare
+  `-D X25519_ONCHIP_MUL` defines the symbol as **0**, which builds the
+  REU profile while the build log looks like it asked for onchip.
 
 **`build_chacha20poly1305.sh`** — `make -C libs/chacha20poly1305 lib`
-with the deferral + `POLY1305_MULTIPLY_ROLLED_OUTER=1` defines passed
-via `CA65=` override (their `CA65FLAGS` is `=`-assigned, not `?=`).
-Carries the one interim staging step: upstream
-[#47](https://github.com/JC-000/c64-ChaCha20-Poly1305/issues/47)
-(`SHARED_CT_MUL_8X8=1` doesn't gate the legacy `mul_8x8` /
-`poly_prod_lo/hi` exports, which collide with x25519's) is worked
-around by re-assembling `poly1305_lib.s` with the two export lines
-gated and swapping the member in WG's copy of the archive. The swap
-detects an upstreamed fix and disables itself; the guard fails loudly
-if the source layout drifts.
+with the deferral defines, `POLY1305_MULTIPLY_ROLLED_OUTER=1` and
+`LIB_NO_BARE_EXPORTS=1`, passed via a `CA65=` override (their
+`CA65FLAGS` is `=`-assigned, not `?=`, so `CA65FLAGS=` on the command
+line would be discarded). The archive is copied to `build/lib/`
+unmodified — no member rewriting, no source staging.
 
 ## Linker-config mapping
 
@@ -107,16 +127,23 @@ Both `cfg/c64-wireguard-{ip65,uci}.cfg` carry the same segment set:
   826 B REU / 160 B onchip). Ordering rule: `LIB_X25519_INIT_CODE`
   must stay the last file-emitting segment in its area, before any
   bss segment.
-- **chacha (no §4 upstream yet — issue
-  [#48](https://github.com/JC-000/c64-ChaCha20-Poly1305/issues/48))**:
-  the lib emits bare `CODE`/`DATA`, so WG **cedes those names**: WG's
-  own boot + net-wrapper code moved to `BOOT_CODE` (which must stay
-  first after `EXEHDR` — the BASIC stub hardcodes SYS 2061 = `start:`
-  at $080D). `CODE` maps to MAIN_AREA_LO with **`align=$100` — a
-  constant-time requirement**, not cosmetic: the nibswap LUTs inside
-  it are read with `lda tab,x` on secret indexes and ld65 only warns
-  if alignment is dropped. `DATA` (295 B) must PRG-load as zero
-  (`sqtab_ready` gate), hence rw in a zero-filled file region.
+- **chacha (§4-prefixed since v0.7.0)**:
+  `LIB_CHACHA20_POLY1305_CODE` (rw, MAIN_AREA_LO, 8094 B) with
+  **`align=$100` — a constant-time requirement**, not cosmetic: the
+  two nibswap LUTs inside it are read with `lda tab,x` on *secret*
+  indexes, and ld65 only *warns* if the alignment is dropped, so the
+  link still succeeds and the CT property is lost silently. And
+  `LIB_CHACHA20_POLY1305_DATA` (rw, 295 B), which **must never be
+  declared `type=bss`**: its zero bytes gate `poly1305_init`'s
+  `sqtab_ready` check, and a bss declaration emits no file bytes, so
+  the gate reads power-on garbage, `sqtab_init` is skipped, and every
+  Poly1305 multiply is poisoned — again with no link error.
+- WG's own boot + net-wrapper code lives in `BOOT_CODE`, which must
+  stay the first code segment after `EXEHDR`: the BASIC stub hardcodes
+  SYS 2061 = `start:` at `$080D`. (The bare `CODE`/`DATA` names are
+  free as of chacha v0.7.0 and are declared `optional` and empty, but
+  moving `BOOT_CODE` back onto `CODE` buys nothing and risks the entry
+  point — leave it.)
 - The `$8000-$83FF` sqtab hole remains reserved in both cfgs; nothing
   may be placed there.
 
@@ -137,8 +164,8 @@ names, all satisfied by `src/exports.s`. Highlights:
   `fe_wide` ($40-$7F). Safe: DH and AEAD calls never overlap in time,
   and neither buffer carries state across calls.
 - `ct_diff_raw`/`ct_sign_mask` ($1e/$1f): exported unconditionally;
-  consumed by chacha's internal CT body. (x25519 v0.8.0 keeps its own
-  copies as static bytes inside `LIB_X25519_CODE` — zero ZP cost.)
+  consumed by chacha's internal CT body. (x25519 keeps its own copies
+  as static bytes inside `LIB_X25519_CODE` — zero ZP cost.)
 
 ### REU banks
 
@@ -147,8 +174,9 @@ Authoritative ledger: `src/crypto/shared/reu_layout.inc`.
 - `REU=1`: x25519 claims banks 0,1,3,4,5 (`$3B`). Bank 2 (WG overlay
   store) stays free.
 - `REU=0`: x25519 onchip claims **nothing** (`$00`); chacha claims
-  nothing in any profile since v0.6.0 (the `POLY1305_REU` path was
-  removed upstream). The PRG issues no REU DMA at all.
+  nothing in any profile. The PRG issues no REU DMA at all, and
+  `reu_mul_init` / `reu_fetch_mul_row` are absent from the link
+  entirely — the onchip profile builds no REU table to initialise.
 - WG's own claims are `$00` today (overlay store is
   reserved-not-allocated); `src/contract_asserts.s` composes all
   three masks.
@@ -162,9 +190,12 @@ Authoritative ledger: `src/crypto/shared/reu_layout.inc`.
    Update the integration script header — it is the load-bearing
    record of *why* each define is passed.
 3. `make clean && make` (and `make REU=0`) — must build clean; the
-   od65 manifest checks and link-time asserts are the tripwires.
+   link-time composition asserts are the tripwires.
 4. `python3 tools/check_abi_drift.py` — must exit 0.
-5. `python3 tools/run_regression.py` — must pass.
+5. `python3 tools/run_regression.py` — must pass (22 suites as of
+   2026-08-14; the list previously covered only 13 of the 27
+   `tools/test_*.py` scripts, so a suite passing locally was not
+   necessarily a suite the gate ran).
 6. Commit bump + script changes together; call out size/knob deltas.
 
 ## Adding a third sibling
@@ -187,15 +218,20 @@ points. They are no longer shipped, and the in-tree `poly1305.s`
 
 ## References
 
-- c64-x25519 v0.8.0 release notes (`libs/x25519/docs/RELEASE_NOTES_v0.8.0.md`)
-  — §4 rename, cold split, onchip profile, consumer-cfg migration.
-- c64-ChaCha20-Poly1305 v0.6.0 `CHANGELOG.md` + `docs/INTEGRATION.md`
-  — POLY1305_REU removal, zp_config header, archive targets.
+- c64-x25519 release notes (`libs/x25519/docs/`) — the v0.8.0 notes
+  cover the §4 rename, cold split and onchip profile; v0.9.0 the
+  contract v0.7.0/v0.5.0 manifest migration; v0.10.0 the
+  `LIB_X25519_ABI_VERSION` 1→2 erratum (generation counter catching up
+  with v0.9.0's export removal — no code change); v0.10.1 a docs/snippet
+  sweep, also no code change (its PRG is byte-identical all the way back
+  to v0.8.0).
+- c64-ChaCha20-Poly1305 `CHANGELOG.md` + `docs/INTEGRATION.md` — v0.7.0
+  brought §4 segment prefixes, the prefixed manifest exports and the
+  `SHARED_CT_MUL_8X8` deferral gate.
 - [c64-lib-contract](https://github.com/JC-000/c64-lib-contract)
-  SPEC v0.4.1 §§1-8; WG-filed issues
-  [#41](https://github.com/JC-000/c64-lib-contract/issues/41) (`.and`
-  defect), [#43](https://github.com/JC-000/c64-lib-contract/issues/43)
-  (unprefixed manifest collisions).
+  SPEC v0.7.5 §§1-8 — §1 prefixed version exports and the
+  `LIB_NO_BARE_EXPORTS` gate, §5 aggregate manifests, §8.0 three-state
+  ownership semantics and the coverage assert, §8.4 the precalc-table
+  macro.
 - `src/contract_asserts.s`, `tools/integration/*.sh`,
   `tools/check_abi_drift.py` — the verification layers.
-- PRs #35-#38 — the retired staged-source pipeline (git history).

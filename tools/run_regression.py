@@ -33,6 +33,47 @@ TESTS = [
     ("mtu",        ["tools/test_mtu.py", "--seed", "1500"]),
     ("tai64n",     ["tools/test_tai64n.py", "--verbose"]),
     ("mac2",       ["tools/test_mac2_integration.py", "--verbose"]),
+    # Added 2026-08-14. These are ordinary VICE suites that were simply never
+    # listed here, so the gate documented in docs/library-ingestion-architecture.md
+    # ("run_regression.py must pass") covered 13 of the 27 tools/test_*.py
+    # scripts. Two of the omissions mattered: blake2s_keylen (the Bug #2
+    # regression test — a regression test outside the gate stops protecting
+    # anything) and build_both_backends (the only suite validating labels.txt
+    # format; it had been failing since the v0.8.0 pin landed in v1.0.0 and
+    # nothing reported it).
+    ("blake2s_keylen", ["tools/test_blake2s_keylen_regression.py"]),
+    ("replay_window",  ["tools/test_replay_window.py"]),
+    ("key_rotation",   ["tools/test_key_rotation.py"]),
+    ("endpoint_update",["tools/test_endpoint_update.py"]),
+    ("type2_slow",     ["tools/test_type2_slow.py"]),
+    # NOT listed, deliberately: tools/test_uci_*_live.py and
+    # tools/test_wg_responder*.py need real hardware or a live responder.
+]
+
+# Suites that MUTATE the shared build tree. These CANNOT run in the parallel
+# pool: while they rebuild, build/wireguard.prg and build/labels.txt are
+# transiently absent or half-written, and whichever concurrent suite happens to
+# read them fails with a FileNotFoundError that has nothing to do with the code
+# under test. The failure is timing-dependent, so it passes often enough to look
+# fine — it bit us only once these suites were added to the gate.
+#
+# Two distinct reasons a suite lands here:
+#   * ignores C64_SKIP_BUILD and runs `make` regardless (x25519, write_bytes)
+#   * needs a tree built differently from the pool's default: uci_stub requires
+#     BACKEND=uci, and both_backends rebuilds every backend in turn
+#
+# uci_stub previously "passed" in the pool only by accident — both_backends
+# happened to run first and leave a BACKEND=uci tree behind. It was never
+# actually testing against a tree it had asked for.
+#
+# They run sequentially after the pool drains, and WITHOUT C64_SKIP_BUILD so
+# each builds exactly what it needs. The tree is restored to the default
+# afterwards.
+SERIAL_TESTS = [
+    ("x25519",         ["tools/test_x25519.py"]),
+    ("write_bytes",    ["tools/test_write_bytes_limit.py"]),
+    ("uci_stub",       ["tools/test_uci_backend_stub.py"]),
+    ("both_backends",  ["tools/test_build_both_backends.py"]),
 ]
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -95,7 +136,7 @@ def main():
     env = os.environ.copy()
     env["C64_SKIP_BUILD"] = "1"
 
-    print(f"Running {len(TESTS)} suites  "
+    print(f"Running {len(TESTS)} parallel + {len(SERIAL_TESTS)} serial suites  "
           f"(max {MAX_PARALLEL} concurrent, {STAGGER_SECONDS:.0f}s stagger)\n")
 
     pending = list(TESTS)
@@ -119,6 +160,25 @@ def main():
         running = reap(running, results)
         time.sleep(POLL_SECONDS)
 
+    # Build-tree mutators, one at a time, only once the pool is empty. No
+    # C64_SKIP_BUILD: each of these needs to build the tree it actually tests.
+    serial_env = os.environ.copy()
+    serial_env.pop("C64_SKIP_BUILD", None)
+    for name, cmd in SERIAL_TESTS:
+        proc = launch(name, cmd, serial_env)
+        pending_one = [(name, proc, time.monotonic())]
+        while pending_one:
+            pending_one = reap(pending_one, results)
+            if pending_one:
+                time.sleep(POLL_SECONDS)
+
+    if SERIAL_TESTS:
+        # Those suites left the tree on whichever backend they built last.
+        # Restore the default so a subsequent `make run` or manual test does
+        # not silently use it.
+        subprocess.run(["make", "clean"], capture_output=True)
+        subprocess.run(["make"], capture_output=True)
+
     print("\n" + "=" * 70)
     all_ok = True
     for name, (rc, out) in results.items():
@@ -135,7 +195,7 @@ def main():
 
     print("=" * 70)
     if all_ok:
-        print(f"All {len(TESTS)} suites passed!")
+        print(f"All {len(TESTS) + len(SERIAL_TESTS)} suites passed!")
     else:
         print("\nFailed suites:")
         for name, (rc, out) in results.items():

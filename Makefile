@@ -41,8 +41,9 @@ endif
 #   0,1,3,4,5; fastest at 1 MHz (~4.3 min scalarmult). Requires an REU
 #   (real 1750-class, or Ultimate REU emulation).
 # REU=0: X25519_ONCHIP_MUL profile — zero REU anywhere in the PRG
-#   (chacha v0.6.0 issues no REU DMA on any path either); runs on a
-#   stock C64. ~1.7x slower scalarmult at 1 MHz.
+#   (chacha v0.7.0 issues no REU DMA on any path either — its
+#   LIB_CHACHA20_POLY1305_REU_BANKS_USED is $00); runs on a stock C64.
+#   ~1.7x slower scalarmult at 1 MHz.
 # Only meaningful with the siblings ON (the in-tree fe25519 is REU-only).
 REU ?= 1
 
@@ -193,6 +194,16 @@ $(PRG): $(PRG_DEPS) | $(BUILD_DIR)
 	$(LD65) $(LD65FLAGS) -o $@ $(CA65_OBJS) $(SIBLING_ARCHIVES)
 	# Rewrite ca65 label format `al XXXXXX .name` -> VICE format
 	# `al C:XXXX .name` so c64-test-harness Labels.from_file() can parse.
+	#
+	# Drop labels whose value exceeds $$FFFF first. VICE's `al C:XXXX` form is
+	# 16-bit, so a far symbol has no valid representation and the rewrite below
+	# would leave it malformed. The offenders are the contract §8.4 precalc
+	# `_SIZE` equates, which the canonical macro exports WITHOUT an address-size
+	# hint precisely so oversized tables (reu_mul = 131072) export as `far`
+	# rather than warning — e.g. `al 020000 .LIB_X25519_PRECALC_reu_mul_SIZE`.
+	# They are manifest constants, not addresses, so nothing wants them in a
+	# label file. Filtering beats widening the match: there is no 24-bit target.
+	sed -i.bak '/^al 0*[1-9a-fA-F][0-9a-fA-F]*[0-9a-fA-F]\{4\} /d' $(LABELS)
 	sed -i.bak 's/^al 00\([0-9a-fA-F]\{4\}\) /al C:\1 /' $(LABELS)
 	rm -f $(LABELS).bak
 
