@@ -1,7 +1,7 @@
 # Library-ingestion architecture
 
 How c64-wireguard consumes the sibling crypto libraries `c64-x25519`
-(v0.10.0) and `c64-ChaCha20-Poly1305` (v0.7.0) **as the shipped
+(v0.10.1) and `c64-ChaCha20-Poly1305` (v0.7.0) **as the shipped
 default**, linking the libraries' own contract-§6 archive products with
 zero source staging: each sibling builds itself via its own `make lib`
 target, and WG links the resulting `.a` unmodified.
@@ -222,7 +222,9 @@ points. They are no longer shipped, and the in-tree `poly1305.s`
   cover the §4 rename, cold split and onchip profile; v0.9.0 the
   contract v0.7.0/v0.5.0 manifest migration; v0.10.0 the
   `LIB_X25519_ABI_VERSION` 1→2 erratum (generation counter catching up
-  with v0.9.0's export removal — no code change).
+  with v0.9.0's export removal — no code change); v0.10.1 a docs/snippet
+  sweep, also no code change (its PRG is byte-identical all the way back
+  to v0.8.0).
 - c64-ChaCha20-Poly1305 `CHANGELOG.md` + `docs/INTEGRATION.md` — v0.7.0
   brought §4 segment prefixes, the prefixed manifest exports and the
   `SHARED_CT_MUL_8X8` deferral gate.

@@ -15,8 +15,15 @@
 # timeouts are 30 min each, staggered VICE boots); (c) half the harness's
 # 10-slot port pool. Until someone validates the harness under Actions,
 # regression on sibling bumps stays a local step; this workflow gates on
-# what CI can prove: all four toggle combinations still build, and the
-# ABI surface still matches.
+# what CI can prove: the two matched toggle combinations still build, the
+# two mixed ones are still refused by the Makefile guard, and the ABI
+# surface still matches.
+#
+# History: this matrix asserted that all FOUR combinations build, which
+# stopped being true at v1.0.0 when mixed configs became a hard error. It
+# went unnoticed because the matrix only runs on PRs touching the paths
+# below — on the weekly cron the `!= 'schedule'` guard skips it, so master
+# only ever ran the probe.
 name: sibling-bump
 
 on:
@@ -41,10 +48,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { x25519: 0, chacha: 0 }
-          - { x25519: 1, chacha: 0 }
-          - { x25519: 0, chacha: 1 }
-          - { x25519: 1, chacha: 1 }
+          # Only the matched pairs are buildable. Since v1.0.0 the Makefile
+          # REFUSES mixed configs — the two archives compose via §8.0 shared
+          # primitives (x25519 owns sqtab + ct_mul_8x8, chacha defers both),
+          # so half a composition cannot link. `expect: refuse` inverts the
+          # assertion rather than dropping those rows, which keeps the guard
+          # itself under test.
+          - { x25519: 0, chacha: 0, expect: build }
+          - { x25519: 1, chacha: 1, expect: build }
+          - { x25519: 1, chacha: 0, expect: refuse }
+          - { x25519: 0, chacha: 1, expect: refuse }
     steps:
       - uses: actions/checkout@v4
         with:
@@ -52,12 +65,33 @@ jobs:
       - name: Install cc65
         run: sudo apt-get update && sudo apt-get install -y cc65
       - name: Build (BACKEND=uci)
+        if: matrix.expect == 'build'
         run: |
           make BACKEND=uci \
             USE_X25519_SIBLING=${{ matrix.x25519 }} \
             USE_CHACHA_SIBLING=${{ matrix.chacha }}
       - name: Show artifact sizes
+        if: matrix.expect == 'build'
         run: ls -l build/wireguard.prg build/wireguard.map
+      - name: Mixed config must be refused
+        if: matrix.expect == 'refuse'
+        run: |
+          set +e
+          make BACKEND=uci \
+            USE_X25519_SIBLING=${{ matrix.x25519 }} \
+            USE_CHACHA_SIBLING=${{ matrix.chacha }} > out.log 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "FAIL: mixed sibling config built, but the Makefile guard should have refused it."
+            exit 1
+          fi
+          if ! grep -q "USE_X25519_SIBLING and USE_CHACHA_SIBLING must match" out.log; then
+            echo "FAIL: build was refused (exit $rc), but not by the mixed-config guard:"
+            cat out.log
+            exit 1
+          fi
+          echo "OK: refused by the guard as intended (exit $rc)."
 
   abi-drift:
     name: ABI drift gate
