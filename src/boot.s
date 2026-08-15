@@ -22,6 +22,7 @@
         .export print_string            ; used by session.s, timer.s
 
 ; --- Imports: external data from src/wg/data.s ---------------------------
+        .import vic_boost_begin, vic_boost_end
         .import net_initialized
         .import wg_state
         .import udp_recv_ready
@@ -126,6 +127,13 @@ start:
         ldy     #>title_msg
         jsr     print_string
 
+        ; Build the multiply tables with the display blanked. This is the
+        ; longest uninterrupted stretch of compute in the program — the REU
+        ; precompute walks all 256x256 products, ~10 s of emulated time —
+        ; and nothing is printed while it runs, so there is no progress to
+        ; hide. ~6.3% off the boot wait; see src/wg/vic_boost.s.
+        jsr     vic_boost_begin
+
         ; Initialize quarter-square table (needed by mul_8x8 and fe_sqr)
         jsr     sqtab_init
 
@@ -133,6 +141,8 @@ start:
         ; Initialize REU multiplication tables (precompute all 256x256 products)
         jsr     reu_mul_init
 .endif
+
+        jsr     vic_boost_end
 
         ; fall through to main loop
 main_loop:

@@ -31,21 +31,23 @@
 ; the display before returning, so the UI between operations is unaffected
 ; and only the compute windows are dark.
 ;
-; NOT WIRED INTO BOOT, deliberately. The obvious second site is the
-; sqtab_init + reu_mul_init pair in src/boot.s — the longest single stretch
-; of compute in the program, with no output to hide. It is left alone
-; because that path currently does not complete under VICE with an REU
-; attached (`-reu -reusize 512`): the PC pins inside the x25519 init code
-; and `sqtab_ready` stays 0 after 240 s of undisturbed emulation. That
-; predates this file — it reproduces identically with these wrappers
-; removed — and is invisible today because title_msg (which contains
-; "Q=QUIT") prints BEFORE the hang, so every suite's wait_for_text
-; succeeds and then drives the crypto by direct jsr, never depending on
-; boot finishing.
+; ALSO WIRED INTO BOOT, around the sqtab_init + reu_mul_init pair — the
+; longest single stretch of compute in the program (the REU precompute
+; walks all 256x256 products, ~10 s emulated) with no output to hide.
 ;
-; Blanking there would convert a title screen that merely looks idle into
-; a permanently black one. Wire it up once that hang is understood, not
-; before.
+; A MEASUREMENT TRAP worth recording, because it briefly looked like a
+; boot hang and nearly cost this call site: the c64-test-harness binary
+; monitor HALTS emulation between commands. A `time.sleep()` in a test
+; script does not advance the C64 at all, so boot appears frozen — same
+; PC on every sample, DEN never restored, flags never set — for as long
+; as you care to wait. Proof: $D012, the raster counter, which changes
+; every 63 cycles while the CPU runs, is byte-identical across a 10 s
+; host sleep.
+;
+; To let the machine actually run, issue harness calls that drive
+; emulation (wait_for_text, poll_until, jsr). Under that method boot
+; completes in ~2 s of running emulation and $D011 goes $0B -> $1B
+; exactly as intended.
 ;
 ; The screen CONTENTS survive blanking untouched — DEN=0 stops the VIC
 ; fetching, it does not clear video RAM — so the display returns exactly as
