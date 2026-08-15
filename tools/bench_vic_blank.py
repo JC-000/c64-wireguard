@@ -347,12 +347,20 @@ def main():
         sm = next((r for r in results if r["symbol"] == "x25519_scalarmult"),
                   None)
         if sm:
-            # Project onto the figures README quotes, so the benchmark
-            # answers the question a reader actually has.
-            for label, mins in (("scalarmult", 4.3), ("full handshake", 23.0)):
-                print(f"  {label:16} {mins:5.1f} min ->"
-                      f" {mins / sm['speedup']:5.1f} min blanked"
-                      f"  (saves {mins - mins / sm['speedup']:.1f} min)")
+            # Project the scalarmult figure only. The handshake row that
+            # used to live here was an UPPER BOUND, not an estimate: it
+            # scaled README's 23 min by this ratio, which silently assumes
+            # the whole handshake runs blanked. It does not — vic_boost
+            # blanks the five scalar multiplies and the boot table build,
+            # and restores the display in between.
+            print(f"  {'scalarmult':16} {4.3:5.1f} min ->"
+                  f" {4.3 / sm['speedup']:5.1f} min blanked"
+                  f"  (saves {4.3 - 4.3 / sm['speedup']:.1f} min)")
+            print()
+            print("  For the handshake, do not scale from the above — the")
+            print("  measured end-to-end figure is in")
+            print("  tools/bench_vic_blank_handshake.py: 6.1% on Type-2")
+            print("  processing (462.8 s -> 434.4 s, 28.4 s saved).")
 
     return 0
 
