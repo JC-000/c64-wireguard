@@ -17,6 +17,14 @@ It matters here more than in most projects: a full WireGuard handshake is
 before that. Every percent is a percent off a number that is already past
 the point of usability.
 
+THESE NUMBERS ARE NTSC. This tool runs ntsc=True. NTSC is 65 cycles x 262
+lines = 17030 cycles/frame, and 25 text rows give 25 badlines/frame at ~43
+stolen cycles each: 1075/17030 = 6.31%, which is what it measures. PAL is
+63 x 312 = 19656 against the same 1075, i.e. ~5.5% — a PAL machine sees a
+smaller saving from identical code. The figure is a property of the
+display standard and of the caller's own screen contents, not of the
+crypto, so a consumer with sprites up sees a larger one.
+
 WHAT IS MEASURED
 
 Elapsed EMULATED time via the CIA1 TOD clock ($DC08-$DC0B). It is emulated
@@ -347,12 +355,20 @@ def main():
         sm = next((r for r in results if r["symbol"] == "x25519_scalarmult"),
                   None)
         if sm:
-            # Project onto the figures README quotes, so the benchmark
-            # answers the question a reader actually has.
-            for label, mins in (("scalarmult", 4.3), ("full handshake", 23.0)):
-                print(f"  {label:16} {mins:5.1f} min ->"
-                      f" {mins / sm['speedup']:5.1f} min blanked"
-                      f"  (saves {mins - mins / sm['speedup']:.1f} min)")
+            # Project the scalarmult figure only. The handshake row that
+            # used to live here was an UPPER BOUND, not an estimate: it
+            # scaled README's 23 min by this ratio, which silently assumes
+            # the whole handshake runs blanked. It does not — vic_boost
+            # blanks the five scalar multiplies and the boot table build,
+            # and restores the display in between.
+            print(f"  {'scalarmult':16} {4.3:5.1f} min ->"
+                  f" {4.3 / sm['speedup']:5.1f} min blanked"
+                  f"  (saves {4.3 - 4.3 / sm['speedup']:.1f} min)")
+            print()
+            print("  For the handshake, do not scale from the above — the")
+            print("  measured end-to-end figure is in")
+            print("  tools/bench_vic_blank_handshake.py: 6.1% on Type-2")
+            print("  processing (462.8 s -> 434.4 s, 28.4 s saved).")
 
     return 0
 
