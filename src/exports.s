@@ -22,6 +22,11 @@
 ; equates by symbol (fe25519.s still hard-codes its bank/offset compute).
 .include "crypto/shared/reu_layout.inc"
 
+; §8.1 shared sqtab window — single source of truth for its base.
+; See the sqtab block near the end of this file and the §6.7 asserts in
+; src/contract_asserts.s.
+.include "crypto/shared/sqtab_base.inc"
+
 ; --- General-purpose / word32 ZP ---
 .exportzp zp_ptr1, zp_ptr2, zp_tmp1, zp_tmp2
 .exportzp w32_src1, w32_src2, w32_dst
@@ -151,14 +156,17 @@ fe25519_dst  = fe_dst
 ; combined with USE_CHACHA_SIBLING=1 would leave sqtab_lo/hi
 ; unresolved (in-tree poly1305.s is dropped under USE_CHACHA_SIBLING,
 ; and the chacha sibling treats sqtab_lo/hi as private equates). The
-; equate values match both in-tree and sibling private definitions.
+; equate values match both in-tree and sibling private definitions —
+; enforced now rather than asserted in prose: both derive from
+; crypto/shared/sqtab_base.inc, and src/contract_asserts.s checks that
+; base against the cfg's reserved window (§6.7).
 ;
 ; Only emitted under USE_CHACHA_SIBLING=1 — otherwise the in-tree
 ; src/crypto/poly1305.s already exports them and ld65 would flag a
 ; duplicate-export error.
 .ifdef USE_CHACHA_SIBLING
-sqtab_lo = $8000
-sqtab_hi = $8200
+sqtab_lo = WG_SQTAB_LO
+sqtab_hi = WG_SQTAB_HI
 .export sqtab_lo, sqtab_hi
 .endif
 

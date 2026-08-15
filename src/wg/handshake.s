@@ -64,6 +64,10 @@
 .import x25519_scalarmult
 .import x25519_base
 
+; VIC blanking around the scalar multiplies — the only operations here
+; long enough for the 6.3%% to be worth a dark screen. See src/wg/vic_boost.s.
+.import vic_boost_begin, vic_boost_end
+
 ; AEAD
 .import aead_encrypt
 .import aead_decrypt
@@ -334,7 +338,9 @@ hs_create_initiation:
         sta x25_scalar,x
         dex
         bpl @copy_epriv
+        jsr vic_boost_begin
         jsr x25519_base        ; x25_result = ephem_pub
+        jsr vic_boost_end
 
         ; Copy result to hs_ephem_pub
         ldx #31
@@ -412,7 +418,9 @@ hs_create_initiation:
         dex
         bpl @copy_ep2
         jsr x25519_clamp
+        jsr vic_boost_begin
         jsr x25519_scalarmult  ; x25_result = DH
+        jsr vic_boost_end
 
         ; Copy DH result to hs_dh_result
         ldx #31
@@ -519,7 +527,9 @@ hs_create_initiation:
         dex
         bpl @copy_sp2
         jsr x25519_clamp
+        jsr vic_boost_begin
         jsr x25519_scalarmult
+        jsr vic_boost_end
 
         ldx #31
 @copy_dh2:
@@ -755,7 +765,9 @@ hs_process_response:
         dex
         bpl @copy1
         jsr x25519_clamp
+        jsr vic_boost_begin
         jsr x25519_scalarmult
+        jsr vic_boost_end
 
         ; kdf_1(C, dh_result)
         ldx #31
@@ -792,7 +804,9 @@ hs_process_response:
         dex
         bpl @copy2
         jsr x25519_clamp
+        jsr vic_boost_begin
         jsr x25519_scalarmult
+        jsr vic_boost_end
 
         ; kdf_1(C, dh_result)
         ldx #31

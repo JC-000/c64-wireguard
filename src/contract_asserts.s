@@ -45,6 +45,11 @@
 ; warning for anyone copying a snippet out of the current SPEC.
 ; =============================================================================
 
+; The §8.1 window base, single-sourced. §8.1 forbids the libraries
+; exporting LIB_SHARED_SQTAB_BASE, so the consumer holds it — in exactly
+; one place, per contract v0.10.2.
+.include "crypto/shared/sqtab_base.inc"
+
 .ifdef USE_X25519_SIBLING
 
 ; The Makefile refuses to build a mixed configuration, but this file is
@@ -64,6 +69,10 @@
 .import LIB_CHACHA20_POLY1305_SHARED_PRIMITIVES
 .import LIB_CHACHA20_POLY1305_SHARED_CONSUMES
 .import LIB_CHACHA20_POLY1305_ABI_VERSION
+
+; §6.6 footprint pairs, od65-measured on each library's side.
+.import LIB_X25519_RESIDENT_BYTES, LIB_X25519_COLD_BYTES
+.import LIB_CHACHA20_POLY1305_RESIDENT_BYTES, LIB_CHACHA20_POLY1305_COLD_BYTES
 
 ; §8.4 shared-table shape. All three fields are imported as of the
 ; v0.11.0 / v0.8.0 pins: contract v0.7.4 pins _REGION/_SHARED ": abs",
@@ -172,5 +181,60 @@ WG_REU_BANKS_USED = $00
 ; result carried in this repo's docs needs re-measuring.
 .assert LIB_X25519_ABI_VERSION = 3, lderror, "x25519 ABI generation != 3 — its exported surface changed; re-audit the integration before bumping this pin"
 .assert LIB_CHACHA20_POLY1305_ABI_VERSION = 3, lderror, "chacha20poly1305 ABI generation != 3 — its exported surface changed; re-audit the integration before bumping this pin"
+
+; --- §6.6 footprint fit ------------------------------------------------------
+;
+; Both libraries publish RESIDENT + COLD byte counts, od65-measured on
+; their side. Assert the pair fits the regions WG gives them. The SPEC
+; form is single-line, `lderror`, RESIDENT and COLD together, `<=`.
+;
+; WG splits each library across two areas — CODE/DATA into MAIN_AREA_LO,
+; x25519's reclaimable INIT_CODE into MAIN_AREA_HI — so the honest
+; consumer-side bound is the pair against the sum of the two areas. That
+; is looser than a per-region check would be, and deliberately so: a
+; tighter literal would have to encode WG's own code size, which changes
+; on every commit and would turn this into a maintenance tax that gets
+; disabled. What it does catch is the case it exists for — a sibling
+; bump growing the libraries past the space WG has to give them.
+;
+; Measured at the v0.11.1 / v0.9.0 pins: 8383 + 826 (x25519) + 16640 + 0
+; (chacha) = 25849 against $4D10 + $1C00 = 26896. 1047 bytes of headroom,
+; which looks tighter than it is: RESIDENT_BYTES describes the whole
+; archive, while ld65 pulls only the members actually referenced (chacha
+; contributes 8448 B of _CODE + 295 B of _DATA to this link, not 16640).
+; The assert is therefore conservative — it fails before the map does,
+; which is the safe direction for a fit check, but do not read the
+; headroom figure as WG's real remaining space.
+.import __MAIN_AREA_LO_SIZE__, __MAIN_AREA_HI_SIZE__
+.assert (LIB_X25519_RESIDENT_BYTES + LIB_X25519_COLD_BYTES + LIB_CHACHA20_POLY1305_RESIDENT_BYTES + LIB_CHACHA20_POLY1305_COLD_BYTES) <= (__MAIN_AREA_LO_SIZE__ + __MAIN_AREA_HI_SIZE__), lderror, "sibling libraries no longer fit MAIN_AREA_LO + MAIN_AREA_HI — a sibling bump grew past WG's budget; re-plan the memory map before re-pinning"
+
+; --- §6.7 sqtab window guard (consumer mirror) -------------------------------
+;
+; The §8.1 sqtab is placed by an EQUATE, not a segment. Nothing is
+; emitted into it, so ld65 does not know the region exists: absent these
+; asserts, a memory map that disagrees with the equate links clean,
+; passes every test that does not exercise Poly1305 after boot, and
+; corrupts 1 KB of whatever it does overlap when sqtab_init runs. No
+; assemble error, no link error, no warning at any stage. Both siblings
+; added this guard for their own images (x25519 v0.11.1, chacha v0.9.0)
+; and both name the consumer mirror as the consumer's own obligation —
+; their guard TUs ship in no archive precisely because an .import of a
+; consumer's area symbol would force every consumer to declare it.
+;
+; WG's exposure is narrower than the general case but not zero. Growth
+; INTO the window is already a hard ld65 area-overflow, because
+; MAIN_AREA_LO is bounded at $7FFF and SQTAB_HOLE is a real reserved
+; area rather than a gap. What was unguarded is AGREEMENT: the cfg's
+; window and WG_SQTAB_BASE were independent copies of $8000, and moving
+; one without the other pointed sqtab_init outside the reservation.
+.import __SQTAB_HOLE_START__, __SQTAB_HOLE_SIZE__
+.assert __SQTAB_HOLE_START__ = WG_SQTAB_BASE, lderror, "cfg SQTAB_HOLE base disagrees with WG_SQTAB_BASE — sqtab_init would build the table outside the reserved window; reconcile cfg/c64-wireguard-*.cfg against src/crypto/shared/sqtab_base.inc"
+.assert __SQTAB_HOLE_SIZE__ >= WG_SQTAB_SIZE, lderror, "cfg SQTAB_HOLE reserves less than the 1024 bytes sqtab_init writes"
+
+; Image-overrun leg, for symmetry with the siblings' guard and to stay
+; correct if MAIN_AREA_LO is ever resized: its last byte must stay below
+; the window.
+.import __MAIN_AREA_LO_LAST__
+.assert __MAIN_AREA_LO_LAST__ <= WG_SQTAB_BASE, lderror, "image overruns the sqtab window — MAIN_AREA_LO now extends past WG_SQTAB_BASE"
 
 .endif
