@@ -4,9 +4,9 @@
 ; Active only in the two-sibling build (USE_X25519_SIBLING=1 +
 ; USE_CHACHA_SIBLING=1; the Makefile enforces that the toggles match).
 ;
-; Pins: c64-x25519 v0.10.0, c64-ChaCha20-Poly1305 v0.7.0.
+; Pins: c64-x25519 v0.11.0, c64-ChaCha20-Poly1305 v0.8.0.
 ;
-; Contract obligations covered (SPEC v0.7.x):
+; Contract obligations covered (SPEC v0.9.2):
 ;   §1   per-library ABI generation pins.
 ;   §3   REU bank budget — x25519 vs chacha vs WG's own claims.
 ;   §8.0 shared-primitive ownership (disjointness), the v0.5.0 coverage
@@ -45,6 +45,11 @@
 ; warning for anyone copying a snippet out of the current SPEC.
 ; =============================================================================
 
+; The §8.1 window base, single-sourced. §8.1 forbids the libraries
+; exporting LIB_SHARED_SQTAB_BASE, so the consumer holds it — in exactly
+; one place, per contract v0.10.2.
+.include "crypto/shared/sqtab_base.inc"
+
 .ifdef USE_X25519_SIBLING
 
 ; The Makefile refuses to build a mixed configuration, but this file is
@@ -65,15 +70,27 @@
 .import LIB_CHACHA20_POLY1305_SHARED_CONSUMES
 .import LIB_CHACHA20_POLY1305_ABI_VERSION
 
-; §8.4 shared-table shape. Only _SIZE is imported: contract v0.7.4 pins
-; _REGION/_SHARED ": abs", which x25519 v0.10.0 carries but chacha v0.7.0
-; (built against SPEC v0.7.2) does not — importing chacha's as absolute
-; would emit an ld65 address-size mismatch warning. _SIZE is absolute on
-; both sides. Note this import form is only valid for tables <= $FFFF
-; (contract #18): sqtab is 1024, but reu_mul at 131072 must never be
-; imported this way — it exports 'far' and raises a range error here.
+; §6.6 footprint pairs, od65-measured on each library's side.
+.import LIB_X25519_RESIDENT_BYTES, LIB_X25519_COLD_BYTES
+.import LIB_CHACHA20_POLY1305_RESIDENT_BYTES, LIB_CHACHA20_POLY1305_COLD_BYTES
+
+; §8.4 shared-table shape. All three fields are imported as of the
+; v0.11.0 / v0.8.0 pins: contract v0.7.4 pins _REGION/_SHARED ": abs",
+; which x25519 has carried since v0.10.0 and chacha picked up in v0.8.0
+; (it shipped v0.7.0 against SPEC v0.7.2, where importing its _REGION /
+; _SHARED as absolute drew an ld65 address-size mismatch warning — hence
+; the earlier _SIZE-only import). Measured absolute on both sides at
+; these tags before widening.
+;
+; Note this import form is only valid for tables <= $FFFF (contract #18):
+; sqtab is 1024, but reu_mul at 131072 must never be imported this way —
+; it exports 'far' and raises a range error here.
 .import LIB_X25519_PRECALC_sqtab_SIZE
+.import LIB_X25519_PRECALC_sqtab_REGION
+.import LIB_X25519_PRECALC_sqtab_SHARED
 .import LIB_CHACHA20_POLY1305_PRECALC_sqtab_SIZE
+.import LIB_CHACHA20_POLY1305_PRECALC_sqtab_REGION
+.import LIB_CHACHA20_POLY1305_PRECALC_sqtab_SHARED
 
 ; --- §3 REU bank budget ------------------------------------------------------
 ;
@@ -117,18 +134,107 @@ WG_REU_BANKS_USED = $00
 ; libraries emitted one symbol name, so there was nothing to compare).
 .assert LIB_X25519_PRECALC_sqtab_SIZE = LIB_CHACHA20_POLY1305_PRECALC_sqtab_SIZE, lderror, "linked libraries disagree on the shared §8.1 sqtab size — the deferring library would read a table built to a different shape"
 
+; Region agreement. Both must place the table in the same §8.4 region
+; class (1 = main RAM) — a table one library builds in the REU and the
+; other reads from main RAM is the same silent-wrong-result failure as a
+; size mismatch, and size alone would not catch it.
+.assert LIB_X25519_PRECALC_sqtab_REGION = LIB_CHACHA20_POLY1305_PRECALC_sqtab_REGION, lderror, "linked libraries disagree on the shared §8.1 sqtab region — one builds the table where the other does not read it"
+
+; Both sides must actually declare the table SHARED. If either ever
+; reverts to a private table, the §8.0 masks would still look consistent
+; while the two libraries silently maintained separate copies.
+.assert LIB_X25519_PRECALC_sqtab_SHARED = 1, lderror, "x25519 no longer declares the §8.1 sqtab shared — the deferral in build_chacha20poly1305.sh has nothing to defer to"
+.assert LIB_CHACHA20_POLY1305_PRECALC_sqtab_SHARED = 1, lderror, "chacha20poly1305 no longer declares the §8.1 sqtab shared — it would build a private table over x25519's"
+
 ; --- §1 ABI generation pins --------------------------------------------------
 ;
 ; Per-library now. The previous bare `LIB_ABI_VERSION` import read as an
 ; x25519 check but silently bound to whichever archive the linker reached
 ; first, since both libraries exported that same name.
 ;
-; x25519 is at generation 2: contract v0.7.5 reclassified LIB_<X>_ABI_VERSION
-; as a monotonic counter incremented on any breaking export change,
-; independent of MAJOR, and v0.9.0's removal of the LIB_SHARED_PRIMITIVES_*
-; exports qualified. v0.10.0 is the erratum that advanced the counter — no
-; code change, PRG byte-identical to v0.8.0/v0.9.0.
-.assert LIB_X25519_ABI_VERSION = 2, lderror, "x25519 ABI generation != 2 — its exported surface changed; re-audit the integration before bumping this pin"
-.assert LIB_CHACHA20_POLY1305_ABI_VERSION = 1, lderror, "chacha20poly1305 ABI generation != 1 — its exported surface changed; re-audit the integration before bumping this pin"
+; Contract v0.7.5 reclassified LIB_<X>_ABI_VERSION as a monotonic counter
+; incremented on any breaking export change, independent of MAJOR. Both
+; libraries are at generation 3 as of the phase-3 fleet wave, and both got
+; there for reasons this repo had to act on rather than merely re-pin:
+;
+;   x25519  1 -> 2  v0.9.0 removed the LIB_SHARED_PRIMITIVES_* exports
+;                   (v0.10.0 was the erratum that advanced the counter).
+;           2 -> 3  v0.11.0: bare LIB_SHARED_REU_MUL_* un-exported in
+;                   favour of the LIB_X25519_*-prefixed outputs (#92),
+;                   the zp_ptr1/zp_tmp1/zp_tmp2 trio dropped from the
+;                   export surface (#93), and poly_carry -> mul_carry —
+;                   poly_ is chacha-registered under SPEC §2 (#95). The
+;                   last two are what let src/exports.s stop describing
+;                   an imaginary ZP fence and start relying on a real
+;                   one; see its x25519 comment block.
+;
+;   chacha  1 -> 2  library issue #67, under the same v0.7.5 rule.
+;           2 -> 3  v0.8.0: the four general-purpose ZP slots took the
+;                   §2 registry prefix, so its TUs now .importzp
+;                   chacha20poly1305_zp_* — names a consumer supplying
+;                   the slots from its own zp_config (exactly WG) must
+;                   export or fail to link. Under LIB_NO_BARE_EXPORTS
+;                   the bare aliases are gone entirely.
+;
+; Both bumps are codegen-neutral upstream — each library re-verified its
+; test PRG byte-identical across the rename — so no perf, CT or hardware
+; result carried in this repo's docs needs re-measuring.
+.assert LIB_X25519_ABI_VERSION = 3, lderror, "x25519 ABI generation != 3 — its exported surface changed; re-audit the integration before bumping this pin"
+.assert LIB_CHACHA20_POLY1305_ABI_VERSION = 3, lderror, "chacha20poly1305 ABI generation != 3 — its exported surface changed; re-audit the integration before bumping this pin"
+
+; --- §6.6 footprint fit ------------------------------------------------------
+;
+; Both libraries publish RESIDENT + COLD byte counts, od65-measured on
+; their side. Assert the pair fits the regions WG gives them. The SPEC
+; form is single-line, `lderror`, RESIDENT and COLD together, `<=`.
+;
+; WG splits each library across two areas — CODE/DATA into MAIN_AREA_LO,
+; x25519's reclaimable INIT_CODE into MAIN_AREA_HI — so the honest
+; consumer-side bound is the pair against the sum of the two areas. That
+; is looser than a per-region check would be, and deliberately so: a
+; tighter literal would have to encode WG's own code size, which changes
+; on every commit and would turn this into a maintenance tax that gets
+; disabled. What it does catch is the case it exists for — a sibling
+; bump growing the libraries past the space WG has to give them.
+;
+; Measured at the v0.11.1 / v0.9.0 pins: 8383 + 826 (x25519) + 16640 + 0
+; (chacha) = 25849 against $4D10 + $1C00 = 26896. 1047 bytes of headroom,
+; which looks tighter than it is: RESIDENT_BYTES describes the whole
+; archive, while ld65 pulls only the members actually referenced (chacha
+; contributes 8448 B of _CODE + 295 B of _DATA to this link, not 16640).
+; The assert is therefore conservative — it fails before the map does,
+; which is the safe direction for a fit check, but do not read the
+; headroom figure as WG's real remaining space.
+.import __MAIN_AREA_LO_SIZE__, __MAIN_AREA_HI_SIZE__
+.assert (LIB_X25519_RESIDENT_BYTES + LIB_X25519_COLD_BYTES + LIB_CHACHA20_POLY1305_RESIDENT_BYTES + LIB_CHACHA20_POLY1305_COLD_BYTES) <= (__MAIN_AREA_LO_SIZE__ + __MAIN_AREA_HI_SIZE__), lderror, "sibling libraries no longer fit MAIN_AREA_LO + MAIN_AREA_HI — a sibling bump grew past WG's budget; re-plan the memory map before re-pinning"
+
+; --- §6.7 sqtab window guard (consumer mirror) -------------------------------
+;
+; The §8.1 sqtab is placed by an EQUATE, not a segment. Nothing is
+; emitted into it, so ld65 does not know the region exists: absent these
+; asserts, a memory map that disagrees with the equate links clean,
+; passes every test that does not exercise Poly1305 after boot, and
+; corrupts 1 KB of whatever it does overlap when sqtab_init runs. No
+; assemble error, no link error, no warning at any stage. Both siblings
+; added this guard for their own images (x25519 v0.11.1, chacha v0.9.0)
+; and both name the consumer mirror as the consumer's own obligation —
+; their guard TUs ship in no archive precisely because an .import of a
+; consumer's area symbol would force every consumer to declare it.
+;
+; WG's exposure is narrower than the general case but not zero. Growth
+; INTO the window is already a hard ld65 area-overflow, because
+; MAIN_AREA_LO is bounded at $7FFF and SQTAB_HOLE is a real reserved
+; area rather than a gap. What was unguarded is AGREEMENT: the cfg's
+; window and WG_SQTAB_BASE were independent copies of $8000, and moving
+; one without the other pointed sqtab_init outside the reservation.
+.import __SQTAB_HOLE_START__, __SQTAB_HOLE_SIZE__
+.assert __SQTAB_HOLE_START__ = WG_SQTAB_BASE, lderror, "cfg SQTAB_HOLE base disagrees with WG_SQTAB_BASE — sqtab_init would build the table outside the reserved window; reconcile cfg/c64-wireguard-*.cfg against src/crypto/shared/sqtab_base.inc"
+.assert __SQTAB_HOLE_SIZE__ >= WG_SQTAB_SIZE, lderror, "cfg SQTAB_HOLE reserves less than the 1024 bytes sqtab_init writes"
+
+; Image-overrun leg, for symmetry with the siblings' guard and to stay
+; correct if MAIN_AREA_LO is ever resized: its last byte must stay below
+; the window.
+.import __MAIN_AREA_LO_LAST__
+.assert __MAIN_AREA_LO_LAST__ <= WG_SQTAB_BASE, lderror, "image overruns the sqtab window — MAIN_AREA_LO now extends past WG_SQTAB_BASE"
 
 .endif

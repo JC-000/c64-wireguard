@@ -23,6 +23,12 @@ readst          = $ffb7         ; read I/O status
 chkin           = $ffc6         ; set input channel
 
 ; --- VIC-II ---
+; Bit 4 of vic_ctrl1 is DEN (display enable). Clearing it blanks the
+; display and stops badline DMA, handing ~6.3% of the cycles back to the
+; CPU — see src/wg/vic_boost.s. The same register holds the Y-scroll and
+; raster-compare high bit, so it must be read-modify-written, never
+; assigned outright.
+vic_ctrl1       = $d011         ; control register 1 (DEN, RSEL, YSCROLL)
 vic_border      = $d020         ; border color
 vic_bg          = $d021         ; background color
 

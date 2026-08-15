@@ -27,7 +27,7 @@ from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
     read_bytes, write_bytes, jsr,
 )
-from vice_util import binary_wait_for_text
+from vice_util import binary_wait_for_boot_ready
 from c64_test_harness.disk import DiskImage, FileType
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -387,7 +387,7 @@ def run_disk_test(disk, labels, test_fn):
     with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         transport = inst.transport
-        grid = binary_wait_for_text(transport, "Q=QUIT", timeout=60.0)
+        grid = binary_wait_for_boot_ready(transport, labels, timeout=180.0)
         if grid is None:
             raise RuntimeError("Main menu did not appear")
         write_bytes(transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
@@ -738,7 +738,7 @@ def main():
         inst = mgr.acquire()
         print(f"VICE PID={inst.pid}, port={inst.port}")
         transport = inst.transport
-        grid = binary_wait_for_text(transport, "Q=QUIT", timeout=60.0)
+        grid = binary_wait_for_boot_ready(transport, labels, timeout=180.0)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)

@@ -171,6 +171,7 @@
 .export wg_peer_port
 .export wg_local_port
 .export net_initialized
+.export boot_ready
 
 ; --- Transport state ---
 .export tp_send_counter
@@ -626,6 +627,8 @@ wg_local_port:
         .res 2                 ; our listening port
 net_initialized:
         .res 1                 ; 0=not initialized, 1=network ready
+boot_ready:
+        .res 1                 ; 0=boot in progress, 1=table build complete (issue #55)
 
 ; --- Transport state ---
 tp_send_counter:

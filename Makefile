@@ -118,6 +118,7 @@ COMMON_SRCS_ALL = $(SRC_DIR)/loadaddr.s \
                   $(SRC_DIR)/wg/transport.s \
                   $(SRC_DIR)/wg/session.s \
                   $(SRC_DIR)/wg/ip_build.s \
+                  $(SRC_DIR)/wg/vic_boost.s \
                   $(SRC_DIR)/wg/disk_config.s
 
 # Drop in-tree crypto sources that the siblings replace.

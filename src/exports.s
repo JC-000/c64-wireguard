@@ -22,9 +22,39 @@
 ; equates by symbol (fe25519.s still hard-codes its bank/offset compute).
 .include "crypto/shared/reu_layout.inc"
 
+; §8.1 shared sqtab window — single source of truth for its base.
+; See the sqtab block near the end of this file and the §6.7 asserts in
+; src/contract_asserts.s.
+.include "crypto/shared/sqtab_base.inc"
+
 ; --- General-purpose / word32 ZP ---
 .exportzp zp_ptr1, zp_ptr2, zp_tmp1, zp_tmp2
 .exportzp w32_src1, w32_src2, w32_dst
+
+; --- §2 ZP registry spellings of the general-purpose four ---
+; chacha20poly1305 v0.8.0 renamed its four general-purpose slots to the
+; SPEC §2 registry form (issue #52 / upstream #76). The bare names were
+; unregistered and c64-nist-curves exports the same four, so composing
+; those two libraries died on "Duplicate external identifier: 'zp_ptr2'".
+;
+; WG supplies these slots itself and does NOT assemble the library's
+; zp_config.s, so after the rename the archive's `.importzp
+; chacha20poly1305_zp_*` had nothing to bind to. Unlike the dormant
+; x25519 case below, the imports live in members this link actually
+; pulls, so it fails loudly at ld65 rather than silently.
+;
+; Addresses are unchanged on both sides ($02/$03/$fb/$fd) — naming only,
+; no relocation and no behaviour change.
+;
+; Measured at the v0.8.0 pin, our define set (SHARED_SQTAB_INIT +
+; SHARED_CT_MUL_8X8 + ROLLED_OUTER) imports only ptr1/tmp1/tmp2; ptr2 is
+; exported anyway so a profile change cannot reopen the hole.
+chacha20poly1305_zp_tmp1 = zp_tmp1
+chacha20poly1305_zp_tmp2 = zp_tmp2
+chacha20poly1305_zp_ptr1 = zp_ptr1
+chacha20poly1305_zp_ptr2 = zp_ptr2
+.exportzp chacha20poly1305_zp_tmp1, chacha20poly1305_zp_tmp2
+.exportzp chacha20poly1305_zp_ptr1, chacha20poly1305_zp_ptr2
 
 ; --- BLAKE2s ZP ---
 .exportzp b2s_round, b2s_i, b2s_ptr, b2s_data_ptr, b2s_remain
@@ -70,15 +100,52 @@ fe25519_dst  = fe_dst
 ; --- X25519 ZP ---
 .exportzp x25_prev_bit, x25_bit_ctr, x25_byte_idx, x25_bit_mask
 
-; --- Sibling fe25519 / x25519 imports satisfied via host-side equates ---
-; The c64-x25519 sibling's .importzp set (mul_pending, mul_bound,
+; --- Sibling fe25519 / x25519 slots resolved inside the archive ---
+; The c64-x25519 sibling's ZP slots (mul_pending, mul_bound,
 ; mul_ripple_start, fe_sqr_pairs, fe_cmp_mask, fe_subp_rhs,
-; fe_add_carry_mask) is resolved by reusing WG's existing ZP slots
-; via the sibling's own zp_config.s defaults — those defaults are not
-; redefined here, so the .ifndef-guarded equates in the staged
-; libs/x25519/src/zp_config.s take effect at sibling assemble time.
-; (Staged with ZP_CONFIG_NO_EXPORTS=1 in the integration script so the
-; sibling's .o does not duplicate-export them.)
+; fe_add_carry_mask, mul_carry) are NOT imported from WG: every library
+; TU .include-s zp_config.s, so the .ifndef-guarded equates there take
+; effect at sibling assemble time and bind within the archive.
+;
+; Its zp_config.o additionally EXPORTED a set overlapping WG's own —
+; fe_carry / fe_loop / fe_mul_i / fe_mul_j / fe25519_src1-2 / fe25519_dst
+; / x25_prev_bit / x25_byte_idx / x25_bit_mask, plus (through v0.10.1)
+; zp_ptr1 / zp_tmp1 / zp_tmp2 and a `poly_carry` that collided with WG's
+; Poly1305 accumulator. That never fired only because no WG TU
+; .importzp's an x25519 slot, so zp_config.o is never pulled from the
+; archive; one future `.importzp fe25519_src1` would have collided on
+; fourteen names at once (issue #51). Ten still overlap at v0.11.0.
+;
+; The failure mode is a LOUD one, in every case. Measured across both
+; pins: every overlapping name agrees on address on both sides — the
+; four that v0.11.0 removed (zp_ptr1 $fb, zp_tmp1 $02, zp_tmp2 $03,
+; poly_carry/mul_carry $1c) and all ten that remain (fe25519_src1 $1e,
+; _src2 $20, _dst $22, fe_carry $26, fe_loop $27, fe_mul_i $28,
+; fe_mul_j $29, x25_prev_bit $2a, x25_byte_idx $2c, x25_bit_mask $2d).
+; So a pull of zp_config.o fails at ld65 with "Duplicate external
+; identifier"; it does not bind silently to a disagreeing slot. What
+; #51 identifies is a fence that was never built, not a live aliasing
+; bug — worth fixing, but not a latent wrong-answer.
+;
+; State at the v0.11.0 pin:
+;   - four of the overlaps are gone AT THE SOURCE: upstream #93 dropped
+;     the zp_ptr1/zp_tmp1/zp_tmp2 trio from the export surface (it was
+;     only ever their test-harness scratch), and #95 renamed poly_carry
+;     -> mul_carry, poly_ being chacha-registered under SPEC §2.
+;   - the fe_*/x25_* overlap remains, still dormant, still for the same
+;     reason: those slots are delivered inside the archive by include,
+;     not by import, so zp_config.o is never pulled.
+;
+; This block previously claimed the integration script staged the sibling
+; with ZP_CONFIG_NO_EXPORTS=1. It never did — the define appeared nowhere
+; but in that sentence, so the fence it described did not exist (#51).
+; Passing it is also not currently possible: constants.s assigns the
+; symbol unguarded, so a command-line -D is a hard redefinition in every
+; TU. Measured and written up in tools/integration/build_x25519.sh, and
+; filed as c64-x25519#99 (the fix is a one-line .ifndef guard there).
+; WG supplying every slot the library declares is the
+; standing precondition for that define, and the .exportzp lines in this
+; file are what keep it satisfied for when the guard lands.
 
 ; --- Quarter-square table at $8000-$83FF (runtime-built by sqtab_init) ---
 ; Address-only equates; the table itself is built at runtime by
@@ -89,14 +156,17 @@ fe25519_dst  = fe_dst
 ; combined with USE_CHACHA_SIBLING=1 would leave sqtab_lo/hi
 ; unresolved (in-tree poly1305.s is dropped under USE_CHACHA_SIBLING,
 ; and the chacha sibling treats sqtab_lo/hi as private equates). The
-; equate values match both in-tree and sibling private definitions.
+; equate values match both in-tree and sibling private definitions —
+; enforced now rather than asserted in prose: both derive from
+; crypto/shared/sqtab_base.inc, and src/contract_asserts.s checks that
+; base against the cfg's reserved window (§6.7).
 ;
 ; Only emitted under USE_CHACHA_SIBLING=1 — otherwise the in-tree
 ; src/crypto/poly1305.s already exports them and ld65 would flag a
 ; duplicate-export error.
 .ifdef USE_CHACHA_SIBLING
-sqtab_lo = $8000
-sqtab_hi = $8200
+sqtab_lo = WG_SQTAB_LO
+sqtab_hi = WG_SQTAB_HI
 .export sqtab_lo, sqtab_hi
 .endif
 

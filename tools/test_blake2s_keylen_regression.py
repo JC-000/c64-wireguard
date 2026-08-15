@@ -31,7 +31,7 @@ from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
     read_bytes, write_bytes, jsr,
 )
-from vice_util import binary_wait_for_text
+from vice_util import binary_wait_for_boot_ready
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "wireguard.prg")
@@ -62,7 +62,7 @@ def main():
     with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         tr = inst.transport
-        if binary_wait_for_text(tr, "Q=QUIT", timeout=90.0) is None:
+        if binary_wait_for_boot_ready(tr, labels, timeout=300.0) is None:
             print("FATAL: menu did not appear")
             return 1
         write_bytes(tr, 0x0339, bytes([0x4C, 0x39, 0x03]))

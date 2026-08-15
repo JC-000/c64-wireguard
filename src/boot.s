@@ -22,7 +22,9 @@
         .export print_string            ; used by session.s, timer.s
 
 ; --- Imports: external data from src/wg/data.s ---------------------------
+        .import vic_boost_begin, vic_boost_end
         .import net_initialized
+        .import boot_ready
         .import wg_state
         .import udp_recv_ready
         .import wg_local_port
@@ -35,6 +37,7 @@
 
 ; --- Imports: strings from src/wg/strings.s ------------------------------
         .import title_msg
+        .import ready_msg
         .import net_init_msg
         .import net_err_msg
         .import net_dhcp_msg
@@ -126,13 +129,42 @@ start:
         ldy     #>title_msg
         jsr     print_string
 
-        ; Initialize quarter-square table (needed by mul_8x8 and fe_sqr)
+        ; Build the multiply tables with the display blanked. This is the
+        ; longest uninterrupted stretch of compute in the program — the REU
+        ; precompute walks all 256x256 products, ~10 s of emulated time —
+        ; and nothing is printed while it runs, so there is no progress to
+        ; hide. ~6.3% off the boot wait; see src/wg/vic_boost.s.
+        jsr     vic_boost_begin
+
+        ; Initialize quarter-square table (needed by mul_8x8 and fe_sqr).
+        ; Under the sibling build go through poly1305_lib_init, which
+        ; runs the same table builder AND sets chacha's sqtab_ready —
+        ; see crypto_abi.inc for why that flag is worth setting here.
+.ifdef USE_CHACHA_SIBLING
+        jsr     poly1305_lib_init
+.else
         jsr     sqtab_init
+.endif
 
 .ifndef WG_NO_REU
         ; Initialize REU multiplication tables (precompute all 256x256 products)
         jsr     reu_mul_init
 .endif
+
+        jsr     vic_boost_end
+
+        ; Boot-complete marker (issue #55): title_msg's "Q=QUIT" prints
+        ; before the table build above and only means "boot started" —
+        ; tests gating on it proceed against a half-booted machine. Set
+        ; the flag and print the human-visible line only now that the
+        ; table build has returned and the display is unblanked, so both
+        ; signals are true boot-complete indicators.
+        lda     #1
+        sta     boot_ready
+
+        lda     #<ready_msg
+        ldy     #>ready_msg
+        jsr     print_string
 
         ; fall through to main loop
 main_loop:

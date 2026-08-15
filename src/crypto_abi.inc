@@ -74,3 +74,23 @@
 .ifndef WG_NO_REU
 .import reu_mul_init
 .endif
+
+; poly1305_lib_init — the chacha sibling's documented boot-time entry
+; point. Its whole body is the sqtab guard: build the table if
+; sqtab_ready is clear, then set the flag. Calling it is equivalent to
+; `jsr sqtab_init` (under SHARED_SQTAB_INIT that label aliases to
+; x25519's mul_tables_init, so the same owner body runs) EXCEPT that it
+; also sets chacha's sqtab_ready byte.
+;
+; That byte matters: poly1305_init checks it on every key change and
+; rebuilds sqtab if clear. Calling sqtab_init directly at boot builds
+; the table correctly but leaves the flag at 0, so the first AEAD
+; operation of the session rebuilds an already-correct table — ~87 k
+; cycles thrown away on the first packet. Their INTEGRATION.md is
+; explicit: "Always call it once at boot."
+;
+; Sibling-only: the in-tree src/crypto/poly1305.s has no sqtab_ready and
+; no lib_init entry point, so the 0/0 build keeps calling sqtab_init.
+.ifdef USE_CHACHA_SIBLING
+.import poly1305_lib_init
+.endif

@@ -42,18 +42,21 @@
 ; =============================================================================
 ; Quarter-square table addresses (page-aligned for speed)
 ;
-; TODO(phase-3): ACME source and cfg/c64-wireguard-ip65.cfg disagree on the
-; sqtab location. The ACME equates below place the table at $8000/$8200,
-; matching the live ACME build. The ld65 cfg reserves SQTAB at $7800-$7BFF.
-; These equates preserve ACME behaviour (mechanical port, no logic change).
-; Reconcile by either moving sqtab_lo/sqtab_hi into .segment "SQTAB_DATA"
-; with .res 256 x2 (letting ld65 place them at $7800), or updating the cfg
-; MEMORY map to match $8000. Do this after all crypto modules are ported
-; and the cfg's CRYPTO region is verified to end below whichever address
-; is chosen.
+; The ACME-era TODO here described the cfg reserving SQTAB at $7800-$7BFF
+; while these equates said $8000/$8200. That disagreement is gone: the cfgs
+; have carved SQTAB_HOLE at $8000-$83FF since v1.0.0, which is the option
+; the TODO listed second ("updating the cfg MEMORY map to match $8000").
+;
+; The base now comes from ONE place for every consumer of it — the two .s
+; sites, both cfgs and the sibling's -D — and src/contract_asserts.s asserts
+; the cfg's reserved window against it (contract §6.7). See the header of
+; crypto/shared/sqtab_base.inc for why a second copy is a silent-corruption
+; hazard rather than a tidiness issue.
 ; =============================================================================
-sqtab_lo        = $8000         ; 512 bytes: low bytes of floor(n^2/4)
-sqtab_hi        = $8200         ; 512 bytes: high bytes of floor(n^2/4)
+.include "crypto/shared/sqtab_base.inc"
+
+sqtab_lo        = WG_SQTAB_LO   ; 512 bytes: low bytes of floor(n^2/4)
+sqtab_hi        = WG_SQTAB_HI   ; 512 bytes: high bytes of floor(n^2/4)
 
 .segment "CRYPTO_CODE"
 
