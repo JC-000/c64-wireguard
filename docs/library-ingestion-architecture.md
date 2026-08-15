@@ -1,7 +1,7 @@
 # Library-ingestion architecture
 
 How c64-wireguard consumes the sibling crypto libraries `c64-x25519`
-(v0.11.0) and `c64-ChaCha20-Poly1305` (v0.8.0) **as the shipped
+(v0.11.2) and `c64-ChaCha20-Poly1305` (v0.9.0) **as the shipped
 default**, linking the libraries' own contract-§6 archive products with
 zero source staging: each sibling builds itself via its own `make lib`
 target, and WG links the resulting `.a` unmodified.
@@ -250,14 +250,24 @@ points. They are no longer shipped, and the in-tree `poly1305.s`
   sweep, also no code change (its PRG is byte-identical all the way back
   to v0.8.0); v0.11.0 the phase-3 fleet wave — SPEC v0.9.x §6 adoption,
   the `LIB_SHARED_REU_MUL_*` and ZP-trio export removals and the
-  `poly_carry` → `mul_carry` rename, ABI 2→3, still byte-identical.
+  `poly_carry` → `mul_carry` rename, ABI 2→3, still byte-identical;
+  v0.11.1 the §6.6/§6.7 placement guards and the consumer-reachable
+  `ZP_CONFIG_NO_EXPORTS` fix (filed from here as their #99); v0.11.2 a
+  docs-accuracy release correcting `vic_blank` from "~20-25%" to ~6%
+  (filed from here as their #103, and our measurement is one of the
+  three independent sources it cites) plus the §6.3 `X25519_PROFILE`
+  knob guard. ABI has stayed 3 and the PRG byte-identical throughout.
 - c64-ChaCha20-Poly1305 `CHANGELOG.md` + `docs/INTEGRATION.md` — v0.7.0
   brought §4 segment prefixes, the prefixed manifest exports and the
   `SHARED_CT_MUL_8X8` deferral gate; v0.8.0 the §2 ZP registry rename
   (ABI 1→3), §6.1 canonical archive basenames and §6.2 defines
-  forwarding, all codegen-neutral.
+  forwarding, all codegen-neutral; v0.9.0 the §6.7 image guard and the
+  R2 ZP-usage drift ratchet, ABI unchanged at 3. Its INTEGRATION.md is
+  also the source of the "always call `poly1305_lib_init` once at boot"
+  rule that src/boot.s now follows.
 - [c64-lib-contract](https://github.com/JC-000/c64-lib-contract)
-  SPEC v0.9.2 §§1-8 — §1 prefixed version exports and the
+  SPEC v0.10.3 §§1-8 (latest tagged release; the siblings' ledgers run
+  through v0.10.6, which adds no obligation on the consumer side) — §1 prefixed version exports and the
   `LIB_NO_BARE_EXPORTS` gate, §2 the ZP slot-name registry, §5 aggregate
   manifests, §6 the packaging chapter (§6.1 canonical basenames, §6.2
   defines forwarding, §6.3 app-owned targets, §6.5 the rename window),

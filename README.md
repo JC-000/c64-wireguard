@@ -8,7 +8,7 @@ WireGuard Noise protocol implementation for the Commodore 64, written in 6502 as
 
 **[v1.0.0](https://github.com/JC-000/c64-wireguard/releases/tag/v1.0.0) is the first tagged release** (2026-07-28): ready-to-run `.prg` and `.d64` artifacts for both network backends in REU and stock-C64 (no-REU) variants. The released UCI/REU build repeated the full handshake + bidirectional transport on hardware post-tag (`docs/RELEASE_NOTES_v1.0.0.md` §Verification).
 
-The shipped build links the sibling crypto libraries [c64-x25519](https://github.com/JC-000/c64-x25519) (v0.11.0) and [c64-ChaCha20-Poly1305](https://github.com/JC-000/c64-ChaCha20-Poly1305) (v0.8.0) as archives per the [c64-lib-contract](https://github.com/JC-000/c64-lib-contract) conventions — every reachable multiply on the X25519 and Poly1305 paths is the contract's constant-time `ct_mul_8x8` body. The in-tree crypto remains available behind `USE_*_SIBLING=0` as a legacy/dev configuration.
+The shipped build links the sibling crypto libraries [c64-x25519](https://github.com/JC-000/c64-x25519) (v0.11.2) and [c64-ChaCha20-Poly1305](https://github.com/JC-000/c64-ChaCha20-Poly1305) (v0.9.0) as archives per the [c64-lib-contract](https://github.com/JC-000/c64-lib-contract) conventions — every reachable multiply on the X25519 and Poly1305 paths is the contract's constant-time `ct_mul_8x8` body. The in-tree crypto remains available behind `USE_*_SIBLING=0` as a legacy/dev configuration.
 
 **Phase 8 complete**: Pre-Shared Key (PSK) support — IKpsk2 protocol compliance, optional PSK in disk config, backward-compatible with zero PSK.
 
@@ -91,8 +91,8 @@ The full memory layout is defined in `cfg/c64-wireguard-ip65.cfg` and `cfg/c64-w
 | `src/crypto_abi.inc` | Public crypto ABI contract (fe25519_*, x25519_*, chacha20_*, poly1305_*, aead_*, blake2s_*) matching the sibling libraries |
 | `src/net_abi.inc` | Public UDP networking ABI contract (net_init, net_dhcp, net_poll, net_udp_*) |
 | `src/contract_asserts.s` | Link-time c64-lib-contract checks: REU bank masks disjoint, §8.0 shared-primitive ownership, sibling ABI version |
-| `libs/x25519/` | c64-x25519 submodule (v0.11.0) — X25519 + fe25519, the shipped implementation; built via its own `make lib` |
-| `libs/chacha20poly1305/` | c64-ChaCha20-Poly1305 submodule (v0.8.0) — ChaCha20/Poly1305/AEAD/word32, the shipped implementation |
+| `libs/x25519/` | c64-x25519 submodule (v0.11.2) — X25519 + fe25519, the shipped implementation; built via its own `make lib` |
+| `libs/chacha20poly1305/` | c64-ChaCha20-Poly1305 submodule (v0.9.0) — ChaCha20/Poly1305/AEAD/word32, the shipped implementation |
 | `src/crypto/blake2s.s` | BLAKE2s-256: init, update, final, compress, G function, keyed hashing (in-tree by design — no sibling library) |
 | `src/crypto/blake2s_kdf.s` | HMAC-BLAKE2s and WireGuard KDF (kdf_1, kdf_2, kdf_3) |
 | `src/crypto/entropy.s` | Hardware RNG: SID voice 3 noise XOR CIA1 timer |
@@ -177,7 +177,7 @@ All tests use the direct-memory `jsr()` pattern. Use `--seed N` to reproduce spe
 
 ### Performance
 
-At 1 MHz (hardware-anchored numbers from the c64-x25519 v0.8.0 release and the v1.0.0 hardware runs; still current at the v0.11.0 pin, whose PRG is byte-identical to v0.8.0 — v0.9.0 through v0.11.0 changed manifest metadata, naming and docs only):
+At 1 MHz (hardware-anchored numbers from the c64-x25519 v0.8.0 release and the v1.0.0 hardware runs; still current at the v0.11.2 pin, whose PRG is byte-identical to v0.8.0 — every release from v0.9.0 through v0.11.2 changed manifest metadata, naming, guards and docs only):
 
 - X25519 scalar multiply: **~4.3 min** (REU build, 262M cycles) / **~7.3 min** (no-REU build, constant-time on-chip multiply)
 - Full handshake wall-clock to `SESSION_ACTIVE`: **~23 min** measured on hardware (initiation ~14 min + Type-2 processing ~9 min; REU build, includes responder round-trips)
