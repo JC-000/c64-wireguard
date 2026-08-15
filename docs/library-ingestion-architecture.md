@@ -1,7 +1,7 @@
 # Library-ingestion architecture
 
 How c64-wireguard consumes the sibling crypto libraries `c64-x25519`
-(v0.10.1) and `c64-ChaCha20-Poly1305` (v0.7.0) **as the shipped
+(v0.11.0) and `c64-ChaCha20-Poly1305` (v0.8.0) **as the shipped
 default**, linking the libraries' own contract-§6 archive products with
 zero source staging: each sibling builds itself via its own `make lib`
 target, and WG links the resulting `.a` unmodified.
@@ -67,8 +67,8 @@ into its archive but is unreferenced in the link.
      x25519 profile change silently dropping an ownership bit, which
      would otherwise surface as a table read with no init.
    - §8.0 subset invariant per library (`OWNED & ~CONSUMES = 0`).
-   - §1 per-library ABI pins: `LIB_X25519_ABI_VERSION = 2` and
-     `LIB_CHACHA20_POLY1305_ABI_VERSION = 1`.
+   - §1 per-library ABI pins: `LIB_X25519_ABI_VERSION = 3` and
+     `LIB_CHACHA20_POLY1305_ABI_VERSION = 3`.
 
    Both libraries are built with `-D LIB_NO_BARE_EXPORTS=1` so each
    exports only its `LIB_<X>_`-prefixed manifest. That is what lets one
@@ -87,11 +87,26 @@ Both scripts invoke the sibling's own Makefile and copy the archive to
 make is the incrementality layer).
 
 **`build_x25519.sh`** — `make -C libs/x25519 lib` with
-`CA65FLAGS='-D LIB_SHARED_SQTAB_BASE=32768 -D LIB_NO_BARE_EXPORTS=1'`,
+`CONTRACT_DEFINES='-D LIB_SHARED_SQTAB_BASE=32768 -D LIB_NO_BARE_EXPORTS=1'`,
 plus `-D X25519_ONCHIP_MUL=1` under `X25519_PROFILE=onchip` (WG
 `REU=0`). Separate sibling `BUILD_DIR`s per profile
 (`build` / `build-onchip`) so profile switches can never reuse stale
 objects.
+
+`CONTRACT_DEFINES` is the contract §6.2 seam, available since v0.11.0,
+and replaced a `CA65FLAGS=` override. `CA65FLAGS` survives upstream as a
+deprecated alias, but it is a hard assign that clobbers the library's own
+`-t c64 -g` — every sibling object through the v0.10.1 pin was assembled
+without the C64 target or debug info.
+
+The companion `CONTRACT_ZP_DEFINES` is threaded through but left empty.
+It would be the natural home for `-D ZP_CONFIG_NO_EXPORTS=1` (WG #51),
+which suppresses `zp_config.o`'s redundant `.exportzp` block — but
+`libs/x25519/src/constants.s` assigns that symbol *unguarded* before
+including `zp_config.s`, so a command-line `-D` is a hard
+"already defined" error in every TU. Not currently reachable through any
+supported seam; filed as [c64-x25519#99](https://github.com/JC-000/c64-x25519/issues/99),
+where the fix is a one-line `.ifndef`.
 
 Two ca65/make traps this flag list exists to avoid, both of which fail
 **silently**:
@@ -110,10 +125,19 @@ Two ca65/make traps this flag list exists to avoid, both of which fail
 
 **`build_chacha20poly1305.sh`** — `make -C libs/chacha20poly1305 lib`
 with the deferral defines, `POLY1305_MULTIPLY_ROLLED_OUTER=1` and
-`LIB_NO_BARE_EXPORTS=1`, passed via a `CA65=` override (their
-`CA65FLAGS` is `=`-assigned, not `?=`, so `CA65FLAGS=` on the command
-line would be discarded). The archive is copied to `build/lib/`
-unmodified — no member rewriting, no source staging.
+`LIB_NO_BARE_EXPORTS=1`, passed via `CONTRACT_DEFINES` (v0.8.0). This
+replaced a `CA65=` override, which was needed because their `CA65FLAGS`
+is `=`-assigned, not `?=`, so a `CA65FLAGS=` on the command line was
+discarded. There is deliberately no `CONTRACT_ZP_DEFINES` upstream: the
+archive ships no ZP-defining member, which is why WG's `src/exports.s`
+must supply the §2 registry slot names itself. The archive is copied to
+`build/lib/` unmodified — no member rewriting, no source staging.
+
+Both scripts copy the §6.1 **canonical** archive basenames
+(`x25519.a`, `chacha20poly1305.a`). The old `libx25519.a` /
+`c64-chacha20-poly1305.a` spellings are deprecated dialects, still
+written through the §6.5 rename window and dropped at each library's
+next MAJOR.
 
 ## Linker-config mapping
 
@@ -224,14 +248,20 @@ points. They are no longer shipped, and the in-tree `poly1305.s`
   `LIB_X25519_ABI_VERSION` 1→2 erratum (generation counter catching up
   with v0.9.0's export removal — no code change); v0.10.1 a docs/snippet
   sweep, also no code change (its PRG is byte-identical all the way back
-  to v0.8.0).
+  to v0.8.0); v0.11.0 the phase-3 fleet wave — SPEC v0.9.x §6 adoption,
+  the `LIB_SHARED_REU_MUL_*` and ZP-trio export removals and the
+  `poly_carry` → `mul_carry` rename, ABI 2→3, still byte-identical.
 - c64-ChaCha20-Poly1305 `CHANGELOG.md` + `docs/INTEGRATION.md` — v0.7.0
   brought §4 segment prefixes, the prefixed manifest exports and the
-  `SHARED_CT_MUL_8X8` deferral gate.
+  `SHARED_CT_MUL_8X8` deferral gate; v0.8.0 the §2 ZP registry rename
+  (ABI 1→3), §6.1 canonical archive basenames and §6.2 defines
+  forwarding, all codegen-neutral.
 - [c64-lib-contract](https://github.com/JC-000/c64-lib-contract)
-  SPEC v0.7.5 §§1-8 — §1 prefixed version exports and the
-  `LIB_NO_BARE_EXPORTS` gate, §5 aggregate manifests, §8.0 three-state
-  ownership semantics and the coverage assert, §8.4 the precalc-table
-  macro.
+  SPEC v0.9.2 §§1-8 — §1 prefixed version exports and the
+  `LIB_NO_BARE_EXPORTS` gate, §2 the ZP slot-name registry, §5 aggregate
+  manifests, §6 the packaging chapter (§6.1 canonical basenames, §6.2
+  defines forwarding, §6.3 app-owned targets, §6.5 the rename window),
+  §8.0 three-state ownership semantics and the coverage assert, §8.4 the
+  precalc-table macro.
 - `src/contract_asserts.s`, `tools/integration/*.sh`,
   `tools/check_abi_drift.py` — the verification layers.

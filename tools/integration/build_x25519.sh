@@ -34,6 +34,15 @@
 #       both manifests enter it. The chacha ingestion script passes the
 #       same define — the two MUST agree or the collision returns.
 #
+# Defines go through the contract §6.2 variables (CONTRACT_DEFINES /
+# CONTRACT_ZP_DEFINES, both added in v0.11.0), NOT CA65FLAGS. CA65FLAGS
+# survives as a deprecated alias through the §6.5 window, but it is a
+# hard-assign: passing it clobbers the library's own `-t c64 -g`, so
+# every object was being assembled without the C64 target or debug info.
+# The two variables differ in routing — CONTRACT_ZP_DEFINES reaches
+# every slot-defining TU but never a consumer TU that .importzp's a
+# slot, where a -D would be a hard "already defined" error.
+#
 # Separate BUILD_DIRs per profile so switching REU=1 <-> REU=0 can never
 # reuse stale objects assembled under the other profile's defines.
 # =============================================================================
@@ -48,7 +57,7 @@ PROFILE="${X25519_PROFILE:-default}"
 
 # DECIMAL 32768, never $8000: the flags value crosses TWO expansion
 # layers inside the sibling build — make expands the recipe line
-# ($(CA65) $(CA65FLAGS)), then /bin/sh expands the resulting command.
+# ($(CA65) $(ALL_DEFINES)), then /bin/sh expands the resulting command.
 # `$8000` loses `$8` to make ($(8) = empty); `$$8000` survives make but
 # then the SHELL eats `$8` as a positional parameter. Either way ca65
 # silently receives BASE=000 and sqtab_init builds the table over ZERO
@@ -71,18 +80,48 @@ case "$PROFILE" in
         ;;
 esac
 
+# CONTRACT_ZP_DEFINES is threaded through but deliberately EMPTY.
+#
+# The obvious use for it would be -D ZP_CONFIG_NO_EXPORTS=1, to suppress
+# zp_config.o's .exportzp block: src/exports.s supplies every ZP slot the
+# library declares, so those exports are redundant, and ten of them
+# overlap WG's own names (fe_carry, fe_loop, fe_mul_i, fe_mul_j,
+# fe25519_src1/2/dst, x25_prev_bit, x25_byte_idx, x25_bit_mask — down
+# from fourteen at v0.10.1). WG issue #51 proposed exactly that.
+#
+# MEASURED AT v0.11.0: it does not work, and cannot. src/constants.s:128
+# assigns `ZP_CONFIG_NO_EXPORTS = 1` unguarded before including
+# zp_config.s, so a command-line -D is a hard redefinition for every TU
+# that includes constants.s — which is all of them:
+#   src/constants.s(128): Error: Symbol 'ZP_CONFIG_NO_EXPORTS' is already defined
+# The define is only usable by zp_config.s compiled standalone, and
+# `make lib` builds it with the same pattern rule as everything else, so
+# the §6.2 seam cannot scope it there. Filed as c64-x25519#99; the fix
+# is a one-line .ifndef guard on that assignment.
+#
+# The dangerous half of the collision is closed at the source anyway:
+# upstream #93 dropped the zp_ptr1/zp_tmp1/zp_tmp2 trio and #95 renamed
+# poly_carry -> mul_carry. The remaining fe_*/x25_* overlap stays
+# dormant for the same reason it always has — no WG TU .importzp's an
+# x25519 slot, so zp_config.o is never pulled from the archive.
+CONTRACT_ZP_FLAGS=''
+
 # Force a full sibling rebuild: their Makefile tracks source timestamps,
-# not CA65FLAGS values, so a flag change would silently reuse stale
+# not define values, so a flag change would silently reuse stale
 # objects. The library builds in seconds; determinism wins.
 rm -rf "$LIB_ROOT/$BUILD_DIR"
 
 make -C "$LIB_ROOT" lib \
     BUILD_DIR="$BUILD_DIR" \
     LIB_DIR="$BUILD_DIR/lib" \
-    CA65FLAGS="$FLAGS"
+    CONTRACT_DEFINES="$FLAGS" \
+    CONTRACT_ZP_DEFINES="$CONTRACT_ZP_FLAGS"
 
 mkdir -p "$OUT_DIR"
-cp "$LIB_ROOT/$BUILD_DIR/lib/libx25519.a" "$ARCHIVE"
+# §6.1 canonical basename (v0.11.0). The old `libx25519.a` spelling is a
+# deprecated dialect, still written through the §6.5 rename window and
+# dropped at the library's next MAJOR — don't depend on it.
+cp "$LIB_ROOT/$BUILD_DIR/lib/x25519.a" "$ARCHIVE"
 
 # Version sanity. Checks the PREFIXED symbol: under LIB_NO_BARE_EXPORTS the
 # unprefixed LIB_VERSION_MAJOR no longer exists, so grepping for it would

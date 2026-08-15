@@ -4,9 +4,9 @@
 ; Active only in the two-sibling build (USE_X25519_SIBLING=1 +
 ; USE_CHACHA_SIBLING=1; the Makefile enforces that the toggles match).
 ;
-; Pins: c64-x25519 v0.10.0, c64-ChaCha20-Poly1305 v0.7.0.
+; Pins: c64-x25519 v0.11.0, c64-ChaCha20-Poly1305 v0.8.0.
 ;
-; Contract obligations covered (SPEC v0.7.x):
+; Contract obligations covered (SPEC v0.9.2):
 ;   §1   per-library ABI generation pins.
 ;   §3   REU bank budget — x25519 vs chacha vs WG's own claims.
 ;   §8.0 shared-primitive ownership (disjointness), the v0.5.0 coverage
@@ -65,15 +65,23 @@
 .import LIB_CHACHA20_POLY1305_SHARED_CONSUMES
 .import LIB_CHACHA20_POLY1305_ABI_VERSION
 
-; §8.4 shared-table shape. Only _SIZE is imported: contract v0.7.4 pins
-; _REGION/_SHARED ": abs", which x25519 v0.10.0 carries but chacha v0.7.0
-; (built against SPEC v0.7.2) does not — importing chacha's as absolute
-; would emit an ld65 address-size mismatch warning. _SIZE is absolute on
-; both sides. Note this import form is only valid for tables <= $FFFF
-; (contract #18): sqtab is 1024, but reu_mul at 131072 must never be
-; imported this way — it exports 'far' and raises a range error here.
+; §8.4 shared-table shape. All three fields are imported as of the
+; v0.11.0 / v0.8.0 pins: contract v0.7.4 pins _REGION/_SHARED ": abs",
+; which x25519 has carried since v0.10.0 and chacha picked up in v0.8.0
+; (it shipped v0.7.0 against SPEC v0.7.2, where importing its _REGION /
+; _SHARED as absolute drew an ld65 address-size mismatch warning — hence
+; the earlier _SIZE-only import). Measured absolute on both sides at
+; these tags before widening.
+;
+; Note this import form is only valid for tables <= $FFFF (contract #18):
+; sqtab is 1024, but reu_mul at 131072 must never be imported this way —
+; it exports 'far' and raises a range error here.
 .import LIB_X25519_PRECALC_sqtab_SIZE
+.import LIB_X25519_PRECALC_sqtab_REGION
+.import LIB_X25519_PRECALC_sqtab_SHARED
 .import LIB_CHACHA20_POLY1305_PRECALC_sqtab_SIZE
+.import LIB_CHACHA20_POLY1305_PRECALC_sqtab_REGION
+.import LIB_CHACHA20_POLY1305_PRECALC_sqtab_SHARED
 
 ; --- §3 REU bank budget ------------------------------------------------------
 ;
@@ -117,18 +125,52 @@ WG_REU_BANKS_USED = $00
 ; libraries emitted one symbol name, so there was nothing to compare).
 .assert LIB_X25519_PRECALC_sqtab_SIZE = LIB_CHACHA20_POLY1305_PRECALC_sqtab_SIZE, lderror, "linked libraries disagree on the shared §8.1 sqtab size — the deferring library would read a table built to a different shape"
 
+; Region agreement. Both must place the table in the same §8.4 region
+; class (1 = main RAM) — a table one library builds in the REU and the
+; other reads from main RAM is the same silent-wrong-result failure as a
+; size mismatch, and size alone would not catch it.
+.assert LIB_X25519_PRECALC_sqtab_REGION = LIB_CHACHA20_POLY1305_PRECALC_sqtab_REGION, lderror, "linked libraries disagree on the shared §8.1 sqtab region — one builds the table where the other does not read it"
+
+; Both sides must actually declare the table SHARED. If either ever
+; reverts to a private table, the §8.0 masks would still look consistent
+; while the two libraries silently maintained separate copies.
+.assert LIB_X25519_PRECALC_sqtab_SHARED = 1, lderror, "x25519 no longer declares the §8.1 sqtab shared — the deferral in build_chacha20poly1305.sh has nothing to defer to"
+.assert LIB_CHACHA20_POLY1305_PRECALC_sqtab_SHARED = 1, lderror, "chacha20poly1305 no longer declares the §8.1 sqtab shared — it would build a private table over x25519's"
+
 ; --- §1 ABI generation pins --------------------------------------------------
 ;
 ; Per-library now. The previous bare `LIB_ABI_VERSION` import read as an
 ; x25519 check but silently bound to whichever archive the linker reached
 ; first, since both libraries exported that same name.
 ;
-; x25519 is at generation 2: contract v0.7.5 reclassified LIB_<X>_ABI_VERSION
-; as a monotonic counter incremented on any breaking export change,
-; independent of MAJOR, and v0.9.0's removal of the LIB_SHARED_PRIMITIVES_*
-; exports qualified. v0.10.0 is the erratum that advanced the counter — no
-; code change, PRG byte-identical to v0.8.0/v0.9.0.
-.assert LIB_X25519_ABI_VERSION = 2, lderror, "x25519 ABI generation != 2 — its exported surface changed; re-audit the integration before bumping this pin"
-.assert LIB_CHACHA20_POLY1305_ABI_VERSION = 1, lderror, "chacha20poly1305 ABI generation != 1 — its exported surface changed; re-audit the integration before bumping this pin"
+; Contract v0.7.5 reclassified LIB_<X>_ABI_VERSION as a monotonic counter
+; incremented on any breaking export change, independent of MAJOR. Both
+; libraries are at generation 3 as of the phase-3 fleet wave, and both got
+; there for reasons this repo had to act on rather than merely re-pin:
+;
+;   x25519  1 -> 2  v0.9.0 removed the LIB_SHARED_PRIMITIVES_* exports
+;                   (v0.10.0 was the erratum that advanced the counter).
+;           2 -> 3  v0.11.0: bare LIB_SHARED_REU_MUL_* un-exported in
+;                   favour of the LIB_X25519_*-prefixed outputs (#92),
+;                   the zp_ptr1/zp_tmp1/zp_tmp2 trio dropped from the
+;                   export surface (#93), and poly_carry -> mul_carry —
+;                   poly_ is chacha-registered under SPEC §2 (#95). The
+;                   last two are what let src/exports.s stop describing
+;                   an imaginary ZP fence and start relying on a real
+;                   one; see its x25519 comment block.
+;
+;   chacha  1 -> 2  library issue #67, under the same v0.7.5 rule.
+;           2 -> 3  v0.8.0: the four general-purpose ZP slots took the
+;                   §2 registry prefix, so its TUs now .importzp
+;                   chacha20poly1305_zp_* — names a consumer supplying
+;                   the slots from its own zp_config (exactly WG) must
+;                   export or fail to link. Under LIB_NO_BARE_EXPORTS
+;                   the bare aliases are gone entirely.
+;
+; Both bumps are codegen-neutral upstream — each library re-verified its
+; test PRG byte-identical across the rename — so no perf, CT or hardware
+; result carried in this repo's docs needs re-measuring.
+.assert LIB_X25519_ABI_VERSION = 3, lderror, "x25519 ABI generation != 3 — its exported surface changed; re-audit the integration before bumping this pin"
+.assert LIB_CHACHA20_POLY1305_ABI_VERSION = 3, lderror, "chacha20poly1305 ABI generation != 3 — its exported surface changed; re-audit the integration before bumping this pin"
 
 .endif

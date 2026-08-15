@@ -46,14 +46,25 @@ ARCHIVE="$OUT_DIR/chacha20poly1305.a"
 DEFS='-D SHARED_SQTAB_INIT=1 -D SHARED_CT_MUL_8X8=1 -D POLY1305_MULTIPLY_ROLLED_OUTER=1 -D LIB_NO_BARE_EXPORTS=1'
 
 # Force a full sibling rebuild: their Makefile tracks source timestamps,
-# not the CA65 override's define set, so a define change would silently
-# reuse stale objects.
+# not the define set, so a define change would silently reuse stale
+# objects.
 rm -rf "$LIB_ROOT/build/lib"
 
-make -C "$LIB_ROOT" lib CA65="ca65 $DEFS"
+# CONTRACT_DEFINES is the §6.2 seam, added in v0.8.0. It replaces the old
+# `CA65="ca65 $DEFS"` override, which worked only by accident: overriding
+# CA65 prepends the defines ahead of the library's own CA65FLAGS, so it
+# happened to keep `-t c64 -g -I ...`, but the library documents CA65 as
+# unsupported for exactly that reason. There is deliberately no
+# CONTRACT_ZP_DEFINES here — this archive ships no ZP-defining member
+# (src/zp_config.s is excluded so consumers assemble their own), which is
+# why WG's src/exports.s has to supply the §2 registry slot names.
+make -C "$LIB_ROOT" lib CONTRACT_DEFINES="$DEFS"
 
 mkdir -p "$OUT_DIR"
-cp "$LIB_ROOT/build/lib/c64-chacha20-poly1305.a" "$ARCHIVE"
+# §6.1 canonical basename (v0.8.0). `c64-chacha20-poly1305.a` is the
+# deprecated dialect, still written through the §6.5 rename window and
+# dropped at the library's next MAJOR — don't depend on it.
+cp "$LIB_ROOT/build/lib/chacha20poly1305.a" "$ARCHIVE"
 
 # The interim poly1305_lib.o member swap that lived here is GONE. It gated
 # the legacy mul_8x8 / poly_prod_lo / poly_prod_hi exports behind
