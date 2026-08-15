@@ -17,6 +17,14 @@ It matters here more than in most projects: a full WireGuard handshake is
 before that. Every percent is a percent off a number that is already past
 the point of usability.
 
+THESE NUMBERS ARE NTSC. This tool runs ntsc=True. NTSC is 65 cycles x 262
+lines = 17030 cycles/frame, and 25 text rows give 25 badlines/frame at ~43
+stolen cycles each: 1075/17030 = 6.31%, which is what it measures. PAL is
+63 x 312 = 19656 against the same 1075, i.e. ~5.5% — a PAL machine sees a
+smaller saving from identical code. The figure is a property of the
+display standard and of the caller's own screen contents, not of the
+crypto, so a consumer with sprites up sees a larger one.
+
 WHAT IS MEASURED
 
 Elapsed EMULATED time via the CIA1 TOD clock ($DC08-$DC0B). It is emulated
