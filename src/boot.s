@@ -134,8 +134,15 @@ start:
         ; hide. ~6.3% off the boot wait; see src/wg/vic_boost.s.
         jsr     vic_boost_begin
 
-        ; Initialize quarter-square table (needed by mul_8x8 and fe_sqr)
+        ; Initialize quarter-square table (needed by mul_8x8 and fe_sqr).
+        ; Under the sibling build go through poly1305_lib_init, which
+        ; runs the same table builder AND sets chacha's sqtab_ready —
+        ; see crypto_abi.inc for why that flag is worth setting here.
+.ifdef USE_CHACHA_SIBLING
+        jsr     poly1305_lib_init
+.else
         jsr     sqtab_init
+.endif
 
 .ifndef WG_NO_REU
         ; Initialize REU multiplication tables (precompute all 256x256 products)
