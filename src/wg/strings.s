@@ -6,6 +6,7 @@
 
 ; --- Exported string labels ---
 .export title_msg
+.export ready_msg
 .export net_init_msg
 .export net_dhcp_msg
 .export net_ok_msg
@@ -42,6 +43,13 @@ title_msg:
         .byte "FOR COMMODORE 64", 13, 13
         .byte "L=LOAD H=HS P=PING", 13
         .byte "M=MSG S=SEND Q=QUIT", 13, 0
+
+; Printed once boot's table build (sqtab_init/poly1305_lib_init +
+; reu_mul_init) has returned and the display is unblanked again — see
+; boot.s and issue #55. Distinct from title_msg's "Q=QUIT", which prints
+; before the table build and is not a boot-complete signal.
+ready_msg:
+        .byte "READY.", 13, 0
 
 net_init_msg:
         .byte "INITIALIZING NETWORK...", 13, 0

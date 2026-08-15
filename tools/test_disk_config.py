@@ -21,7 +21,7 @@ from c64_test_harness import (
     read_bytes, write_bytes, jsr,
 )
 from c64_test_harness.disk import DiskImage, FileType
-from vice_util import binary_wait_for_text
+from vice_util import binary_wait_for_boot_ready
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "wireguard.prg")
@@ -204,7 +204,7 @@ def run_disk_test(disk, labels, test_fn):
         inst = mgr.acquire()
         print(f"VICE PID={inst.pid}, port={inst.port}")
         transport = inst.transport
-        grid = binary_wait_for_text(transport, "Q=QUIT", timeout=60.0)
+        grid = binary_wait_for_boot_ready(transport, labels, timeout=180.0)
         if grid is None:
             raise RuntimeError("Main menu did not appear")
         write_bytes(transport, 0x0339, bytes([0x4C, 0x39, 0x03]))

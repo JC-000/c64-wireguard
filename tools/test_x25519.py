@@ -23,7 +23,7 @@ from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
     read_bytes, write_bytes, jsr,
 )
-from vice_util import binary_wait_for_text
+from vice_util import binary_wait_for_boot_ready
 
 try:
     from cryptography.hazmat.primitives.asymmetric.x25519 import (
@@ -378,7 +378,7 @@ def main():
         inst = mgr.acquire()
         print(f"VICE PID={inst.pid}, port={inst.port}")
         transport = inst.transport
-        grid = binary_wait_for_text(transport, "Q=QUIT", timeout=60.0)
+        grid = binary_wait_for_boot_ready(transport, labels, timeout=180.0)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)

@@ -14,8 +14,9 @@ import time
 
 from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
-    read_bytes, write_bytes, wait_for_text,
+    read_bytes, write_bytes,
 )
+from vice_util import binary_wait_for_boot_ready
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "wireguard.prg")
@@ -57,7 +58,7 @@ def main():
         inst = mgr.acquire()
         flush_print(f"VICE PID={inst.pid}, port={inst.port}")
         transport = inst.transport
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0)
+        grid = binary_wait_for_boot_ready(transport, labels, timeout=180.0)
         if grid is None:
             flush_print("FATAL: Main menu did not appear")
             sys.exit(1)
