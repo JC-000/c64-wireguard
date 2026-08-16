@@ -19,6 +19,9 @@ import datetime
 import socket
 import struct
 import sys
+import threading
+
+from c64_test_harness.encoding import char_to_petscii
 
 from .responder import (
     MSG_TYPE_INITIATION,
@@ -40,6 +43,67 @@ def _log(msg: str) -> None:
 
 def _hexdump32(data: bytes) -> str:
     return data[:32].hex(" ")
+
+
+def _say(msg: str) -> None:
+    """Chat output on stdout, so it survives `2>/dev/null` and pipes cleanly.
+
+    Diagnostics stay on stderr via _log(); the conversation is the product.
+    """
+    print(msg, flush=True)
+
+
+# ── PETSCII <-> ASCII ─────────────────────────────────────────────────────
+#
+# The C64 end of this tunnel is a keyboard and a screen, not a byte pipe.
+# do_message_input captures PETSCII from GETIN, and display_payload passes
+# bytes to CHROUT, which interprets PETSCII. Sending raw ASCII mostly works
+# by accident (the two agree on $20-$5E) and then produces mojibake the
+# moment anyone types a lowercase letter, because unshifted PETSCII letters
+# live at $41-$5A and display as UPPERCASE.
+
+def _ascii_to_petscii(text: str) -> bytes:
+    """Encode a typed line for the C64.
+
+    Uses the harness's char_to_petscii where it has a mapping, which folds
+    case the way the default charset expects. Unmappable characters become
+    '.' rather than raising: a chat client that dies on a stray emoji is
+    worse than one that drops it.
+    """
+    out = bytearray()
+    for ch in text:
+        try:
+            out.append(char_to_petscii(ch))
+        except (ValueError, KeyError):
+            out.append(ord("."))
+    return bytes(out)
+
+
+def _petscii_to_ascii(data: bytes) -> str:
+    """Decode what the C64 sent into something readable in a terminal.
+
+    display_payload's own filter is the model: printable range through,
+    everything else a dot. $C1-$DA is the shifted-letter block, which maps
+    onto A-Z.
+    """
+    out = []
+    for b in data:
+        if 0x20 <= b <= 0x5E:
+            out.append(chr(b))
+        elif 0xC1 <= b <= 0xDA:
+            out.append(chr(b - 0x80))
+        elif b in (0x0D, 0x0A):
+            out.append(" ")
+        else:
+            out.append(".")
+    return "".join(out)
+
+
+# The C64's inbound path is the binding constraint, not the 1500-byte
+# tp_packet buffer: the Ultimate's SOCKET_READ truncates above 512 bytes
+# silently (issue #46). Stay well under it — 16 bytes of Type-4 header and
+# 16 of Poly1305 tag ride along with the plaintext.
+MAX_CHAT_PAYLOAD = 240
 
 
 def _decode_type(data: bytes) -> str:
@@ -72,17 +136,88 @@ def _decode_type(data: bytes) -> str:
     return f"unknown type=0x{t:02x} len={len(data)}"
 
 
+# ── shared session state ──────────────────────────────────────────────────
+
+class _Session:
+    """Socket + responder + learned peer, shared between the two threads.
+
+    The lock is not decorative. responder.encrypt_transport() MUTATES the
+    send counter and the underlying noise CipherState nonce, and the C64
+    validates that counter against its replay window. Two encrypts racing
+    would interleave nonces and desynchronise the stream — a bug that would
+    surface as sporadic decrypt failures on the C64 rather than anything
+    obviously threading-shaped.
+    """
+
+    def __init__(self, sock: socket.socket, responder: WireGuardResponder):
+        self.sock = sock
+        self.responder = responder
+        self.peer_addr: tuple[str, int] | None = None
+        self.active = False
+        self.lock = threading.Lock()
+        self.sent = 0
+
+    def send_text(self, text: str) -> bool:
+        payload = _ascii_to_petscii(text)
+        if len(payload) > MAX_CHAT_PAYLOAD:
+            _say(f"!! message truncated to {MAX_CHAT_PAYLOAD} bytes "
+                 f"(was {len(payload)}) — the Ultimate's SOCKET_READ "
+                 f"silently truncates above 512 (#46)")
+            payload = payload[:MAX_CHAT_PAYLOAD]
+        with self.lock:
+            if not self.active or self.peer_addr is None:
+                _say("!! no session yet — waiting for the C64's handshake. "
+                     "At 1 MHz that is ~13 min; at 48 MHz with REU=0, ~30 s.")
+                return False
+            try:
+                pkt = self.responder.encrypt_transport(payload)
+                self.sock.sendto(pkt, self.peer_addr)
+                self.sent += 1
+            except Exception as exc:
+                _log(f"ERROR sending Type4: {type(exc).__name__}: {exc}")
+                return False
+        _log(f"SEND Type4 {len(pkt)}B to {self.peer_addr[0]}:{self.peer_addr[1]} "
+             f"(msg #{self.sent}, {len(payload)}B plaintext)")
+        return True
+
+
+def _stdin_loop(session: _Session) -> None:
+    """Read typed lines and push them down the tunnel.
+
+    Runs as a daemon so Ctrl-C in the recv loop tears the whole thing down
+    without needing to interrupt a blocking readline.
+    """
+    _say("-- type a message and press enter to send to the C64; "
+         "/quit to exit --")
+    for line in sys.stdin:
+        line = line.rstrip("\n")
+        if line in ("/quit", "/q"):
+            _say("-- closing --")
+            import os
+            os._exit(0)
+        if not line:
+            continue
+        if session.send_text(line):
+            _say(f"you> {line}")
+
+
 # ── main server loop ──────────────────────────────────────────────────────
 
 def run_server(
     listen_addr: str,
     listen_port: int,
     responder: WireGuardResponder,
+    interactive: bool = False,
 ) -> None:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((listen_addr, listen_port))
     _log(f"STATE listening on {listen_addr}:{listen_port} (no timeout — waiting for C64)")
+
+    session = _Session(sock, responder)
+    if interactive:
+        threading.Thread(target=_stdin_loop, args=(session,),
+                         daemon=True, name="stdin").start()
 
     peer_addr: tuple[str, int] | None = None
     state = "WAIT_TYPE1"
@@ -112,6 +247,11 @@ def run_server(
             sock.sendto(response, peer_addr)
             state = "ACTIVE"
             _log("STATE → ACTIVE (handshake complete)")
+            with session.lock:
+                session.peer_addr = peer_addr
+                session.active = True
+            if interactive:
+                _say(f"-- session up with {peer_addr[0]} — you can type now --")
 
         elif pkt_type == MSG_TYPE_TRANSPORT:
             if state != "ACTIVE":
@@ -120,8 +260,12 @@ def run_server(
             try:
                 plaintext = responder.decrypt_transport(data)
                 _log(f"TYPE4 decrypted {len(plaintext)} bytes plaintext: {plaintext[:64]!r}")
+                if interactive:
+                    text = _petscii_to_ascii(plaintext).rstrip()
+                    if text:
+                        _say(f"c64> {text}")
             except Exception as exc:
-                _log(f"ERROR decrypting Type4: {exc}")
+                _log(f"ERROR decrypting Type4: {type(exc).__name__}: {exc}")
 
         else:
             _log(f"IGNORED unhandled packet type 0x{pkt_type:02x}")
@@ -141,6 +285,11 @@ def main() -> None:
                         help="Peer (C64) static public key (32 bytes hex)")
     parser.add_argument("--psk", default=None,
                         help="Pre-shared key (32 bytes hex, optional)")
+    parser.add_argument("--interactive", "-i", action="store_true",
+                        help="Two-way chat: print decrypted C64 messages and "
+                             "send typed lines back over the tunnel. Without "
+                             "it the server stays receive-only, which is what "
+                             "the handshake tests expect.")
     args = parser.parse_args()
 
     host, _, port_str = args.listen.rpartition(":")
@@ -152,7 +301,7 @@ def main() -> None:
     psk_bytes      = bytes.fromhex(args.psk) if args.psk else None
 
     responder = WireGuardResponder(priv_bytes, peer_pub_bytes, psk_bytes)
-    run_server(host, port, responder)
+    run_server(host, port, responder, interactive=args.interactive)
 
 
 if __name__ == "__main__":
