@@ -48,7 +48,7 @@ from c64_test_harness.backends.u64_debug_capture import DebugCapture  # noqa: E4
 from c64_test_harness.backends.ultimate64_helpers import (  # noqa: E402
     DEBUG_MODE_6510, check_measurement_environment, get_debug_stream_mode,
     recover, runner_health_check, set_debug_stream_mode,
-    set_reu, set_turbo_mhz, Ultimate64MeasurementEnvironmentError,
+    set_reu, set_turbo_mhz, get_turbo_mhz, Ultimate64MeasurementEnvironmentError,
 )
 
 # Reuse the trampoline helpers from the echo test (battle-tested).
@@ -560,6 +560,17 @@ def main() -> int:
                    help="1=Type-1 accepted; 2=SESSION_ACTIVE (default); "
                         "3=Type-4 transport round-trip")
     p.add_argument("--host", default=os.environ.get("U64_HOST", DEFAULT_HOST))
+    p.add_argument("--turbo", type=int, default=1,
+                   help="U64 CPU speed in MHz (default 1). Use 48 for a "
+                        "WALL-CLOCK throughput bench. NOTE: any on-device "
+                        "CIA-timer measurement is invalid above 1 MHz — the "
+                        "CIA keeps counting at its fixed rate while the CPU "
+                        "runs N x faster, so cycle counts read as "
+                        "cycles/N with no error raised. Every timing this "
+                        "tool reports is host-side time.monotonic() around "
+                        "the step, which measures real elapsed time and is "
+                        "unaffected. Do not add CIA-based timing here "
+                        "without re-reading check_measurement_environment().")
     p.add_argument("--password", default=os.environ.get("U64_PASSWORD"))
     p.add_argument("--debug-capture", action="store_true",
                    help="In stage 2, wrap the first session_handle_packet "
@@ -663,13 +674,30 @@ def main() -> int:
         except Exception as exc:
             log.warning("set_reu failed (continuing): %s", exc)
         time.sleep(0.5)
-        set_turbo_mhz(client, 1)
+        set_turbo_mhz(client, args.turbo)
         # Verify turbo actually stuck (harness PR #106 footgun: a prior
         # session may have left turbo at 48 MHz and reset() doesn't clear it).
-        try:
-            check_measurement_environment(client)
-        except Ultimate64MeasurementEnvironmentError as exc:
-            _skip(f"unexpected turbo state: {exc}")
+        #
+        # check_measurement_environment() asserts 1 MHz, and correctly so for
+        # its purpose: it guards CIA-timer measurements, which silently read
+        # as cycles/turbo_factor at speed. This tool takes no CIA-timer
+        # measurement — every figure it reports is host-side wall clock — so
+        # at --turbo != 1 the 1 MHz half of that guard does not apply and
+        # would just refuse the run. Confirm the requested speed actually
+        # stuck instead, which is the footgun that guard was really catching.
+        if args.turbo == 1:
+            try:
+                check_measurement_environment(client)
+            except Ultimate64MeasurementEnvironmentError as exc:
+                _skip(f"unexpected turbo state: {exc}")
+        else:
+            actual = get_turbo_mhz(client)
+            if actual != args.turbo:
+                _skip(f"requested --turbo {args.turbo} MHz but device "
+                      f"reports {actual} MHz")
+            log.warning("RUNNING AT %d MHz — wall-clock bench mode. Timings "
+                        "are host-side elapsed seconds; do not compare them "
+                        "against 1 MHz cycle counts.", args.turbo)
         time.sleep(0.2)
         # Load PRG and run.
         prg_bytes = prg_path.read_bytes()

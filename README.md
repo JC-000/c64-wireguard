@@ -177,11 +177,31 @@ All tests use the direct-memory `jsr()` pattern. Use `--seed N` to reproduce spe
 
 ### Performance
 
-At 1 MHz (hardware-anchored numbers from the c64-x25519 v0.8.0 release and the v1.0.0 hardware runs; still current at the v0.11.2 pin, whose PRG is byte-identical to v0.8.0 — every release from v0.9.0 through v0.11.2 changed manifest metadata, naming, guards and docs only):
+At 1 MHz. The handshake and turbo figures below were measured on hardware on 2026-08-15 at the current v0.11.2 / v0.9.0 pins; the per-primitive numbers remain hardware-anchored to the c64-x25519 v0.8.0 release and the v1.0.0 runs, and stay current because that library's PRG is byte-identical from v0.8.0 through v0.11.2 — every release since changed manifest metadata, naming, guards and docs only.
+
+(The freshly measured 21.7 min handshake is modestly under the ~23 min this section previously quoted. The direction is consistent with the VIC blanking and `poly1305_lib_init` changes added since v1.0.0, but the old figure was rounded to the nearest minute, so it is too coarse to treat as confirmation of either.)
 
 - X25519 scalar multiply: **~4.3 min** (REU build, 262M cycles) / **~7.3 min** (no-REU build, constant-time on-chip multiply)
-- Full handshake wall-clock to `SESSION_ACTIVE`: **~23 min** measured on hardware (initiation ~14 min + Type-2 processing ~9 min; REU build, includes responder round-trips)
+- Full handshake wall-clock to `SESSION_ACTIVE`: **21.7 min** measured on hardware (initiation 777.6 s + Type-2 processing 523.1 s; REU build, includes responder round-trips)
 - Type-4 transport encrypt/decrypt: ~1-2 s per small packet
+
+#### Turbo scaling on an Ultimate 64 Elite
+
+Measured 2026-08-15 on a U64E (fw 3.14d) at the v0.11.2 / v0.9.0 pins, both legs the same PRG in the same session via [`tools/test_uci_handshake_live.py --stage 3 --turbo N`](tools/test_uci_handshake_live.py) — full stage-3 PASS at both speeds, tunnel carrying data in both directions:
+
+| phase | 1 MHz | 48 MHz | speedup |
+|---|---:|---:|---:|
+| boot incl. `reu_mul_init` | 11.9 s | 3.2 s | 3.75x |
+| Type-1 initiation | 777.6 s | 53.0 s | 14.67x |
+| Type-2 → `SESSION_ACTIVE` | 523.1 s | 36.2 s | 14.45x |
+| **handshake total** | **1302.0 s** | **89.9 s** | **14.48x** |
+| Type-4 round-trip | 3.2 s | 0.6 s | 5.53x |
+
+**A 48x clock buys 14.5x — about 30% scaling efficiency.** This is the REU DMA wall-clock floor: REU transfers do not accelerate with CPU turbo, so the DMA-bound multiply path caps the gain. The internal spread is the evidence rather than an assumption — boot is dominated by `reu_mul_init`'s 128 KB precompute and gains only **3.75x**, while the crypto-bound phases gain ~14.5x. The more DMA-bound the phase, the less turbo helps.
+
+Practical consequence: a handshake on turbo hardware is **90 seconds**, not the ~27 s a linear scale would predict, and not the 21.7 min of a stock machine. A no-REU (`REU=0`) build should scale closer to linearly and has not been benchmarked at turbo.
+
+All timings are host-side wall clock. On-device CIA-timer measurement is invalid above 1 MHz — the CIA keeps counting at its fixed rate while the CPU runs N× faster, so cycle counts read as `cycles/N` with no error raised.
 - Symmetric primitives (order of magnitude, in-tree-era measurements): BLAKE2s compress ~22 ms, ChaCha20 block ~65 ms, Poly1305 block ~110 ms
 
 **VIC-II blanking** buys **6.3%** (1.068x), measured by [`tools/bench_vic_blank.py`](tools/bench_vic_blank.py) across six routines — BLAKE2s, ChaCha20, Poly1305, `fe25519_mul`/`_sqr` and a full `x25519_scalarmult` — all landing in a 1.067-1.069x band. `src/wg/vic_boost.s` applies it around the five scalar multiplies in the handshake and around boot's `sqtab_init`/`reu_mul_init` table build, restoring the display between operations so progress output stays visible.
