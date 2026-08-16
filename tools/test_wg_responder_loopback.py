@@ -58,7 +58,13 @@ class ResponderThread(threading.Thread):
         self.responder = responder
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.bind(("127.0.0.1", 0))
+        # INADDR_ANY, not 127.0.0.1: the LAN leg of this test sends its
+        # Type-1 to the host's LAN address, and a loopback-bound socket
+        # cannot receive those. That leg used to be skipped whenever the
+        # host resolved to 127.0.0.1, which hid the mismatch; on a machine
+        # with a real LAN IP it fails with "timeout waiting for Type-2"
+        # and looks like a responder fault rather than a test-harness one.
+        self.sock.bind(("", 0))
         self.sock.settimeout(10.0)
         self.port = self.sock.getsockname()[1]
         self.error: Exception | None = None
@@ -152,7 +158,7 @@ def run_test(listen_ip: str = "127.0.0.1", label: str = "loopback") -> bool:
     rt = ResponderThread(responder)
     rt.start()
     resp_port = rt.port
-    print(f"  responder listening on 127.0.0.1:{resp_port}", flush=True)
+    print(f"  responder listening on 0.0.0.0:{resp_port}", flush=True)
 
     sender_idx = int.from_bytes(os.urandom(4), "little")
     t1_pkt, initiator_noise = build_type1(init_priv, init_pub, resp_pub, psk, sender_idx)
