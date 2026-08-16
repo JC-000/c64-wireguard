@@ -24,6 +24,7 @@ Run::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import os
 import socket
@@ -48,7 +49,7 @@ from c64_test_harness.backends.u64_debug_capture import DebugCapture  # noqa: E4
 from c64_test_harness.backends.ultimate64_helpers import (  # noqa: E402
     DEBUG_MODE_6510, check_measurement_environment, get_debug_stream_mode,
     recover, runner_health_check, set_debug_stream_mode,
-    set_reu, set_turbo_mhz, Ultimate64MeasurementEnvironmentError,
+    set_reu, set_turbo_mhz, get_turbo_mhz, Ultimate64MeasurementEnvironmentError,
 )
 
 # Reuse the trampoline helpers from the echo test (battle-tested).
@@ -396,7 +397,12 @@ class _ResponderThread(threading.Thread):
         try:
             type2 = self._responder.handle_initiation(data)
         except Exception as exc:
-            log.error("responder: Type-1 rejected: %s", exc)
+            # Print the TYPE and repr, not just str(): the noise library
+            # raises several validation failures with an empty message, so
+            # "Type-1 rejected: " on its own says nothing about which check
+            # failed. Measured on the REU=0 @48 MHz run.
+            log.error("responder: Type-1 rejected: %s: %r",
+                      type(exc).__name__, exc)
             with self._lock:
                 self.last_error = f"type1: {exc}"
             return
@@ -552,6 +558,42 @@ def _stage_net_ports(tr: Ultimate64Transport, L: dict[str, int],
                 bytes([local_port & 0xFF, local_port >> 8]))
 
 
+def _wait_boot_ready(tr: Ultimate64Transport, L: dict[str, int]) -> None:
+    """Wait for boot to complete, in any build configuration.
+
+    Prefers `boot_ready` (src/wg/data.s), which src/boot.s sets to 1 as its
+    last act after the table build returns. It exists in every
+    configuration and means exactly "boot finished" — that is the whole
+    point of it (issue #55).
+
+    Falls back to `_wait_boot`'s REU multiply-table signature only when
+    `boot_ready` is absent, i.e. a PRG built before #55.
+
+    WHY THIS MATTERS HERE: the fallback CANNOT work on a REU=0 build. It
+    polls `mul_dma_hi` for the terminal signature written by
+    `reu_mul_init` — and under WG_NO_REU that routine is compiled out
+    entirely (measured: `reu_mul_init` has 0 label entries in a REU=0
+    build, while `mul_dma_hi` still resolves as a plain BSS label). So the
+    old path would poll a buffer nothing ever fills and time out, on a
+    machine that had in fact booted fine.
+    """
+    addr = L.get("boot_ready")
+    if addr is None:
+        log.warning("no boot_ready label (pre-#55 PRG); "
+                    "falling back to the REU table signature")
+        _wait_boot(tr, L["mul_dma_hi"])
+        return
+    deadline = time.monotonic() + BOOT_TIMEOUT
+    while time.monotonic() < deadline:
+        if tr.read_memory(addr, 1)[0] == 1:
+            log.info("boot complete — boot_ready=1 (%.1fs)",
+                     BOOT_TIMEOUT - (deadline - time.monotonic()))
+            return
+        time.sleep(0.25)
+    raise RuntimeError(
+        f"boot_ready never set within {BOOT_TIMEOUT}s — boot did not complete")
+
+
 # ── Main flow ─────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -560,6 +602,22 @@ def main() -> int:
                    help="1=Type-1 accepted; 2=SESSION_ACTIVE (default); "
                         "3=Type-4 transport round-trip")
     p.add_argument("--host", default=os.environ.get("U64_HOST", DEFAULT_HOST))
+    p.add_argument("--reu", choices=["on", "off"], default="on",
+                   help="Attach the device REU (default on). Use 'off' with "
+                        "a REU=0 build: that build never touches REU "
+                        "registers, so detaching proves the claim rather "
+                        "than merely not exercising it.")
+    p.add_argument("--turbo", type=int, default=1,
+                   help="U64 CPU speed in MHz (default 1). Use 48 for a "
+                        "WALL-CLOCK throughput bench. NOTE: any on-device "
+                        "CIA-timer measurement is invalid above 1 MHz — the "
+                        "CIA keeps counting at its fixed rate while the CPU "
+                        "runs N x faster, so cycle counts read as "
+                        "cycles/N with no error raised. Every timing this "
+                        "tool reports is host-side time.monotonic() around "
+                        "the step, which measures real elapsed time and is "
+                        "unaffected. Do not add CIA-based timing here "
+                        "without re-reading check_measurement_environment().")
     p.add_argument("--password", default=os.environ.get("U64_PASSWORD"))
     p.add_argument("--debug-capture", action="store_true",
                    help="In stage 2, wrap the first session_handle_packet "
@@ -659,23 +717,71 @@ def main() -> int:
         # THEN turbo. set_reu may reset the machine; do it before run_prg
         # but BEFORE turbo so the reset doesn't drop our turbo setting.
         try:
-            set_reu(client, True, "512 KB")
+            if args.reu == "on":
+                set_reu(client, True, "512 KB")
+            else:
+                set_reu(client, False)
+                log.warning("REU DETACHED — only valid for a REU=0 build; a "
+                            "REU build will fault or hang in reu_mul_init")
         except Exception as exc:
             log.warning("set_reu failed (continuing): %s", exc)
         time.sleep(0.5)
-        set_turbo_mhz(client, 1)
+        set_turbo_mhz(client, args.turbo)
         # Verify turbo actually stuck (harness PR #106 footgun: a prior
         # session may have left turbo at 48 MHz and reset() doesn't clear it).
-        try:
-            check_measurement_environment(client)
-        except Ultimate64MeasurementEnvironmentError as exc:
-            _skip(f"unexpected turbo state: {exc}")
+        #
+        # check_measurement_environment() asserts 1 MHz, and correctly so for
+        # its purpose: it guards CIA-timer measurements, which silently read
+        # as cycles/turbo_factor at speed. This tool takes no CIA-timer
+        # measurement — every figure it reports is host-side wall clock — so
+        # at --turbo != 1 the 1 MHz half of that guard does not apply and
+        # would just refuse the run. Confirm the requested speed actually
+        # stuck instead, which is the footgun that guard was really catching.
+        if args.turbo == 1:
+            try:
+                check_measurement_environment(client)
+            except Ultimate64MeasurementEnvironmentError as exc:
+                _skip(f"unexpected turbo state: {exc}")
+        else:
+            actual = get_turbo_mhz(client)
+            if actual != args.turbo:
+                _skip(f"requested --turbo {args.turbo} MHz but device "
+                      f"reports {actual} MHz")
+            log.warning("RUNNING AT %d MHz — wall-clock bench mode. Timings "
+                        "are host-side elapsed seconds; do not compare them "
+                        "against 1 MHz cycle counts.", args.turbo)
         time.sleep(0.2)
         # Load PRG and run.
         prg_bytes = prg_path.read_bytes()
+        # FINGERPRINT THE BINARY BEFORE SENDING IT.
+        #
+        # This tool loads whatever build/wireguard.prg happens to be on
+        # disk; it never builds. During the 2026-08-15 REU=0 bench a run
+        # intended as "onchip with the REU attached" silently tested the
+        # REU build instead, because an intervening command had rebuilt
+        # build/. Nothing in the log said so — the run passed, and the
+        # only reason it was caught was that do_handshake's 53.5s matched
+        # the REU build's 53.0s rather than the onchip build's 15.9s.
+        #
+        # A hardware bench that cannot say which binary it ran is not a
+        # measurement. Log the hash and the REU-profile fingerprint, and
+        # refuse the combination that cannot work.
+        prg_sha = hashlib.sha256(prg_bytes).hexdigest()
+        has_reu_init = "reu_mul_init" in L
+        log.info("PRG fingerprint: sha256=%s reu_mul_init=%s -> %s build",
+                 prg_sha[:32], has_reu_init,
+                 "REU" if has_reu_init else "onchip/REU=0")
+        if has_reu_init and args.reu == "off":
+            _skip("refusing to run: this is a REU build (reu_mul_init "
+                  "present) but --reu off detached the REU. reu_mul_init "
+                  "would build its tables from a device that is not there. "
+                  "Build with `make BACKEND=uci REU=0` for --reu off.")
+        if not has_reu_init and args.reu == "on":
+            log.warning("onchip/REU=0 build with the REU still attached — "
+                        "valid, but it does not test REU independence")
         client.run_prg(prg_bytes)
         log.info("PRG sent (%d B); waiting for boot...", len(prg_bytes))
-        _wait_boot(tr, L["mul_dma_hi"])
+        _wait_boot_ready(tr, L)
 
         # Hijack main_loop, install trampoline.
         _install_trampoline(tr, L["main_loop"])
@@ -735,6 +841,20 @@ def main() -> int:
                                timeout=HS_INIT_TIMEOUT, probes=probes)
         dt = time.monotonic() - t0
         log.info("do_handshake returned in %.1fs (carry=%d)", dt, carry)
+        # Dump the ephemeral the C64 actually generated. An all-zero or
+        # visibly low-entropy value would point at the RNG rather than the
+        # curve code: entropy.s seeds from SID voice-3 noise + CIA1 timer A,
+        # and BOTH run at their fixed ~1 MHz rate while the CPU samples 48x
+        # faster under turbo, so samples can correlate badly at speed.
+        try:
+            eph = bytes(tr.read_memory(L["hs_ephem_pub"], 32))
+            log.info("hs_ephem_pub = %s (distinct bytes=%d)",
+                     eph.hex(), len(set(eph)))
+            if len(set(eph)) <= 2:
+                log.error("ephemeral public key looks degenerate — suspect "
+                          "the entropy source, not the curve arithmetic")
+        except Exception as exc:
+            log.warning("could not read hs_ephem_pub: %s", exc)
         if carry != 0:
             log.error("do_handshake failed (carry=1)")
             return 1

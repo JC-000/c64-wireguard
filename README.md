@@ -8,7 +8,7 @@ WireGuard Noise protocol implementation for the Commodore 64, written in 6502 as
 
 **[v1.0.0](https://github.com/JC-000/c64-wireguard/releases/tag/v1.0.0) is the first tagged release** (2026-07-28): ready-to-run `.prg` and `.d64` artifacts for both network backends in REU and stock-C64 (no-REU) variants. The released UCI/REU build repeated the full handshake + bidirectional transport on hardware post-tag (`docs/RELEASE_NOTES_v1.0.0.md` §Verification).
 
-The shipped build links the sibling crypto libraries [c64-x25519](https://github.com/JC-000/c64-x25519) (v0.11.0) and [c64-ChaCha20-Poly1305](https://github.com/JC-000/c64-ChaCha20-Poly1305) (v0.8.0) as archives per the [c64-lib-contract](https://github.com/JC-000/c64-lib-contract) conventions — every reachable multiply on the X25519 and Poly1305 paths is the contract's constant-time `ct_mul_8x8` body. The in-tree crypto remains available behind `USE_*_SIBLING=0` as a legacy/dev configuration.
+The shipped build links the sibling crypto libraries [c64-x25519](https://github.com/JC-000/c64-x25519) (v0.11.2) and [c64-ChaCha20-Poly1305](https://github.com/JC-000/c64-ChaCha20-Poly1305) (v0.9.0) as archives per the [c64-lib-contract](https://github.com/JC-000/c64-lib-contract) conventions — every reachable multiply on the X25519 and Poly1305 paths is the contract's constant-time `ct_mul_8x8` body. The in-tree crypto remains available behind `USE_*_SIBLING=0` as a legacy/dev configuration.
 
 **Phase 8 complete**: Pre-Shared Key (PSK) support — IKpsk2 protocol compliance, optional PSK in disk config, backward-compatible with zero PSK.
 
@@ -37,7 +37,7 @@ Requires:
 ```bash
 make                 # ip65/RR-Net backend, REU profile, sibling crypto (default)
 make BACKEND=uci     # Ultimate 64 / C64U UCI backend instead of ip65
-make REU=0           # no-REU build (x25519 onchip profile) — runs on a stock C64
+make REU=0           # no-REU build (x25519 onchip profile) — FASTEST on turbo hardware
 make release         # all 4 PRG variants + 2 D64 images + SHA256SUMS in build/release/
 make run             # build and launch in VICE (x64sc)
 make clean
@@ -48,7 +48,7 @@ Build knobs (combine freely):
 | Knob | Values | Meaning |
 |---|---|---|
 | `BACKEND` | `ip65` (default) / `uci` | RR-Net via ip65 blob, or Ultimate Command Interface ($DF1B-$DF1F) |
-| `REU` | `1` (default) / `0` | `1`: REU-DMA multiply tables (banks 0,1,3,4,5; ~4.3 min/scalarmult). `0`: constant-time on-chip multiply, zero REU use anywhere (~7.3 min/scalarmult) |
+| `REU` | `1` (default) / `0` | `1`: REU-DMA multiply tables (banks 0,1,3,4,5; ~4.3 min/scalarmult at 1 MHz). `0`: constant-time on-chip multiply, zero REU use anywhere (~7.3 min/scalarmult at 1 MHz). **Which is faster inverts with clock speed — `REU=0` wins on turbo hardware. See [Performance](#performance), and note the 1 MHz limitation ([#58](https://github.com/JC-000/c64-wireguard/issues/58)).** |
 | `USE_X25519_SIBLING` / `USE_CHACHA_SIBLING` | `1`/`1` (default) or `0`/`0` | Sibling archives vs legacy in-tree crypto. Must match — mixed configs are refused |
 
 The sibling archives are built by the libraries' own `make lib` targets (contract §6) via `tools/integration/build_*.sh` and linked unmodified — no source staging. Both are built with `-D LIB_NO_BARE_EXPORTS=1` so each exports only its `LIB_<X>_`-prefixed manifest, which is what lets `src/contract_asserts.s` import both and check the composition at link time. The networking layer sits behind `src/net_abi.inc`; both backends share the WG core.
@@ -91,8 +91,8 @@ The full memory layout is defined in `cfg/c64-wireguard-ip65.cfg` and `cfg/c64-w
 | `src/crypto_abi.inc` | Public crypto ABI contract (fe25519_*, x25519_*, chacha20_*, poly1305_*, aead_*, blake2s_*) matching the sibling libraries |
 | `src/net_abi.inc` | Public UDP networking ABI contract (net_init, net_dhcp, net_poll, net_udp_*) |
 | `src/contract_asserts.s` | Link-time c64-lib-contract checks: REU bank masks disjoint, §8.0 shared-primitive ownership, sibling ABI version |
-| `libs/x25519/` | c64-x25519 submodule (v0.11.0) — X25519 + fe25519, the shipped implementation; built via its own `make lib` |
-| `libs/chacha20poly1305/` | c64-ChaCha20-Poly1305 submodule (v0.8.0) — ChaCha20/Poly1305/AEAD/word32, the shipped implementation |
+| `libs/x25519/` | c64-x25519 submodule (v0.11.2) — X25519 + fe25519, the shipped implementation; built via its own `make lib` |
+| `libs/chacha20poly1305/` | c64-ChaCha20-Poly1305 submodule (v0.9.0) — ChaCha20/Poly1305/AEAD/word32, the shipped implementation |
 | `src/crypto/blake2s.s` | BLAKE2s-256: init, update, final, compress, G function, keyed hashing (in-tree by design — no sibling library) |
 | `src/crypto/blake2s_kdf.s` | HMAC-BLAKE2s and WireGuard KDF (kdf_1, kdf_2, kdf_3) |
 | `src/crypto/entropy.s` | Hardware RNG: SID voice 3 noise XOR CIA1 timer |
@@ -177,11 +177,59 @@ All tests use the direct-memory `jsr()` pattern. Use `--seed N` to reproduce spe
 
 ### Performance
 
-At 1 MHz (hardware-anchored numbers from the c64-x25519 v0.8.0 release and the v1.0.0 hardware runs; still current at the v0.11.0 pin, whose PRG is byte-identical to v0.8.0 — v0.9.0 through v0.11.0 changed manifest metadata, naming and docs only):
+At 1 MHz. The handshake and turbo figures below were measured on hardware on 2026-08-15 at the current v0.11.2 / v0.9.0 pins; the per-primitive numbers remain hardware-anchored to the c64-x25519 v0.8.0 release and the v1.0.0 runs, and stay current because that library's PRG is byte-identical from v0.8.0 through v0.11.2 — every release since changed manifest metadata, naming, guards and docs only.
+
+(The freshly measured 21.7 min handshake is modestly under the ~23 min this section previously quoted. The direction is consistent with the VIC blanking and `poly1305_lib_init` changes added since v1.0.0, but the old figure was rounded to the nearest minute, so it is too coarse to treat as confirmation of either.)
 
 - X25519 scalar multiply: **~4.3 min** (REU build, 262M cycles) / **~7.3 min** (no-REU build, constant-time on-chip multiply)
-- Full handshake wall-clock to `SESSION_ACTIVE`: **~23 min** measured on hardware (initiation ~14 min + Type-2 processing ~9 min; REU build, includes responder round-trips)
+- Full handshake wall-clock to `SESSION_ACTIVE`: **21.7 min** measured on hardware (initiation 777.6 s + Type-2 processing 523.1 s; REU build, includes responder round-trips)
 - Type-4 transport encrypt/decrypt: ~1-2 s per small packet
+
+#### Turbo scaling on an Ultimate 64 Elite
+
+Measured 2026-08-15 on a U64E (fw 3.14d) at the v0.11.2 / v0.9.0 pins, both legs the same PRG in the same session via [`tools/test_uci_handshake_live.py --stage 3 --turbo N`](tools/test_uci_handshake_live.py) — full stage-3 PASS at both speeds, tunnel carrying data in both directions:
+
+| phase | 1 MHz | 48 MHz | speedup |
+|---|---:|---:|---:|
+| boot incl. `reu_mul_init` | 11.9 s | 3.2 s | 3.75x |
+| Type-1 initiation | 777.6 s | 53.0 s | 14.67x |
+| Type-2 → `SESSION_ACTIVE` | 523.1 s | 36.2 s | 14.45x |
+| **handshake total** | **1302.0 s** | **89.9 s** | **14.48x** |
+| Type-4 round-trip | 3.2 s | 0.6 s | 5.53x |
+
+**A 48x clock buys 14.5x — about 30% scaling efficiency.** This is the REU DMA wall-clock floor: REU transfers do not accelerate with CPU turbo, so the DMA-bound multiply path caps the gain. The internal spread is the evidence rather than an assumption — boot is dominated by `reu_mul_init`'s 128 KB precompute and gains only **3.75x**, while the crypto-bound phases gain ~14.5x. The more DMA-bound the phase, the less turbo helps.
+
+#### Which build to run: the answer inverts with clock speed
+
+The `REU=0` build has no DMA floor, so it scales with the clock. Measured on the same device and session, Type-1 initiation:
+
+| build | 1 MHz | 48 MHz | scaling |
+|---|---:|---:|---:|
+| REU (`REU=1`, default) | 777.6 s | 53.0 s | 14.7x |
+| no-REU (`REU=0`, onchip multiply) | 1505.4 s | **29.1 s** | **51.7x** |
+
+**At 48 MHz the no-REU build is 1.8x FASTER than the REU build** — 49.0 s of handshake crypto against 89.2 s, and it boots in 0.3 s rather than 3.2 s because it has no table precompute. At 1 MHz the ranking is the other way round, with the REU build ~1.9x ahead. So the correct build depends on the machine:
+
+- **1 MHz up to and including 16 MHz** → `REU=1` (default), if an REU is present. Note the limitation below.
+- **20 MHz and above** → **`REU=0`**, which is faster *and* removes the REU requirement entirely.
+
+The crossover was measured in the sibling project `c64-https` to fall **between 16 and 20 MHz**, and the Ultimate's selectable speeds are discrete — `1 2 3 4 5 6 8 10 12 14 16 20 24 32 40 48 64` — with nothing between those two settings. So the bracket is as tight as the hardware permits and the rule above has no grey zone in practice.
+
+That is consistent with this repo's own two-point model, which puts it at ~20.4 MHz (treating the REU build as a fixed DMA wall time plus CPU work, `37.6 s + 740/f`, against the no-REU build's pure `1505/f`). The model sits one setting above the measured bracket, which is about the accuracy a two-point fit deserves — quoted here only as corroboration, not as the source.
+
+The 51.7x from a 48x clock is not a measurement error. Badline DMA costs a *fixed* amount at the VIC's own 1 MHz rate, so it takes ~6% of the CPU at 1 MHz and ~0.13% at 48 MHz: predicted `48 x 1.063 = 51.0x` against 51.7x measured. That is the same ~6% figure the VIC blanking section derives, arrived at independently.
+
+Practical consequence: a handshake on turbo hardware is **49-90 seconds** depending on build, not the ~27 s a linear scale would predict of the REU build, and not the 21.7 min of a stock machine.
+
+#### Known limitation: no-REU at 1 MHz does not deliver its Type-1
+
+On a stock 1 MHz machine the `REU=0` build spends **25.1 minutes** computing the initiation and then fails to deliver it — [#58](https://github.com/JC-000/c64-wireguard/issues/58). The C64 reports success (`carry=0`, `net_last_error=$00`), stages a correct 148-byte packet and generates a healthy ephemeral, but the responder never receives anything.
+
+The suspicion is that the UDP socket does not survive 25 minutes of idle computation and the write succeeds against a dead handle, which this firmware's UCI write status cannot distinguish. It is **not** confirmed: the REU build delivers after 777 s at the same clock, so all that is established is a bracket somewhere between ~13 and ~25 minutes.
+
+No turbo configuration is affected, and the REU build at 1 MHz is unaffected. It does hit the stock-C64 case that `REU=0` exists to serve, so treat 1 MHz + `REU=0` as unsupported until #58 is closed.
+
+All timings are host-side wall clock. On-device CIA-timer measurement is invalid above 1 MHz — the CIA keeps counting at its fixed rate while the CPU runs N× faster, so cycle counts read as `cycles/N` with no error raised.
 - Symmetric primitives (order of magnitude, in-tree-era measurements): BLAKE2s compress ~22 ms, ChaCha20 block ~65 ms, Poly1305 block ~110 ms
 
 **VIC-II blanking** buys **6.3%** (1.068x), measured by [`tools/bench_vic_blank.py`](tools/bench_vic_blank.py) across six routines — BLAKE2s, ChaCha20, Poly1305, `fe25519_mul`/`_sqr` and a full `x25519_scalarmult` — all landing in a 1.067-1.069x band. `src/wg/vic_boost.s` applies it around the five scalar multiplies in the handshake and around boot's `sqtab_init`/`reu_mul_init` table build, restoring the display between operations so progress output stays visible.

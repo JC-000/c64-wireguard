@@ -4,9 +4,11 @@
 ; Active only in the two-sibling build (USE_X25519_SIBLING=1 +
 ; USE_CHACHA_SIBLING=1; the Makefile enforces that the toggles match).
 ;
-; Pins: c64-x25519 v0.11.0, c64-ChaCha20-Poly1305 v0.8.0.
+; Pins: c64-x25519 v0.11.2, c64-ChaCha20-Poly1305 v0.9.0.
 ;
-; Contract obligations covered (SPEC v0.9.2):
+; Contract obligations covered (SPEC v0.10.3, the latest tagged contract
+; release; the siblings' own ledgers run through SPEC v0.10.6, which adds
+; no obligation on this side — see the v0.11.2 notes):
 ;   §1   per-library ABI generation pins.
 ;   §3   REU bank budget — x25519 vs chacha vs WG's own claims.
 ;   §8.0 shared-primitive ownership (disjointness), the v0.5.0 coverage
@@ -197,7 +199,7 @@ WG_REU_BANKS_USED = $00
 ; disabled. What it does catch is the case it exists for — a sibling
 ; bump growing the libraries past the space WG has to give them.
 ;
-; Measured at the v0.11.1 / v0.9.0 pins: 8383 + 826 (x25519) + 16640 + 0
+; Measured at the v0.11.2 / v0.9.0 pins: 8383 + 826 (x25519) + 16640 + 0
 ; (chacha) = 25849 against $4D10 + $1C00 = 26896. 1047 bytes of headroom,
 ; which looks tighter than it is: RESIDENT_BYTES describes the whole
 ; archive, while ld65 pulls only the members actually referenced (chacha

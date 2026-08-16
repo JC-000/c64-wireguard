@@ -406,7 +406,14 @@ def main():
             write_bytes(inst.transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
             # Menu prints before reu_mul_init finishes (PR #40): re-run it
             # deterministically after takeover.
-            jsr(inst.transport, labels["reu_mul_init"], timeout=180.0)
+            #
+            # Absent entirely in a REU=0 build — WG_NO_REU compiles the
+            # routine out, so the label does not resolve. Guarding on the
+            # label rather than assuming it exists is what lets this suite
+            # cover the onchip profile at all; it previously died with
+            # KeyError: 'reu_mul_init' the moment it met that build.
+            if "reu_mul_init" in labels:
+                jsr(inst.transport, labels["reu_mul_init"], timeout=180.0)
             jsr(inst.transport, labels["entropy_init"])
 
         print(f"All {effective_workers} instances ready\n")
