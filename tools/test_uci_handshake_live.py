@@ -66,6 +66,9 @@ from wg_responder.responder import (  # noqa: E402
     MSG_TYPE_INITIATION, MSG_TYPE_RESPONSE, MSG_TYPE_TRANSPORT,
     T1_TOTAL, WireGuardResponder,
 )
+from wg_responder.server import (  # noqa: E402
+    ascii_to_petscii, petscii_to_ascii, strip_tunnel_headers,
+)
 
 # Stage-2 AEAD-failure diagnostic: capture the responder's pre-AEAD state
 # (h, K) via monkey-patch so we can compare against the C64's view after
@@ -353,11 +356,21 @@ class _ResponderThread(threading.Thread):
         self.type1_received_at: Optional[float] = None
         self.type2_sent_at: Optional[float] = None
         self.type4_received_at: Optional[float] = None
+        # Chat mode consumes these; the staged tests only ever needed the
+        # "did one arrive" timestamp above.
+        self.type4_count: int = 0
+        self._type4_queue: list[bytes] = []
         self.c64_addr: Optional[tuple[str, int]] = None
         self.last_error: Optional[str] = None
 
     def stop(self) -> None:
         self._stop.set()
+
+    def drain_type4(self) -> list[bytes]:
+        """Pop and return every plaintext received since the last drain."""
+        with self._lock:
+            out, self._type4_queue = self._type4_queue, []
+        return out
 
     def send_raw(self, data: bytes) -> None:
         """Send a raw datagram to the C64 from the responder's bound socket
@@ -439,6 +452,8 @@ class _ResponderThread(threading.Thread):
             return
         with self._lock:
             self.type4_received_at = time.monotonic()
+            self.type4_count += 1
+            self._type4_queue.append(pt)
         log.info("responder: Type-4 OK (%dB plaintext, first16=%s)",
                  len(pt), pt[:16].hex())
 
@@ -594,6 +609,87 @@ def _wait_boot_ready(tr: Ultimate64Transport, L: dict[str, int]) -> None:
         f"boot_ready never set within {BOOT_TIMEOUT}s — boot did not complete")
 
 
+def _hand_back_to_c64(tr: Ultimate64Transport, L: dict[str, int],
+                      main_loop_orig: bytes) -> None:
+    """Release the trampoline so the C64 resumes its own main loop.
+
+    The C64 cannot simply be told to continue: Ultimate64Transport exposes
+    read_memory / write_memory / resume and nothing that sets PC (the
+    harness's goto() is BinaryViceTransport-only). Meanwhile the CPU is
+    parked inside the trampoline at $0334 spinning on GO_FLAG, and
+    main_loop's first three bytes are the JMP that put it there.
+
+    So: put main_loop's original bytes back, then aim the trampoline's own
+    SMC target at main_loop and fire it. The C64 JSRs into its restored
+    main loop and never comes back — which is exactly what chat needs. It
+    polls the network, decrypts Type-4s and prints them via
+    display_payload on its own screen, and M=MSG works from its keyboard.
+
+    Host-side trampoline control is GONE after this point, by design. Any
+    step-driving must happen before the handoff.
+    """
+    write_bytes(tr, L["main_loop"], main_loop_orig)
+    got = bytes(tr.read_memory(L["main_loop"], 3))
+    if got != main_loop_orig:
+        raise RuntimeError(
+            f"failed to restore main_loop: wrote {main_loop_orig.hex()}, "
+            f"read back {got.hex()}")
+    log.info("main_loop restored to %s; handing control back to the C64",
+             got.hex())
+    _kick_step(tr, step_id=0xC0, target=L["main_loop"])
+
+
+def _chat_loop(tr: Ultimate64Transport, L: dict[str, int],
+               rt: "_ResponderThread", responder: WireGuardResponder) -> int:
+    """Interactive two-way chat over the established tunnel.
+
+    Outbound: typed lines -> PETSCII -> encrypt_transport -> the C64's
+    address. The C64's own main loop picks them up and display_payload
+    prints them on its screen.
+
+    Inbound: whatever the C64 sends (press M on its keyboard) arrives at
+    the responder thread. do_message_input tunnels its text inside IPv4 +
+    UDP, so strip those before printing; do_send_test does not, so the
+    stripper checks rather than assumes.
+    """
+    stop = threading.Event()
+
+    def _sender() -> None:
+        print("-- type to send to the C64; /quit to exit --", flush=True)
+        for line in sys.stdin:
+            line = line.rstrip("\n")
+            if line in ("/quit", "/q"):
+                stop.set()
+                return
+            if not line:
+                continue
+            payload = ascii_to_petscii(line)
+            if len(payload) > 240:
+                print(f"!! truncated to 240B (SOCKET_READ caps at 512, #46)",
+                      flush=True)
+                payload = payload[:240]
+            try:
+                rt.send_raw(responder.encrypt_transport(payload))
+                print(f"you> {line}", flush=True)
+            except Exception as exc:
+                log.error("send failed: %s: %s", type(exc).__name__, exc)
+
+    threading.Thread(target=_sender, daemon=True, name="chat-stdin").start()
+
+    seen = rt.type4_count
+    print("-- chat ready. Press M on the C64 to send from that end. --",
+          flush=True)
+    while not stop.is_set():
+        time.sleep(0.2)
+        if rt.type4_count > seen:
+            for text in rt.drain_type4():
+                shown = petscii_to_ascii(strip_tunnel_headers(text)).rstrip()
+                if shown:
+                    print(f"c64> {shown}", flush=True)
+            seen = rt.type4_count
+    return 0
+
+
 # ── Main flow ─────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -602,6 +698,13 @@ def main() -> int:
                    help="1=Type-1 accepted; 2=SESSION_ACTIVE (default); "
                         "3=Type-4 transport round-trip")
     p.add_argument("--host", default=os.environ.get("U64_HOST", DEFAULT_HOST))
+    p.add_argument("--chat", action="store_true",
+                   help="After SESSION_ACTIVE, hand the C64 back its own "
+                        "main loop and drop into an interactive two-way "
+                        "chat over the tunnel. Type here to print on the "
+                        "C64's screen; press M on the C64 to send back. "
+                        "Implies at least --stage 2; host-side trampoline "
+                        "control ends at the handoff.")
     p.add_argument("--reu", choices=["on", "off"], default="on",
                    help="Attach the device REU (default on). Use 'off' with "
                         "a REU=0 build: that build never touches REU "
@@ -784,6 +887,11 @@ def main() -> int:
         _wait_boot_ready(tr, L)
 
         # Hijack main_loop, install trampoline.
+        # Capture main_loop's first three bytes BEFORE the hijack replaces
+        # them with a JMP. --chat needs them to hand the machine back, and
+        # they are unrecoverable afterwards without re-reading the PRG.
+        main_loop_orig = bytes(tr.read_memory(L["main_loop"], 3))
+        log.info("main_loop original bytes: %s", main_loop_orig.hex())
         _install_trampoline(tr, L["main_loop"])
 
         # ── Drive net init/dhcp/listen
@@ -972,6 +1080,12 @@ def main() -> int:
                     return rc
                 if state == SESSION_ACTIVE:
                     log.info("STAGE 2 ✓ — SESSION_ACTIVE reached")
+                    if args.chat:
+                        # Hand the machine back FIRST: from here the C64
+                        # runs its own loop, so it can poll the network and
+                        # print what arrives. Host trampoline control ends.
+                        _hand_back_to_c64(tr, L, main_loop_orig)
+                        return _chat_loop(tr, L, rt, responder)
                     if args.stage < 3:
                         rc = 0
                         return 0

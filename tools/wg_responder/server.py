@@ -62,7 +62,7 @@ def _say(msg: str) -> None:
 # moment anyone types a lowercase letter, because unshifted PETSCII letters
 # live at $41-$5A and display as UPPERCASE.
 
-def _ascii_to_petscii(text: str) -> bytes:
+def ascii_to_petscii(text: str) -> bytes:
     """Encode a typed line for the C64.
 
     Uses the harness's char_to_petscii where it has a mapping, which folds
@@ -79,7 +79,7 @@ def _ascii_to_petscii(text: str) -> bytes:
     return bytes(out)
 
 
-def _petscii_to_ascii(data: bytes) -> str:
+def petscii_to_ascii(data: bytes) -> str:
     """Decode what the C64 sent into something readable in a terminal.
 
     display_payload's own filter is the model: printable range through,
@@ -97,6 +97,30 @@ def _petscii_to_ascii(data: bytes) -> str:
         else:
             out.append(".")
     return "".join(out)
+
+
+def strip_tunnel_headers(plaintext: bytes) -> bytes:
+    """Return the user-visible payload from a decrypted Type-4 plaintext.
+
+    The C64 has TWO send paths and they do not agree on framing:
+
+      do_send_test    raw text. Measured on hardware: 15 bytes,
+                      48454c4c4f20574952454755415244 = "HELLO WIREGUARD".
+      do_message_input (the M=MSG menu entry, i.e. what a person actually
+                      types) calls udp_tunnel_build first, so the plaintext
+                      is 20 bytes of IPv4 + 8 of UDP + the text.
+
+    Printing the second one raw shows the header as 28 leading dots and
+    hides nothing useful, so detect and strip it: IPv4 version nibble 4,
+    protocol 17 (UDP), and a total-length field consistent with what
+    arrived. Anything else is passed through untouched — a wrong guess
+    here would eat 28 bytes of somebody's message.
+    """
+    if len(plaintext) >= 28 and (plaintext[0] >> 4) == 4 and plaintext[9] == 17:
+        total_len = int.from_bytes(plaintext[2:4], "big")
+        if total_len == len(plaintext):
+            return plaintext[28:]
+    return plaintext
 
 
 # The C64's inbound path is the binding constraint, not the 1500-byte
@@ -158,7 +182,7 @@ class _Session:
         self.sent = 0
 
     def send_text(self, text: str) -> bool:
-        payload = _ascii_to_petscii(text)
+        payload = ascii_to_petscii(text)
         if len(payload) > MAX_CHAT_PAYLOAD:
             _say(f"!! message truncated to {MAX_CHAT_PAYLOAD} bytes "
                  f"(was {len(payload)}) — the Ultimate's SOCKET_READ "
@@ -261,7 +285,7 @@ def run_server(
                 plaintext = responder.decrypt_transport(data)
                 _log(f"TYPE4 decrypted {len(plaintext)} bytes plaintext: {plaintext[:64]!r}")
                 if interactive:
-                    text = _petscii_to_ascii(plaintext).rstrip()
+                    text = petscii_to_ascii(strip_tunnel_headers(plaintext)).rstrip()
                     if text:
                         _say(f"c64> {text}")
             except Exception as exc:
