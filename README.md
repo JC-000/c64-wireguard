@@ -48,7 +48,7 @@ Build knobs (combine freely):
 | Knob | Values | Meaning |
 |---|---|---|
 | `BACKEND` | `ip65` (default) / `uci` | RR-Net via ip65 blob, or Ultimate Command Interface ($DF1B-$DF1F) |
-| `REU` | `1` (default) / `0` | `1`: REU-DMA multiply tables (banks 0,1,3,4,5; ~4.3 min/scalarmult at 1 MHz). `0`: constant-time on-chip multiply, zero REU use anywhere (~7.3 min/scalarmult at 1 MHz). **Which is faster inverts with clock speed — `REU=0` wins on turbo hardware. See [Performance](#performance), and note the 1 MHz limitation ([#58](https://github.com/JC-000/c64-wireguard/issues/58)).** |
+| `REU` | `1` (default) / `0` | `1`: REU-DMA multiply tables (banks 0,1,3,4,5; ~4.3 min/scalarmult at 1 MHz). `0`: constant-time on-chip multiply, zero REU use anywhere (~7.3 min/scalarmult at 1 MHz). **Which is faster inverts with clock speed — `REU=0` wins on turbo hardware. See [Performance](#performance).** |
 | `USE_X25519_SIBLING` / `USE_CHACHA_SIBLING` | `1`/`1` (default) or `0`/`0` | Sibling archives vs legacy in-tree crypto. Must match — mixed configs are refused |
 
 The sibling archives are built by the libraries' own `make lib` targets (contract §6) via `tools/integration/build_*.sh` and linked unmodified — no source staging. Both are built with `-D LIB_NO_BARE_EXPORTS=1` so each exports only its `LIB_<X>_`-prefixed manifest, which is what lets `src/contract_asserts.s` import both and check the composition at link time. The networking layer sits behind `src/net_abi.inc`; both backends share the WG core.
@@ -210,7 +210,7 @@ The `REU=0` build has no DMA floor, so it scales with the clock. Measured on the
 
 **At 48 MHz the no-REU build is 1.8x FASTER than the REU build** — 49.0 s of handshake crypto against 89.2 s, and it boots in 0.3 s rather than 3.2 s because it has no table precompute. At 1 MHz the ranking is the other way round, with the REU build ~1.9x ahead. So the correct build depends on the machine:
 
-- **1 MHz up to and including 16 MHz** → `REU=1` (default), if an REU is present. Note the limitation below.
+- **1 MHz up to and including 16 MHz** → `REU=1` (default), if an REU is present.
 - **20 MHz and above** → **`REU=0`**, which is faster *and* removes the REU requirement entirely.
 
 The crossover was measured in the sibling project `c64-https` to fall **between 16 and 20 MHz**, and the Ultimate's selectable speeds are discrete — `1 2 3 4 5 6 8 10 12 14 16 20 24 32 40 48 64` — with nothing between those two settings. So the bracket is as tight as the hardware permits and the rule above has no grey zone in practice.
@@ -221,13 +221,15 @@ The 51.7x from a 48x clock is not a measurement error. Badline DMA costs a *fixe
 
 Practical consequence: a handshake on turbo hardware is **49-90 seconds** depending on build, not the ~27 s a linear scale would predict of the REU build, and not the 21.7 min of a stock machine.
 
-#### Known limitation: no-REU at 1 MHz does not deliver its Type-1
+#### Known limitation: repeated sessions degrade the Ultimate until sends fail silently
 
-On a stock 1 MHz machine the `REU=0` build spends **25.1 minutes** computing the initiation and then fails to deliver it — [#58](https://github.com/JC-000/c64-wireguard/issues/58). The C64 reports success (`carry=0`, `net_last_error=$00`), stages a correct 148-byte packet and generates a healthy ephemeral, but the responder never receives anything.
+After enough back-to-back sessions on one power cycle, the U64E stops delivering packets: `do_handshake` returns `carry=0` with `net_last_error=$00` and a correct 148-byte packet staged, and nothing arrives — [#58](https://github.com/JC-000/c64-wireguard/issues/58). **A power cycle clears it completely.**
 
-The suspicion is that the UDP socket does not survive 25 minutes of idle computation and the write succeeds against a dead handle, which this firmware's UCI write status cannot distinguish. It is **not** confirmed: the REU build delivers after 777 s at the same clock, so all that is established is a bracket somewhere between ~13 and ~25 minutes.
+This affects **both builds and both clock speeds**. It is device/firmware state, not a property of any configuration: an identical REU binary failed six consecutive runs and then passed immediately after a power cycle, with the hash verified on both sides of it.
 
-No turbo configuration is affected, and the REU build at 1 MHz is unaffected. It does hit the stock-C64 case that `REU=0` exists to serve, so treat 1 MHz + `REU=0` as unsupported until #58 is closed.
+The consumer-visible defect is that `net_udp_send` reports success when the write did not happen. This firmware's UCI write status cannot distinguish the two ([#45](https://github.com/JC-000/c64-wireguard/issues/45), [#46](https://github.com/JC-000/c64-wireguard/issues/46) cover the adapter hardening), so a silent send is indistinguishable from a real one from the C64's side. If a session that previously worked stops delivering, power-cycle the Ultimate before suspecting the build.
+
+An earlier revision of this section attributed the same symptom to `REU=0` at 1 MHz and to a socket that could not survive a 25-minute computation. That diagnosis was wrong — it was device state — and is retracted. What remains genuinely untested is `REU=0` at 1 MHz on a *healthy* device: the only run of that combination happened on a degraded one, so its 25.1-minute Type-1 computation is a sound measurement while its delivery failure proves nothing.
 
 All timings are host-side wall clock. On-device CIA-timer measurement is invalid above 1 MHz — the CIA keeps counting at its fixed rate while the CPU runs N× faster, so cycle counts read as `cycles/N` with no error raised.
 - Symmetric primitives (order of magnitude, in-tree-era measurements): BLAKE2s compress ~22 ms, ChaCha20 block ~65 ms, Poly1305 block ~110 ms
