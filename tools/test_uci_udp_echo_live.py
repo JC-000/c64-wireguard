@@ -74,10 +74,31 @@ def _local_ip_for(host: str) -> str:
 
 
 def _build_uci() -> None:
+    """Build the UCI PRG, honouring C64_REU.
+
+    WHY C64_REU EXISTS: this used to hard-code `make BACKEND=uci`, i.e.
+    always REU=1, and it runs unconditionally at tool start. So a caller
+    who had carefully built `make BACKEND=uci REU=0` and then launched a
+    hardware run had that binary silently replaced by the REU build
+    before it ever reached the device.
+
+    That cost a full afternoon on 2026-08-15: the REU build was shipped to
+    a machine with the REU detached (`--reu off`), where reu_mul_init
+    builds its tables from hardware that is not there, so every handshake
+    was rejected. It read exactly like a broken REU=0 build — two speeds,
+    reproducible, and completely wrong. The no-REU build was in fact fine
+    and is faster than the REU build at turbo.
+
+    Set C64_REU=0 for the onchip build, or C64_SKIP_BUILD=1 to use
+    whatever is already on disk. test_uci_handshake_live also fingerprints
+    the PRG it sends and refuses a REU build with --reu off.
+    """
     if os.environ.get("C64_SKIP_BUILD"):
         return log.info("C64_SKIP_BUILD set — skipping make")
-    log.info("make clean && make BACKEND=uci")
-    for cmd in (["make", "clean"], ["make", "BACKEND=uci"]):
+    reu = os.environ.get("C64_REU", "1")
+    target = ["make", "BACKEND=uci"] + ([] if reu == "1" else ["REU=0"])
+    log.info("make clean && %s", " ".join(target))
+    for cmd in (["make", "clean"], target):
         r = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True)
         if r.returncode != 0:
             sys.stderr.write(r.stderr.decode(errors="replace"))
