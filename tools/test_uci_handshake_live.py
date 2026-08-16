@@ -628,6 +628,14 @@ def _hand_back_to_c64(tr: Ultimate64Transport, L: dict[str, int],
     Host-side trampoline control is GONE after this point, by design. Any
     step-driving must happen before the handoff.
     """
+    # main_loop polls the network only when net_initialized is set, and
+    # nothing has set it: the staged run JSRs net_init directly, whereas
+    # the flag is raised by do_net_init, the MENU handler that wraps it.
+    # Without this the C64 resumes, keeps its session, and cheerfully sends
+    # timer-driven keepalives forever while never once calling net_poll —
+    # so inbound chat is silently dropped. Verified on the live machine:
+    # net_initialized=$00, wg_state=$02, tp_send_counter=8.
+    write_bytes(tr, L["net_initialized"], bytes([1]))
     write_bytes(tr, L["main_loop"], main_loop_orig)
     got = bytes(tr.read_memory(L["main_loop"], 3))
     if got != main_loop_orig:
