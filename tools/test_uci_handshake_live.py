@@ -647,6 +647,16 @@ def _hand_back_to_c64(tr: Ultimate64Transport, L: dict[str, int],
     _kick_step(tr, step_id=0xC0, target=L["main_loop"])
 
 
+# Optional takeover for the post-handshake phase. A tool that wants its own
+# loop — tools/wg_demo.py runs a scripted two-way dialogue and rekeys — sets
+# this to a callable with _chat_loop's signature and gets the entire bring-up
+# path (build, upload, staged config, handshake, handoff) for free. Keeping
+# presentation out here rather than adding modes to this file is deliberate:
+# this is the regression tool, and every flag added to it is another
+# combination that has to keep working.
+post_session_hook = None
+
+
 def _chat_loop(tr: Ultimate64Transport, L: dict[str, int],
                rt: "_ResponderThread", responder: WireGuardResponder) -> int:
     """Interactive two-way chat over the established tunnel.
@@ -1097,7 +1107,8 @@ def main() -> int:
                         # below reports PASS/FAIL from rc, so returning the
                         # chat result directly left it at its initial 1 and
                         # printed "FAIL — see log" after a clean /quit.
-                        rc = _chat_loop(tr, L, rt, responder)
+                        loop = post_session_hook or _chat_loop
+                        rc = loop(tr, L, rt, responder)
                         return rc
                     if args.stage < 3:
                         rc = 0
