@@ -102,16 +102,42 @@ def wait_for_state(tr, wg_state_addr: int, want: int,
     return False
 
 
+def wait_while_state(tr, wg_state_addr: int, avoid: int,
+                     timeout: float, poll: float = 1.0) -> bool:
+    """Poll wg_state until it is anything OTHER than *avoid*."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if tr.read_memory(wg_state_addr, 1)[0] != avoid:
+            return True
+        time.sleep(poll)
+    return False
+
+
 def rekey(tr, wg_state_addr: int, active_value: int = 2,
           timeout: float = 420.0) -> bool:
-    """Re-establish the session by pressing H, then wait for SESSION_ACTIVE.
+    """Re-establish the session by pressing H. Waits for the FULL handshake.
 
-    Costs a full handshake — roughly 90 s of Type-1 plus 36 s to process the
-    Type-2 at 48 MHz, and about 22 minutes at 1 MHz, which is why the demo
-    insists on turbo. The C64 is single-threaded and computing throughout, so
-    it neither polls the network nor accepts keystrokes until it lands; do not
-    interpret that silence as a wedge.
+    Two phases, and the first is the one that is easy to get wrong.
+    session_initiate computes the entire Type-1 before it stores
+    SESSION_HS_SENT (session.s:144-146), so for the ~90 s of scalarmult
+    wg_state still reads ACTIVE — left over from the session we are
+    replacing. Waiting only for "state == ACTIVE" therefore returns TRUE
+    instantly, having proven nothing, and the caller then talks to a machine
+    that is heads-down in crypto. Observed exactly that: a rekey reported as
+    completing in 0 s, followed by the C64 ignoring every keystroke.
+
+    So: first wait for the state to LEAVE active (the C64 finished Type-1 and
+    sent it), then wait for it to come BACK to active (it received and
+    processed the Type-2). Roughly 90 s then 36 s at 48 MHz; about 22 minutes
+    at 1 MHz, which is why the tools insist on turbo.
+
+    The session cannot expire underneath this: timer_check only runs from
+    main_loop, and the C64 is inside do_handshake throughout.
     """
     if not press_key(tr, "H", timeout=15.0):
         return False
-    return wait_for_state(tr, wg_state_addr, active_value, timeout)
+    deadline = time.monotonic() + timeout
+    if not wait_while_state(tr, wg_state_addr, active_value, timeout):
+        return False
+    return wait_for_state(tr, wg_state_addr, active_value,
+                          max(1.0, deadline - time.monotonic()))
