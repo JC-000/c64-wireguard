@@ -254,6 +254,26 @@ def test_transport_encrypt(transport, labels, rng):
         ct_tag = packet[16:]
         py_ct, py_tag = py_encrypt(key, counter_val, plaintext)
 
+        # THE NEGATIVE CHECK: the plaintext must not be findable in the packet
+        # the C64 built. Matching Python's AEAD byte-for-byte below already
+        # implies this, but only for a reader who trusts that py_encrypt is a
+        # real cipher; asserting absence directly is what makes "we are not
+        # sending in the clear" a test rather than an inference, and it is the
+        # assertion that would survive somebody stubbing out the comparison.
+        #
+        # Guarded to >= 8 bytes: a short random plaintext can legitimately
+        # occur inside ciphertext by chance (2^-64 at 8 bytes, but near
+        # certain at 1), and a probabilistic failure in the regression gate
+        # would be worse than no check at all.
+        if size >= 8 and plaintext in packet:
+            failed += 1
+            print(f"  FAIL encrypt #{i} ({size}B): PLAINTEXT FOUND IN PACKET "
+                  f"at offset {packet.find(plaintext)} — traffic is not "
+                  f"encrypted")
+            print(f"    plaintext: {plaintext.hex()}")
+            print(f"    packet:    {packet.hex()}")
+            continue
+
         if ct_tag == py_ct + py_tag:
             passed += 1
             if VERBOSE:
