@@ -1093,7 +1093,12 @@ def main() -> int:
                         # runs its own loop, so it can poll the network and
                         # print what arrives. Host trampoline control ends.
                         _hand_back_to_c64(tr, L, main_loop_orig)
-                        return _chat_loop(tr, L, rt, responder)
+                        # Assign rc, don't just return: the finally block
+                        # below reports PASS/FAIL from rc, so returning the
+                        # chat result directly left it at its initial 1 and
+                        # printed "FAIL — see log" after a clean /quit.
+                        rc = _chat_loop(tr, L, rt, responder)
+                        return rc
                     if args.stage < 3:
                         rc = 0
                         return 0

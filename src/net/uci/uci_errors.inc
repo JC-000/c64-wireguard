@@ -12,6 +12,7 @@ UCI_ERR_CONNECT_FAIL   = $84    ; TCP_CONNECT returned an error bit
 UCI_ERR_SEND_FAIL      = $85    ; SOCKET_WRITE returned an error bit
 UCI_ERR_READ_FAIL      = $86    ; SOCKET_READ returned an error bit
 UCI_ERR_SHORT_WRITE    = $87    ; SOCKET_WRITE wrote fewer bytes than requested
+UCI_ERR_LONG_READ      = $88    ; SOCKET_READ claimed more bytes than we asked for
 
 ; TCP state values stored in net_tcp_state
 UCI_TCP_CLOSED         = $00    ; no active socket
