@@ -6,6 +6,10 @@ WireGuard Noise protocol implementation for the Commodore 64, written in 6502 as
 
 **Milestone reached (2026-07-21): a Commodore 64 completed a full WireGuard IKpsk2 handshake to `SESSION_ACTIVE` and exchanged encrypted Type-4 transport data in both directions on real hardware** (C64 Ultimate, fw 1.1.0, UCI backend, against a Python responder). See `docs/phase-9-handshake-milestone.md` for the campaign log, including the two BLAKE2s key-length state bugs it flushed out.
 
+**Interactive chat, verified bidirectional and self-sustaining (2026-08-17).** A person at the keyboard can hold a two-way conversation over the tunnel: [`tools/wg_chat.py`](tools/wg_chat.py) types from the host, `M` on the C64 types back, and the session rekeys itself so it outlives WireGuard's 180 s `REJECT_AFTER_TIME`. [`tools/wg_demo.py`](tools/wg_demo.py) runs the same path unattended with both ends speaking. See [Interactive chat and demo](#interactive-chat-and-demo).
+
+**The wire is verified encrypted, by assertion rather than inference (2026-08-17).** [`tools/test_wire_encryption_live.py`](tools/test_wire_encryption_live.py) passes 9/9 on hardware: the plaintext is absent from real datagrams in both directions, identical plaintext yields different ciphertext with an advancing counter, and the C64 rejects a packet with one flipped ciphertext bit while the session survives the rejection. See [Verifying encryption on the wire](#verifying-encryption-on-the-wire) — including what is cleartext by design, and the control-plane caveat.
+
 **[v1.0.0](https://github.com/JC-000/c64-wireguard/releases/tag/v1.0.0) is the first tagged release** (2026-07-28): ready-to-run `.prg` and `.d64` artifacts for both network backends in REU and stock-C64 (no-REU) variants. The released UCI/REU build repeated the full handshake + bidirectional transport on hardware post-tag (`docs/RELEASE_NOTES_v1.0.0.md` §Verification).
 
 The shipped build links the sibling crypto libraries [c64-x25519](https://github.com/JC-000/c64-x25519) (v0.11.2) and [c64-ChaCha20-Poly1305](https://github.com/JC-000/c64-ChaCha20-Poly1305) (v0.9.0) as archives per the [c64-lib-contract](https://github.com/JC-000/c64-lib-contract) conventions — every reachable multiply on the X25519 and Poly1305 paths is the contract's constant-time `ct_mul_8x8` body. The in-tree crypto remains available behind `USE_*_SIBLING=0` as a legacy/dev configuration.
@@ -171,7 +175,12 @@ python3 tools/test_write_bytes_limit.py          # VICE write chunking
 
 # Live hardware (C64U/U64, DeviceLock-aware; needs U64_ALLOW_MUTATE=1):
 U64_ALLOW_MUTATE=1 python3 tools/test_uci_handshake_live.py --stage 3 --host <device-ip>
+U64_ALLOW_MUTATE=1 python3 tools/test_wire_encryption_live.py --host <device-ip>
 ```
+
+`--host` has no default on the newer tools deliberately: the device's address
+moves, and a stale default fails as "unreachable" rather than as "you forgot
+the flag". Identify the machine by `GET /v1/info` (`unique_id`), not by IP.
 
 All tests use the direct-memory `jsr()` pattern. Use `--seed N` to reproduce specific runs. The MTU suite uses a flag-based `jsr_flag()` that polls a completion flag instead of relying on VICE breakpoints, which become unreliable during long warp-mode computations (>~1000 byte payloads).
 
@@ -243,6 +252,82 @@ Note that 6.3% is well short of the "~20-25%" quoted in the c64-x25519 `vic_blan
 **All the figures above are NTSC.** Every measurement here runs under `ViceConfig(ntsc=True)`, and the saving is smaller on PAL: 63 cycles x 312 lines = 19656 cycles/frame against the same 25 badlines x ~43 = 1075, giving **~5.5%**. So a PAL machine — including the hardware-validation C64U, if it is running PAL — sees roughly 5.5% rather than 6.3%, and the Type-2 saving would be ~25 s rather than 28.4 s. The blanking figure is a property of the display standard and of the caller's own screen contents, not of the crypto.
 
 The heavy lifting lives in the sibling libraries since v1.0.0 — REU DMA multiply tables (128 KB precompute, banks per [`src/crypto/shared/reu_layout.inc`](src/crypto/shared/reu_layout.inc)), dedicated squaring, SMC cswap, mul38 tables, and the constant-time `ct_mul_8x8` all come from [c64-x25519](https://github.com/JC-000/c64-x25519); the AEAD side from [c64-ChaCha20-Poly1305](https://github.com/JC-000/c64-ChaCha20-Poly1305) (rolled-outer multiply — the size/speed elbow WG opts into). On turbo hosts (Ultimate at 16-48 MHz) the no-REU build scales nearly linearly with clock; the REU build hits a DMA wall-clock floor.
+
+## Interactive chat and demo
+
+```bash
+# Interactive: type here, press M on the C64 to type back. /quit to exit.
+python3 tools/wg_chat.py --host <device-ip>
+
+# Unattended: a scripted dialogue with both ends speaking.
+python3 tools/wg_demo.py --host <device-ip>
+```
+
+Both bring the tunnel up from scratch — build, upload, stage config, drive
+`do_handshake` to `SESSION_ACTIVE`, hand the machine back to its own main loop
+— then relay. Both default to **48 MHz** and restore the shared device to
+1 MHz on exit, Ctrl-C included.
+
+**Rekey, so a chat can run indefinitely.** `rekey_pending` has no consumer in
+the firmware: `src/wg/timer.s` raises it and prints `REKEY NEEDED`,
+`src/wg/transport.s` raises it too, and nothing acts on either — so a session
+dies at WireGuard's 180 s `REJECT_AFTER_TIME`. Instead of new in-session
+assembly, [`tools/wg_c64_input.py`](tools/wg_c64_input.py) drives the existing
+`H` menu entry, re-running the proven `do_handshake` path. Measured: 88 s to a
+fresh session, conversation resuming across cycles.
+
+It can do that because `main_loop` and `read_input_line` both read KERNAL
+`getin`, which takes from the keyboard *buffer* — ordinary RAM at `$0277` with
+its count at `$C6` — and `read/write_memory` still work after the handoff
+because they are DMA, not CPU. So the host can type even though trampoline
+control is gone by design.
+
+**Rekey only closes at turbo.** A handshake is ~90 s of Type-1 plus ~36 s to
+process the Type-2 at 48 MHz, which fits inside the 180 s lifetime. At 1 MHz
+the same handshake is ~21.7 min — roughly 7x the lifetime of the session it is
+meant to replace — so a self-sustaining chat is arithmetically impossible at
+stock speed, not merely slow. The session timers are jiffy-based off the 60 Hz
+KERNAL clock (`src/wg/timer.s`: 600 / 7200 / 10800 jiffies = keepalive 10 s,
+rekey 120 s, expire 180 s), so they are wall time and turbo does not shorten
+them.
+
+## Verifying encryption on the wire
+
+[`tools/test_wire_encryption_live.py`](tools/test_wire_encryption_live.py) —
+9/9 on hardware (U64E fw 3.14d, 48 MHz). It asserts on real datagrams:
+
+- the plaintext marker is **absent** from the wire in **both** directions,
+  while the same datagram decrypts to it;
+- the length accounts for the 16-byte Poly1305 tag (`16 hdr + n + 16`);
+- identical plaintext yields **different** ciphertext with an advancing
+  counter, so the stream is not a fixed keystream;
+- the C64 **rejects** a packet with one flipped ciphertext bit — it is
+  authenticating, not merely deciphering — and the session still works
+  afterwards, so the rejection is not a denial of service.
+
+The responder socket is a legitimate wire tap for this: we are the peer, so
+the bytes handed to `decrypt_transport` are exactly what the C64 transmitted.
+No pcap or elevated privileges required.
+
+At unit level, [`tools/test_transport.py`](tools/test_transport.py) runs the
+C64's own `transport_send` in VICE and compares ciphertext **and tag**
+byte-for-byte against Python's ChaCha20-Poly1305, and additionally asserts the
+plaintext does not appear anywhere in the packet the C64 built (guarded to
+>= 8-byte plaintexts, since a shorter random string can occur inside
+ciphertext by chance and a probabilistic gate failure would be worse than no
+check).
+
+**Cleartext by design:** the 16-byte Type-4 header — message type, receiver
+index, counter. Everything after it is ciphertext plus tag. That is
+WireGuard's own framing, not a shortcut here.
+
+**Control-plane caveat — read this before quoting a green run.** These tools
+stage private keys and inject keystrokes over the Ultimate's REST/DMA
+interface, which is **plain HTTP on port 80**. So in a `wg_demo.py` run the
+C64-side dialogue and the staged keys *do* cross the LAN in the clear, from
+the harness's control plane rather than from the tunnel. A packet capture will
+find them; filter `not port 80` to isolate the tunnel. A human typing at the
+C64's own keyboard has no such exposure.
 
 ## Architecture
 

@@ -31,12 +31,23 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import wg_c64_input                                          # noqa: E402
+
 CHAT_TURBO_MHZ = 48
 IDLE_TURBO_MHZ = 1
+
+# Rekey before WireGuard's 180 s REJECT_AFTER_TIME strands us. The firmware
+# raises rekey_pending and prints REKEY NEEDED but nothing consumes the flag,
+# so left alone every session dies at 180 s; we drive the H menu entry, which
+# re-runs the same do_handshake that brought the session up in the first
+# place. ~126 s of compute at 48 MHz, which fits; at 1 MHz it could not.
+REKEY_AFTER_S = 140.0
 
 
 def _restore_speed(host: str) -> None:
@@ -61,6 +72,95 @@ def _restore_speed(host: str) -> None:
               f"{type(exc).__name__}: {exc}\n"
               f"!! it is shared — check it before you walk away.",
               file=sys.stderr, flush=True)
+
+
+def build_chat_loop():
+    """Interactive chat that keeps itself alive across session expiry.
+
+    Same two directions as the tool's built-in _chat_loop — type here to
+    print on the C64, press M there to send back — plus a watchdog that
+    re-establishes the session before it times out.
+
+    Sends are refused while a rekey is in flight rather than silently
+    dropped: the C64 is single-threaded and spends those ~126 s inside a
+    scalarmult, so it is not polling the network and anything sent then is
+    genuinely gone. Saying so beats letting someone type into a void.
+    """
+    from test_uci_handshake_live import (
+        SESSION_ACTIVE, ascii_to_petscii, petscii_to_ascii,
+        strip_tunnel_headers,
+    )
+
+    def chat_loop(tr, L, rt, responder) -> int:
+        wg_state = L["wg_state"]
+        stop = threading.Event()
+        rekeying = threading.Event()
+        lock = threading.Lock()
+
+        def sender() -> None:
+            print("-- type to send to the C64; press M on the C64 to send "
+                  "back; /quit to exit --", flush=True)
+            for line in sys.stdin:
+                line = line.rstrip("\n")
+                if line in ("/quit", "/q"):
+                    stop.set()
+                    return
+                if not line:
+                    continue
+                if rekeying.is_set():
+                    print("!! rekeying — the C64 is computing and not "
+                          "listening; try again shortly", flush=True)
+                    continue
+                payload = ascii_to_petscii(line)
+                if len(payload) > 240:
+                    print("!! truncated to 240B (SOCKET_READ caps at 512, "
+                          "#46)", flush=True)
+                    payload = payload[:240]
+                try:
+                    with lock:
+                        pkt = responder.encrypt_transport(payload)
+                    rt.send_raw(pkt)
+                    print(f"you> {line}", flush=True)
+                except Exception as exc:                      # noqa: BLE001
+                    print(f"!! send failed: {type(exc).__name__}: {exc}",
+                          flush=True)
+
+        threading.Thread(target=sender, daemon=True,
+                         name="chat-stdin").start()
+
+        session_started = time.monotonic()
+        while not stop.is_set():
+            time.sleep(0.2)
+
+            for raw in rt.drain_type4():
+                text = petscii_to_ascii(strip_tunnel_headers(raw)).rstrip()
+                if text:
+                    print(f"c64> {text}", flush=True)
+
+            age = time.monotonic() - session_started
+            state = tr.read_memory(wg_state, 1)[0]
+            if state == SESSION_ACTIVE and age <= REKEY_AFTER_S:
+                continue
+
+            why = ("expired" if state != SESSION_ACTIVE
+                   else f"{age:.0f}s old")
+            print(f"-- rekeying ({why}); ~2 min at 48 MHz, hold on --",
+                  flush=True)
+            rekeying.set()
+            try:
+                ok = wg_c64_input.rekey(tr, wg_state, SESSION_ACTIVE)
+            finally:
+                rekeying.clear()
+            if not ok:
+                print("!! rekey failed — wg_state never reached ACTIVE",
+                      flush=True)
+                return 1
+            session_started = time.monotonic()
+            print("-- rekeyed; carry on --", flush=True)
+
+        return 0
+
+    return chat_loop
 
 
 def main() -> int:
@@ -108,9 +208,10 @@ def main() -> int:
         *passthrough,
     ]
 
-    from test_uci_handshake_live import main as live_main
+    import test_uci_handshake_live as live
+    live.post_session_hook = build_chat_loop()
     try:
-        return live_main()
+        return live.main()
     except KeyboardInterrupt:
         print("\n-- interrupted --", file=sys.stderr)
         return 0

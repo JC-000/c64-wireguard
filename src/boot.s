@@ -445,34 +445,59 @@ do_load_config:
 ; =============================================================================
 ; read_input_line - read a line of text from keyboard
 ; Output: msg_input_buf filled, msg_input_len set
+;
+; THE INDEX MUST NOT LIVE IN Y ACROSS getin. KERNAL GETIN ($FFE4) does not
+; preserve Y: its keyboard-buffer fetch loads the character with LDY $0277,
+; shifts the queue using X, and returns it via TYA — so on return Y holds the
+; CHARACTER and X the shift count. This routine used to keep the buffer
+; position in Y across that call, which meant:
+;
+;   sta msg_input_buf,y   stored at msg_input_buf + char. 'A' ($41) landed at
+;                         $97A1, ~66 bytes past a 40-byte buffer, scattering
+;                         every keystroke over whatever followed it.
+;   cpy #40               could never match, Y being a character code >= $20,
+;                         so the length guard never fired either.
+;   sty msg_input_len     on RETURN stored Y = $0D, so the length was always
+;                         13 no matter what was typed.
+;
+; Net effect: the buffer was never written, and do_message_input tunnelled 13
+; bytes of stale buffer content. Every outbound chat message from the C64 was
+; empty — for a person at the keyboard exactly as much as for a host driving
+; the queue over DMA. Measured in isolation: after typing 8 characters, Y read
+; $49, i.e. the last character 'H' ($48) plus one iny.
+;
+; So the position lives in msg_input_len, which is where the count has to end
+; up anyway. Registers are then free to be clobbered by any KERNAL call.
+; Output: msg_input_buf filled, msg_input_len set
 ; =============================================================================
 read_input_line:
-        ldy     #0                      ; buffer position
+        lda     #0
+        sta     msg_input_len           ; buffer position AND final count
 @ril_loop:
-        jsr     getin
+        jsr     getin                   ; clobbers X and Y; A = character
         beq     @ril_loop               ; no key pressed
         cmp     #$0d                    ; RETURN
         beq     @ril_done
         cmp     #$14                    ; DELETE (PETSCII)
         beq     @ril_del
+        ldy     msg_input_len           ; reload index AFTER getin, not before
         cpy     #40                     ; max length
         beq     @ril_loop               ; buffer full, ignore
-        sta     msg_input_buf,y
-        jsr     chrout                  ; echo
-        iny
+        sta     msg_input_buf,y         ; A still holds the character
+        jsr     chrout                  ; echo (preserves A)
+        inc     msg_input_len
         jmp     @ril_loop
 @ril_del:
-        cpy     #0
+        lda     msg_input_len
         beq     @ril_loop               ; nothing to delete
-        dey
+        dec     msg_input_len
         lda     #$14                    ; PETSCII delete
         jsr     chrout
         jmp     @ril_loop
 @ril_done:
-        sty     msg_input_len
         lda     #$0d
         jsr     chrout                  ; newline
-        rts
+        rts                             ; msg_input_len already holds the count
 
 ; =============================================================================
 ; clrscr - clear screen

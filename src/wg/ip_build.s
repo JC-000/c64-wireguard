@@ -312,6 +312,26 @@ udp_tunnel_build:
         bne @copy_text          ; max 255 bytes
 @text_done:
 
+        ; --- set packet length = 28 + text_len ---
+        ;
+        ; BEFORE the checksum, not after: ip_checksum documents "Clobbers:
+        ; A, Y, zp_tmp2" and uses zp_tmp2 as its own sum-high accumulator,
+        ; while the text length lives there. Computing this afterwards read
+        ; checksum residue instead of a length.
+        ;
+        ; It hid because the IP header's own total-length field is written
+        ; earlier (from the same zp_tmp2, while still live), so the packet
+        ; was internally consistent and parsed fine — only the count of
+        ; bytes handed to transport_send was wrong. Measured on hardware: a
+        ; 13-character message set ip_pkt_len = 103 instead of 41, so 62
+        ; bytes of whatever the previous packet left in ip_packet_buf were
+        ; encrypted and transmitted after the text. That is stale memory
+        ; going out over the wire, not merely a display artefact.
+        lda #28
+        clc
+        adc zp_tmp2
+        sta ip_pkt_len
+
         ; --- compute IP header checksum over 20 bytes ---
         lda #<ip_packet_buf
         sta zp_ptr1
@@ -324,12 +344,6 @@ udp_tunnel_build:
         sta ip_packet_buf+10
         lda ip_cksum_result+1
         sta ip_packet_buf+11
-
-        ; --- set packet length = 28 + text_len ---
-        lda #28
-        clc
-        adc zp_tmp2
-        sta ip_pkt_len
 
         rts
 

@@ -49,8 +49,19 @@ of `$A000` BASIC ROM shadow with ~700 bytes headroom.
 - [ ] **Physical power-cycle the U64E.** Not `client.reboot()` — it does
       not clear the UCI wedge state. The wedge budget below starts
       counting from power-on.
-- [ ] Confirm host: tests default to `U64_HOST=10.43.23.81` (set the env
-      var if the device moved).
+- [ ] **Confirm the host address by probing, not by recall.** The older
+      tools default to `U64_HOST=10.43.23.81`; that is a home-LAN address
+      and the device moves (it has since been seen at `192.168.2.80` and
+      `.81`). Identify the machine by `GET /v1/info` — `unique_id`,
+      `hostname`, `firmware_version` — and pass `U64_HOST` / `--host`
+      explicitly. A stale address fails as "unreachable", which reads like
+      a dead device rather than a wrong flag. The newer tools
+      (`wg_chat.py`, `wg_demo.py`, `test_wire_encryption_live.py`) have no
+      default for exactly this reason.
+- [ ] **Check the CPU speed.** `GET /v1/configs/U64%20Specific%20Settings`
+      → `CPU Speed`. The device is shared and has been found left at a
+      stale 16/48 MHz. Restore 1 MHz when you are done; the newer tools do
+      this themselves, including on Ctrl-C.
 - [ ] Start the **patient Python responder** (`tools/wg_responder/`) —
       real `wg` enforces REKEY_TIMEOUT (5 s) / REJECT_AFTER_TIME (180 s)
       and will drop the session long before the C64's ~9 min handshake
@@ -65,15 +76,32 @@ of `$A000` BASIC ROM shadow with ~700 bytes headroom.
 
 ### Device quirks that will bite you (all firmware 3.14d)
 
-- **Session budget: ≤3 `run_prg` cycles per power-cycle.** The
-  `uci_wait_idle` wedge reproduces deterministically after ~3 cycles
-  (161 s stall, Type-1 datagram dropped). Plan the run order so the
-  most valuable runs happen first; power-cycle between batches.
+- **Session budget: NOT 3 runs — but the wedge is real.** The old "≤3
+  `run_prg` per power-cycle" figure is wrong; 7 clean bring-ups in a row
+  have been observed repeatedly (2026-08-15 and again 2026-08-17). What
+  does hold is that after *enough* sessions on one power cycle the
+  Ultimate stops delivering: `do_handshake` returns `carry=0` with a
+  correct 148-byte packet staged and nothing arrives (#58). Twice on
+  2026-08-17 that appeared around the seventh bring-up. Do not ration
+  runs on a count; instead **confirm the wedge cheaply** with
+  `tools/test_uci_udp_echo_live.py`, which needs no crypto and fails in
+  seconds with `net_udp_send` timing out.
+- **Only a physical power-cycle clears it.** `PUT /v1/machine:reset`
+  does not — verified twice. The wedge is in the Ultimate's firmware
+  network stack, not in the C64.
 - **`runner_health_check()` lies** — returns None even when UCI is
   wedged. Detect the wedge from the test's own progress log
   (`step $66 still running [send_len_lo=...]`).
-- **SOCKET_READ: always request 512 bytes.** >512 truncates silently;
-  1500 returns `0xFFFF`.
+- **SOCKET_READ: always request 512 bytes, AND validate the length it
+  returns.** >512 truncates silently; 1500 returns `0xFFFF`. Worse, the
+  firmware can report a length larger than the request even for a 512
+  request: `net_poll` used to trust it and fed it to an unbounded copy,
+  which walked ~18 KB from `udp_recv_buf` through `$D000` I/O and left
+  WireGuard packet bytes in the VIC registers (red screen, garbage
+  charset, `wg_state` zeroed). Fixed by clamping against
+  `UCI_READ_CHUNK_MAX` and dropping the read; `net_last_error = $88`
+  (`UCI_ERR_LONG_READ`) fires routinely on this firmware during healthy
+  sessions, so seeing it is expected rather than alarming.
 - **SOCKET_WRITE status arrives in the STATUS register, not
   RESP_DATA**, and the written-count is garbage for UDP —
   `src/net/uci/net.s` already handles both (`uci_chunk_len` override);
@@ -188,6 +216,36 @@ post-Type-1 hs_h match: OK|MISMATCH | hs_c match: OK|MISMATCH
   `handle_initiation` — it's deleted; the test already takes
   `e_pub_resp` from `type2_packet[12:44]`.
 - Save the new `--dump-aead` log to `artifacts/` immediately.
+
+## 5a. Chat, rekey and encryption verification (added 2026-08-17)
+
+Three tools that need no staging beyond `--host`, and which restore the
+shared device to 1 MHz themselves (including on Ctrl-C):
+
+```bash
+python3 tools/wg_chat.py --host <ip>                    # interactive, both ways
+python3 tools/wg_demo.py --host <ip>                    # unattended dialogue
+U64_ALLOW_MUTATE=1 \
+  python3 tools/test_wire_encryption_live.py --host <ip>  # 9 wire assertions
+```
+
+- Both chat tools default to **48 MHz** and rekey at 140 s by driving the
+  `H` menu entry over DMA (`tools/wg_c64_input.py`). `rekey_pending` has
+  no consumer in the firmware, so without that a session dies at 180 s.
+  Rekey costs ~126 s of compute at 48 MHz and is impossible at 1 MHz,
+  where a handshake is ~7x the session lifetime.
+- **`wg_state` reads `ACTIVE` for the whole ~90 s of a rekey's Type-1**,
+  because `session_initiate` stores `SESSION_HS_SENT` only after the
+  scalarmult (`src/wg/session.s:144-146`). Waiting for "state == ACTIVE"
+  therefore succeeds instantly and proves nothing — wait for it to LEAVE
+  active first.
+- The encryption test uses the responder socket as its wire tap: we are
+  the peer, so those bytes are exactly what the C64 transmitted. No pcap
+  or sudo needed.
+- **Control-plane caveat:** keystroke injection and key staging go over
+  the Ultimate's REST interface, i.e. plain HTTP on port 80. That text
+  crosses the LAN in the clear. Filter `not port 80` in any capture meant
+  to judge the tunnel.
 
 ## 6. After the session
 
