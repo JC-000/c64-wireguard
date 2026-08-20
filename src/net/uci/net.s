@@ -526,9 +526,11 @@ net_poll:
         lda uci_socket_id
         jsr uci_put_byte
 
-        lda #<512
+        ; Same symbol the reply is validated against below — a literal here
+        ; would let the request and the clamp drift apart silently.
+        lda #<UCI_READ_CHUNK_MAX
         jsr uci_put_byte
-        lda #>512
+        lda #>UCI_READ_CHUNK_MAX
         jsr uci_put_byte
 
         jsr uci_push_wait
@@ -574,6 +576,46 @@ net_poll:
         rts
 
 @hdr_done:
+        ; VALIDATE THE LENGTH BEFORE IT BECOMES A COPY COUNT.
+        ;
+        ; The byte loop below stores through an SMC address that bumps its
+        ; own high byte every time Y wraps, so this count is the ONLY thing
+        ; bounding where it writes. udp_recv_buf holds 1500 bytes and
+        ; udp_recv_len / udp_recv_src_ip / wg_peer_ip / wg_state sit
+        ; immediately after it in data.s, so an over-long count does not
+        ; merely overflow a buffer — it eats the network state that the
+        ; receive path itself depends on, then keeps going into $D000 I/O.
+        ;
+        ; Not hypothetical. Observed mid-chat on a U64E (fw 3.14d): the VIC
+        ; register block came back holding WireGuard packet bytes — $D018 =
+        ; $A3 repointed the screen at $2800 and the charset at $0800 (a
+        ; screenful of garbage over intact screen RAM), $D020 = $F2 turned
+        ; the border red, and wg_state was zeroed, so the session died and
+        ; keepalives stopped after exactly one inbound message.
+        ;
+        ; We asked for UCI_READ_CHUNK_MAX; a reply claiming more than that
+        ; is a framing violation, and #46 records this firmware returning
+        ; lengths that are not the byte count (0xFFFF for a 1500 request).
+        ; DROP rather than trim: a length we do not believe means the
+        ; response framing is not what we think it is, so the payload bytes
+        ; behind it cannot be trusted either.
+        lda uci_read_hdr+1
+        cmp #>UCI_READ_CHUNK_MAX
+        bcc @len_ok                 ; hi < 2 → certainly under the cap
+        bne @len_bad                ; hi > 2 → certainly over it
+        lda uci_read_hdr+0          ; hi == 2 → only exactly 512 is legal
+        beq @len_ok
+
+@len_bad:
+        lda #UCI_ERR_LONG_READ
+        sta net_last_error
+        jsr uci_drain_resp
+        jsr uci_drain_status
+        jsr uci_ack
+        sec
+        rts
+
+@len_ok:
         ; actual_len → uci_poll_rem. If zero, no datagram this tick.
         lda uci_read_hdr+0
         sta uci_poll_rem+0
