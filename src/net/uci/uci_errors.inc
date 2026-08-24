@@ -3,6 +3,17 @@
 ; Values stored in net_last_error by the UCI adapter. 0 = OK.
 ; Kept deliberately small and distinct from any ip65 error values so
 ; that future multi-backend debugging can tell them apart at a glance.
+;
+; $80-$BF is the grandfathered UCI range (c64-lib-contract SPEC §13.2).
+; $81-$89 are the shared c64-https spellings and MUST NOT be reassigned
+; here — they are the cross-consumer half of the table.
+;
+; NOTE ($8A, 2026-08-24): UCI_ERR_LONG_READ was ours alone and used to sit
+; at $88, which c64-https had already assigned to UCI_ERR_NO_SOCKET. Taking
+; their table verbatim would have silently redefined a code this adapter
+; emits on every healthy fw 3.14d session (see net_poll's long-read guard),
+; turning a routine over-long read into a phantom-socket report. LONG_READ
+; moved to $8A instead; $88/$89 now match c64-https exactly.
 
 UCI_ERR_OK             = $00    ; no error
 UCI_ERR_NOT_PRESENT    = $81    ; $DF1D did not read back UCI_ID_VALUE ($C9)
@@ -12,12 +23,15 @@ UCI_ERR_CONNECT_FAIL   = $84    ; TCP_CONNECT returned an error bit
 UCI_ERR_SEND_FAIL      = $85    ; SOCKET_WRITE returned an error bit
 UCI_ERR_READ_FAIL      = $86    ; SOCKET_READ returned an error bit
 UCI_ERR_SHORT_WRITE    = $87    ; SOCKET_WRITE wrote fewer bytes than requested
-UCI_ERR_LONG_READ      = $88    ; SOCKET_READ claimed more bytes than we asked for
+UCI_ERR_NO_SOCKET      = $88    ; socket-open response yielded no socket_id
+UCI_ERR_WAIT_TIMEOUT   = $89    ; a bounded wait exceeded its wall-clock budget
+UCI_ERR_LONG_READ      = $8A    ; SOCKET_READ claimed more bytes than we asked for
 
 ; TCP state values stored in net_tcp_state
 UCI_TCP_CLOSED         = $00    ; no active socket
 UCI_TCP_CONNECTED      = $01    ; connected, reads/writes valid
 UCI_TCP_ERROR          = $02    ; saw an error on a read — stop polling
+UCI_TCP_CONNECT_FAIL   = $03    ; connect did not yield a usable socket
 
 ; UCI firmware data queue max per SOCKET_WRITE push (see uci_network.py)
 UCI_DATA_QUEUE_MAX     = 800

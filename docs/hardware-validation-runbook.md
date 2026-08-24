@@ -99,9 +99,12 @@ of `$A000` BASIC ROM shadow with ~700 bytes headroom.
   which walked ~18 KB from `udp_recv_buf` through `$D000` I/O and left
   WireGuard packet bytes in the VIC registers (red screen, garbage
   charset, `wg_state` zeroed). Fixed by clamping against
-  `UCI_READ_CHUNK_MAX` and dropping the read; `net_last_error = $88`
+  `UCI_READ_CHUNK_MAX` and dropping the read; `net_last_error = $8A`
   (`UCI_ERR_LONG_READ`) fires routinely on this firmware during healthy
-  sessions, so seeing it is expected rather than alarming.
+  sessions, so seeing it is expected rather than alarming. It moved from
+  $88 to $8A on 2026-08-24 so that $88/$89 can carry c64-https's
+  `UCI_ERR_NO_SOCKET` / `UCI_ERR_WAIT_TIMEOUT` meanings unchanged — logs
+  from before that date show this condition as $88.
 - **SOCKET_WRITE status arrives in the STATUS register, not
   RESP_DATA**, and the written-count is garbage for UDP —
   `src/net/uci/net.s` already handles both (`uci_chunk_len` override);

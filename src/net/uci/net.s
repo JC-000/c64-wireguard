@@ -137,6 +137,9 @@ net_init:
 ; =============================================================================
 net_dhcp:
         jsr uci_wait_idle
+        bcc @dhcp_go            ; FPGA wedged — cannot issue the command
+        rts                     ; (net_last_error = UCI_ERR_WAIT_TIMEOUT, C=1)
+@dhcp_go:
 
         lda #UCI_TARGET_NETWORK
         jsr uci_begin_cmd
@@ -297,6 +300,9 @@ net_udp_send:
 
 @begin_chunk:
         jsr uci_wait_idle
+        bcc @bc_go              ; wedged before the chunk went out — bail with
+        rts                     ; C=1 so the caller does not count it as sent
+@bc_go:
 
         lda #UCI_TARGET_NETWORK
         jsr uci_begin_cmd
@@ -366,7 +372,9 @@ net_udp_send:
         ; so the bookkeeping below still advances net_send_ptr / decrements
         ; uci_send_rem by the count we actually pushed.
         jsr uci_drain_status
+        bcs @sb_wedged
         jsr uci_wait_idle
+        bcs @sb_wedged
 @sb_had_write:
 
         ; Advance source pointer by actual written count.
@@ -401,6 +409,14 @@ net_udp_send:
         clc
         rts
 
+@sb_wedged:
+        ; The FPGA stopped responding mid-send. net_last_error is already
+        ; UCI_ERR_WAIT_TIMEOUT. Report failure rather than letting the
+        ; caller believe the datagram went out — silent send success is
+        ; exactly the failure mode issue #58 cost days to diagnose.
+        sec
+        rts
+
 ; =============================================================================
 ; uci_udp_connect — issue UDP_CONNECT(wg_peer_ip, wg_peer_port) to pin the
 ; socket to the WireGuard peer. Stores the returned socket id in
@@ -423,6 +439,9 @@ net_udp_send:
 ; =============================================================================
 uci_udp_connect:
         jsr uci_wait_idle
+        bcc @uc_go              ; wedged — no socket was opened, so leave
+        rts                     ; uci_socket_open clear and report C=1
+@uc_go:
 
         lda #UCI_TARGET_NETWORK
         jsr uci_begin_cmd
@@ -472,6 +491,13 @@ uci_udp_connect:
 
 @uc_no_err:
         ; 1-byte socket_id response.
+        ;
+        ; Pre-zero uci_socket_id so a short read leaves a known sentinel:
+        ; uci_read_resp_bytes only writes the bytes it actually receives,
+        ; so without this the "socket id" is whatever was there before.
+        lda #$00
+        sta uci_socket_id
+
         lda #<uci_socket_id
         sta uci_resp_dst
         lda #>uci_socket_id
@@ -484,7 +510,27 @@ uci_udp_connect:
         jsr uci_drain_status
         jsr uci_ack
 
+        ; PHANTOM-SOCKET GUARD (c64-https issue #36; our issue #58).
+        ; At least one U64E firmware path returns NO payload while clearing
+        ; the error bit. Unvalidated, that left uci_socket_id = 0, the
+        ; caller latched uci_socket_open = 1, and every subsequent
+        ; SOCKET_WRITE went to socket 0 — which the firmware discards.
+        ; The result is the #58 signature exactly: net_last_error = $00,
+        ; carry clear, wg_state advancing, and nothing on the wire.
+        ; Both halves are load-bearing: resp_count catches the short read,
+        ; socket_id catches a returned-but-bogus id.
+        lda uci_resp_count
+        beq @uc_no_socket
+        lda uci_socket_id
+        beq @uc_no_socket
+
         clc
+        rts
+
+@uc_no_socket:
+        lda #UCI_ERR_NO_SOCKET
+        sta net_last_error
+        sec
         rts
 
 ; =============================================================================
@@ -516,6 +562,9 @@ net_poll:
 
 @do_poll:
         jsr uci_wait_not_busy
+        bcc @dp_go              ; wedged — surface as a poll error (§13.2:
+        rts                     ; C=1 is reserved for real backend errors)
+@dp_go:
 
         lda #UCI_TARGET_NETWORK
         jsr uci_begin_cmd
