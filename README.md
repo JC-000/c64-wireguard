@@ -381,7 +381,20 @@ MTU = 480
 
 This is pinned in **both** directions even though only the inbound path forces it — `net_udp_send` chunks and could push ~1468 — because MTU is negotiated per-peer at both ends. A peer left at 1420 would answer our large packets with large packets we then drop, so we cap what we send to what we can receive and let a mismatch fail loudly at the sender.
 
-**Not necessarily permanent.** Whether the firmware *queues* the remainder of an oversized datagram for a later read — which would allow multi-read reassembly and a standard MTU — or *discards* it has not been measured. `tools/test_uci_udp_size_probe.py` exists to settle exactly that; the answer decides whether #46 ends at 480 or at 1420.
+**This is a hardware ceiling, measured.** `tools/test_uci_udp_size_probe.py` on U64E fw 3.14d (2026-08-24):
+
+| requested | received | remainder on a later poll |
+|---:|---:|---|
+| ≤ 512 | exact | — |
+| 600 | 512 | **never arrives** |
+| 768 | 512 | **never arrives** |
+| 1024 | 512 | **never arrives** |
+| 1280 | 512 | **never arrives** |
+| 1500 | 0 | nothing delivered at all |
+
+The remainder is **discarded, not queued** — no second datagram appeared in any of the ten oversized trials — so multi-read reassembly cannot recover it and a standard 1420 MTU is unreachable on this firmware. Raising `WG_MTU` would require a firmware change, not a code change.
+
+Reproducing this needs care with **run order**: an earlier pass with the large sizes last reported `1024 → 0 bytes`, which turned out to be the device's own after-~5-cycles degradation rather than firmware behaviour. Probe large-first on a freshly power-cycled unit.
 
 ### Session State Machine
 

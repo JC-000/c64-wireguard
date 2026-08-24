@@ -69,10 +69,22 @@ REKEY_COUNTER_B7    = $0F
 ;
 ; PEERS MUST BE CONFIGURED WITH MTU = 480 (see README).
 ;
-; NOT NECESSARILY A PERMANENT CEILING. Whether the firmware queues the
-; remainder of an oversized datagram for a subsequent read (in which case
-; multi-read reassembly could restore a standard MTU) or discards it has
-; NOT been measured. tools/test_uci_udp_size_probe.py exists to settle
-; exactly that question. Issue #46.
+; THIS IS A HARDWARE CEILING, NOT AN INTERIM VALUE. Measured 2026-08-24 with
+; tools/test_uci_udp_size_probe.py on U64E fw 3.14d, large sizes first and
+; each repeated, on a freshly power-cycled device:
+;
+;   <=512          delivered exactly
+;   600..1280      delivered as exactly 512, remainder DISCARDED
+;   1500           nothing delivered at all (matches the 0xFFFF quirk)
+;
+; In all ten oversized trials NO second datagram ever arrived on a later
+; net_poll, so the remainder is discarded rather than queued. Multi-read
+; reassembly is therefore impossible and a standard 1420 MTU is unreachable
+; on this firmware; raising WG_MTU needs new firmware, not new code.
+;
+; Run order matters when reproducing this: an earlier pass with the large
+; sizes LAST reported 1024 -> 0 bytes, which was the device's own
+; after-~5-cycles degradation, not firmware behaviour. Probe large-first on
+; a fresh device. Issue #46.
 WG_DATA_OVERHEAD    = 32        ; 16 B Type-4 header + 16 B Poly1305 tag
 WG_MTU              = 480       ; = 512 - WG_DATA_OVERHEAD
