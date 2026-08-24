@@ -69,7 +69,7 @@ def _required_labels() -> list[str]:
         "main_loop", "net_init", "net_dhcp_acquire", "net_udp_listen", "net_udp_send",
         "net_poll", "net_local_ip", "net_last_error", "mul_dma_hi",
         "wg_peer_ip", "wg_peer_port", "wg_local_port",
-        "udp_recv_ready", "udp_recv_len", "udp_recv_buf", "net_udp_send_len",
+        "udp_recv_ready", "udp_recv_len", "uci_read_hdr", "udp_recv_buf", "net_udp_send_len",
     ]
 
 
@@ -143,6 +143,13 @@ def _probe_one_size(
             break
         time.sleep(0.02)
 
+    # Raw SOCKET_READ response header, BEFORE the §13.3 validation consumes
+    # it. Read unconditionally: the interesting case is an oversized datagram
+    # where nothing was delivered, and gating on `ready` would miss exactly
+    # that row. c64-lib-contract#139 records this value as unmeasured.
+    hlo, hhi = tr.read_memory(L["uci_read_hdr"], 2)
+    rx_hdr = hlo | (hhi << 8)
+
     rx_len = 0
     rx_first = b""
     rx_tail = b""
@@ -177,6 +184,7 @@ def _probe_one_size(
     nle_final = tr.read_memory(L["net_last_error"], 1)[0]
     return {
         "size": size,
+        "rx_hdr": rx_hdr,
         "send_carry": send_carry,
         "nle_after_send": nle_after_send,
         "sent_back": sent_back,
@@ -194,7 +202,7 @@ def _probe_one_size(
 def _print_summary(results: list[dict]) -> None:
     print()
     print("=" * 90)
-    print(f"{'requested':>9} {'rx_len':>7} {'polls':>6} {'sent_back':>9} "
+    print(f"{'requested':>9} {'rx_len':>7} {'hdr':>7} {'polls':>6} {'sent_back':>9} "
           f"{'ready':>5} {'2nd?':>5} {'2nd_len':>8} "
           f"{'nle':>4}  first16 / tail16")
     print("-" * 90)
@@ -202,7 +210,7 @@ def _print_summary(results: list[dict]) -> None:
         first = r["rx_first16"]
         tail = r["rx_tail16"]
         print(
-            f"{r['size']:>9} {r['rx_len']:>7} {r['polls']:>6} {str(r['sent_back']):>9} "
+            f"{r['size']:>9} {r['rx_len']:>7} {('$%04X' % r['rx_hdr']):>7} {r['polls']:>6} {str(r['sent_back']):>9} "
             f"{r['ready']:>5} {r['second_ready']:>5} {r['second_len']:>8} "
             f"{r['nle_final']:>4}  {first}{(' / ' + tail) if tail else ''}"
         )

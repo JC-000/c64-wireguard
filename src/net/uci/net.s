@@ -54,6 +54,11 @@
 .export net_last_error
 .export uci_socket_id
 .export uci_socket_open
+; Exported for diagnostics: the raw SOCKET_READ response header, before the
+; §13.3 length validation consumes it. c64-lib-contract#139 records the UDP
+; header on an oversized datagram as UNMEASURED — this makes it observable
+; from the host so the $8A row's mechanism note can be written from data.
+.export uci_read_hdr
 
 ; --- primitives from uci_cmd.s ---
 .import uci_abort
@@ -748,6 +753,23 @@ net_poll:
         ; DROP rather than trim: a length we do not believe means the
         ; response framing is not what we think it is, so the payload bytes
         ; behind it cannot be trusted either.
+        ; $FFFF FIRST: it is the firmware's NO-DATA sentinel, not a length.
+        ; Measured 2026-08-24 — with nothing pending, every SOCKET_READ on a
+        ; UDP socket returns header $FFFF. Without this test that sentinel
+        ; falls through the over-claim check below (since $FFFF > 512) and
+        ; every idle poll reports UCI_ERR_LONG_READ, which is exactly why
+        ; docs/hardware-validation-runbook.md recorded $8A as "firing
+        ; routinely during healthy sessions". It was never an over-claim;
+        ; it was an empty read misfiled as a framing violation. c64-https
+        ; sees the same $FFFF sentinel on TCP (their #140).
+        ;
+        ; §13.2: no data is NEVER an error, so this exits C=0 with
+        ; udp_recv_ready left clear and net_last_error untouched.
+        lda uci_read_hdr+0
+        and uci_read_hdr+1
+        cmp #$FF
+        beq @hdr_none               ; $FFFF — nothing pending, not an error
+
         lda uci_read_hdr+1
         cmp #>UCI_READ_CHUNK_MAX
         bcc @len_ok                 ; hi < 2 → certainly under the cap
@@ -756,6 +778,13 @@ net_poll:
         beq @len_ok
 
 @len_bad:
+        ; A genuine over-claim: a length above what we requested that is NOT
+        ; the $FFFF sentinel. On a datagram socket the excess is discarded by
+        ; the firmware (GideonZ/1541ultimate#802), so the datagram is
+        ; unrecoverable and dropping it is the only correct action —
+        ; contrast c64-https, which caps on a stream because the remainder
+        ; stays queued.
+
         lda #UCI_ERR_LONG_READ
         sta net_last_error
         jsr uci_drain_resp

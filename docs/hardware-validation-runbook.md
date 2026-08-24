@@ -99,12 +99,24 @@ of `$A000` BASIC ROM shadow with ~700 bytes headroom.
   which walked ~18 KB from `udp_recv_buf` through `$D000` I/O and left
   WireGuard packet bytes in the VIC registers (red screen, garbage
   charset, `wg_state` zeroed). Fixed by clamping against
-  `UCI_READ_CHUNK_MAX` and dropping the read; `net_last_error = $8A`
-  (`UCI_ERR_LONG_READ`) fires routinely on this firmware during healthy
-  sessions, so seeing it is expected rather than alarming. It moved from
-  $88 to $8A on 2026-08-24 so that $88/$89 can carry c64-https's
-  `UCI_ERR_NO_SOCKET` / `UCI_ERR_WAIT_TIMEOUT` meanings unchanged — logs
-  from before that date show this condition as $88.
+  `UCI_READ_CHUNK_MAX` and dropping the read.
+
+  **`$FFFF` is the no-data sentinel, not a length** (measured 2026-08-24):
+  with nothing pending, every `SOCKET_READ` on a UDP socket returns header
+  `$FFFF`. c64-https sees the same sentinel on TCP. It must be excluded
+  *before* the over-claim test, or it fires on every idle poll — which is
+  exactly what this adapter did until 2026-08-24, and why this note
+  previously claimed `UCI_ERR_LONG_READ` "fires routinely during healthy
+  sessions". That was never an over-claim; it was an empty read misfiled as
+  a framing violation, and the symptom got written up as a firmware quirk
+  instead of our own misclassification. Now `$FFFF` exits `C=0` with
+  `udp_recv_ready` clear per §13.2, and `$8A` means a genuine over-claim.
+
+  So on a current build, seeing `$8A` **is** worth investigating — the
+  opposite of the previous advice. The code also moved from `$88` to `$8A`
+  on 2026-08-24 so `$88`/`$89` can carry c64-https's `UCI_ERR_NO_SOCKET` /
+  `UCI_ERR_WAIT_TIMEOUT` unchanged — logs before that date show this
+  condition as `$88`, and logs before the sentinel fix show it constantly.
 - **SOCKET_WRITE status arrives in the STATUS register, not
   RESP_DATA**, and the written-count is garbage for UDP —
   `src/net/uci/net.s` already handles both (`uci_chunk_len` override);
