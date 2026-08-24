@@ -82,6 +82,14 @@ REKEY_COUNTER_B7    = $0F
 ; reassembly is therefore impossible and a standard 1420 MTU is unreachable
 ; on this firmware; raising WG_MTU needs new firmware, not new code.
 ;
+; Asking for more does not help — it is strictly worse. Rebuilt with
+; UCI_READ_CHUNK_MAX = 1024, the SAME device in the SAME session delivered
+; NOTHING for every size 600..1280 (rx_len 0, never ready), including 600
+; and 768 which are smaller than the request and involve no truncation at
+; all; back at 512 the same datagrams arrive in one poll. The 512 control
+; ran AFTER the 1024 run, so it is not an ordering artifact. Reported
+; upstream as GideonZ/1541ultimate#802.
+;
 ; Run order matters when reproducing this: an earlier pass with the large
 ; sizes LAST reported 1024 -> 0 bytes, which was the device's own
 ; after-~5-cycles degradation, not firmware behaviour. Probe large-first on

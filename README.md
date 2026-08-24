@@ -394,6 +394,8 @@ This is pinned in **both** directions even though only the inbound path forces i
 
 The remainder is **discarded, not queued** — no second datagram appeared in any of the ten oversized trials — so multi-read reassembly cannot recover it and a standard 1420 MTU is unreachable on this firmware. Raising `WG_MTU` would require a firmware change, not a code change.
 
+Asking the firmware for more does not help — it is strictly worse. Rebuilt with `UCI_READ_CHUNK_MAX = 1024`, the same device in the same session delivered **nothing** for every size from 600 to 1280 (including 600 and 768, which are *smaller* than the request); back at 512 the same datagrams arrive in a single poll. Reported upstream as [GideonZ/1541ultimate#802](https://github.com/GideonZ/1541ultimate/issues/802).
+
 Reproducing this needs care with **run order**: an earlier pass with the large sizes last reported `1024 → 0 bytes`, which turned out to be the device's own after-~5-cycles degradation rather than firmware behaviour. Probe large-first on a freshly power-cycled unit.
 
 ### Session State Machine
