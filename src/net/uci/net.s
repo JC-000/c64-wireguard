@@ -28,6 +28,11 @@
 .include "uci_errors.inc"
 .include "constants.inc"
 
+; The tunnel MTU must fit inside one SOCKET_READ. The firmware truncates
+; rather than splits, so exceeding this is silent data loss, not an error.
+; Both symbols are equates, so this is checked at assembly time.
+.assert (WG_MTU + WG_DATA_OVERHEAD) <= UCI_READ_CHUNK_MAX, error, "WG_MTU + overhead exceeds UCI_READ_CHUNK_MAX: inbound datagrams would be truncated silently"
+
 ; --- net_abi.inc contract ---
 .export net_init
 .export net_dhcp

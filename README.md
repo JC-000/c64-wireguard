@@ -236,7 +236,7 @@ After enough back-to-back sessions on one power cycle, the U64E stops delivering
 
 This affects **both builds and both clock speeds**. It is device/firmware state, not a property of any configuration: an identical REU binary failed six consecutive runs and then passed immediately after a power cycle, with the hash verified on both sides of it.
 
-The consumer-visible defect is that `net_udp_send` reports success when the write did not happen. This firmware's UCI write status cannot distinguish the two ([#45](https://github.com/JC-000/c64-wireguard/issues/45), [#46](https://github.com/JC-000/c64-wireguard/issues/46) cover the adapter hardening), so a silent send is indistinguishable from a real one from the C64's side. If a session that previously worked stops delivering, power-cycle the Ultimate before suspecting the build.
+The consumer-visible defect is that `net_udp_send` reports success when the write did not happen. This firmware's UCI write status cannot distinguish the two, so a silent send is indistinguishable from a real one from the C64's side. If a session that previously worked stops delivering, power-cycle the Ultimate before suspecting the build.
 
 An earlier revision of this section attributed the same symptom to `REU=0` at 1 MHz and to a socket that could not survive a 25-minute computation. That diagnosis was wrong — it was device state — and is retracted. What remains genuinely untested is `REU=0` at 1 MHz on a *healthy* device: the only run of that combination happened on a degraded one, so its 25.1-minute Type-1 computation is a sound measurement while its delivery failure proves nothing.
 
@@ -362,7 +362,26 @@ Two interchangeable backends sit behind the `src/net_abi.inc` façade (`net_init
 
 **ip65 / RR-Net** (`BACKEND=ip65`, the default — VICE-testable): UDP via [ip65](https://github.com/cc65/ip65), driving the RR-Net CS8900a ethernet adapter. The ip65 library is built as a standalone binary blob (ca65/ld65) and linked into the final PRG at $2000 via ca65's `.incbin` directive in `src/net/ip65/ip65_blob.s`. A 10-entry jump table provides: init, process, DHCP, DNS, UDP add/remove listener, UDP send, and helper wrappers. The UDP receive callback fires during `ip65_process` while ip65 owns the zero page; it copies incoming data to `udp_recv_buf` and sets a flag for the main loop — no crypto ZP is touched.
 
-**UCI** (`BACKEND=uci` — the hardware-proven backend for the milestone and v1.0.0 runs): the same ABI implemented over the Ultimate 64 / C64 Ultimate Command Interface sockets ($DF1B-$DF1F, `src/net/uci/`), no ip65 dependency. Firmware caveats: inbound `SOCKET_READ` is capped at 512 bytes (larger datagrams are truncated — #46 tracks pinning the WG MTU accordingly), and the busy-wait loops are currently unbounded (#45). See `docs/hardware-validation-runbook.md`.
+**UCI** (`BACKEND=uci` — the hardware-proven backend for the milestone and v1.0.0 runs): the same ABI implemented over the Ultimate 64 / C64 Ultimate Command Interface sockets ($DF1B-$DF1F, `src/net/uci/`), no ip65 dependency. Firmware caveats: inbound `SOCKET_READ` is capped at 512 bytes and the firmware **truncates** larger datagrams rather than splitting them, which pins the tunnel MTU — see [Tunnel MTU](#tunnel-mtu) below ([#46](https://github.com/JC-000/c64-wireguard/issues/46)). The device busy-waits are now wall-clock bounded ([#45](https://github.com/JC-000/c64-wireguard/issues/45)). See `docs/hardware-validation-runbook.md`.
+
+### Tunnel MTU
+
+**Peers must be configured with `MTU = 480`.** WireGuard's default is 1420; leaving it there will appear to work and then fail on anything large.
+
+The UCI firmware's `SOCKET_READ` **truncates** an oversized datagram instead of splitting it (fw 3.14d clamps 600–1280-byte requests to 512 and returns `$FFFF` for ≥1500). A WireGuard Type-4 datagram is `payload + 32` (16-byte header + 16-byte Poly1305 tag), so the largest inner payload that survives one read is `512 − 32 = 480`. Anything larger loses its tail and fails authentication — and the loss is **silent**: no error is raised on either side. The symptom is a tunnel that passes `ping` and dies on an HTTP response.
+
+`WG_MTU` is defined once in `src/constants.inc` and checked at assembly time against `UCI_READ_CHUNK_MAX`, so an inconsistent pin fails the build rather than the wire.
+
+In a peer's WireGuard config:
+
+```ini
+[Interface]
+MTU = 480
+```
+
+This is pinned in **both** directions even though only the inbound path forces it — `net_udp_send` chunks and could push ~1468 — because MTU is negotiated per-peer at both ends. A peer left at 1420 would answer our large packets with large packets we then drop, so we cap what we send to what we can receive and let a mismatch fail loudly at the sender.
+
+**Not necessarily permanent.** Whether the firmware *queues* the remainder of an oversized datagram for a later read — which would allow multi-read reassembly and a standard MTU — or *discards* it has not been measured. `tools/test_uci_udp_size_probe.py` exists to settle exactly that; the answer decides whether #46 ends at 480 or at 1420.
 
 ### Session State Machine
 

@@ -49,3 +49,30 @@ IP_PROTO_UDP        = 17
 ; Key rotation counter thresholds
 REJECT_COUNTER_B7   = $10
 REKEY_COUNTER_B7    = $0F
+
+; --- Tunnel MTU -------------------------------------------------------------
+; The largest inner payload this implementation can carry in one WireGuard
+; Type-4 datagram. A datagram on the wire is payload + WG_DATA_OVERHEAD.
+;
+; WHY 480 AND NOT WIREGUARD'S USUAL 1420: the UCI firmware's SOCKET_READ
+; TRUNCATES an oversized datagram rather than splitting it (fw 3.14d clamps
+; 600-1280-byte requests to 512 and returns $FFFF for >=1500), so the tail of
+; anything larger than UCI_READ_CHUNK_MAX is lost and the packet fails AEAD.
+; The loss is SILENT: nothing on either side reports it.
+;
+; This is INBOUND-only in origin. Outbound is chunked by net_udp_send and
+; could carry ~1468, but MTU is configured per-peer at both ends, so a peer
+; left at the 1420 default will answer our large packets with large packets
+; we then drop. We therefore pin both directions to the value we can
+; actually receive, so a mismatch fails loudly at the sender instead of
+; vanishing at the receiver.
+;
+; PEERS MUST BE CONFIGURED WITH MTU = 480 (see README).
+;
+; NOT NECESSARILY A PERMANENT CEILING. Whether the firmware queues the
+; remainder of an oversized datagram for a subsequent read (in which case
+; multi-read reassembly could restore a standard MTU) or discards it has
+; NOT been measured. tools/test_uci_udp_size_probe.py exists to settle
+; exactly that question. Issue #46.
+WG_DATA_OVERHEAD    = 32        ; 16 B Type-4 header + 16 B Poly1305 tag
+WG_MTU              = 480       ; = 512 - WG_DATA_OVERHEAD
