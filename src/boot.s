@@ -15,6 +15,11 @@
 
         .include "constants.inc"
         .include "net_abi.inc"
+
+        ; Not part of the §13.1 contract surface — imported explicitly so the
+        ; dependency on an adapter extra is visible here, not implied by
+        ; net_abi.inc. See that header's closing note.
+        .import net_print_ip
         .include "crypto_abi.inc"
 
 ; --- Exports --------------------------------------------------------------

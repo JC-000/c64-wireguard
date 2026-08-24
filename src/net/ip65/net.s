@@ -27,8 +27,6 @@
 .export net_udp_close
 .export net_udp_recv_cb
 .export net_print_ip
-.export net_save_zp
-.export net_restore_zp
 
 ; ---- Public data labels (defined in this module) -----------------------------
 .export net_udp_send_ptr

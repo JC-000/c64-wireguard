@@ -93,13 +93,22 @@ of `$A000` BASIC ROM shadow with ~700 bytes headroom.
   wedged. Detect the wedge from the test's own progress log
   (`step $66 still running [send_len_lo=...]`).
 - **SOCKET_READ: always request 512 bytes, AND validate the length it
-  returns.** >512 truncates silently; 1500 returns `0xFFFF`. Worse, the
-  firmware can report a length larger than the request even for a 512
-  request: `net_poll` used to trust it and fed it to an unbounded copy,
-  which walked ~18 KB from `udp_recv_buf` through `$D000` I/O and left
-  WireGuard packet bytes in the VIC registers (red screen, garbage
-  charset, `wg_state` zeroed). Fixed by clamping against
-  `UCI_READ_CHUNK_MAX` and dropping the read.
+  returns.** >512 truncates silently; 1500 returns `0xFFFF`.
+
+  **The red-screen incident (PR #62) was the sentinel, not an over-claim.**
+  `net_poll` trusted the response header as a byte count and fed it to an
+  unbounded copy. On an empty read that header is `$FFFF`, so the copy ran
+  65535 bytes from `udp_recv_buf` — which reaches `$D000` after 17,964
+  bytes, i.e. the "~18 KB" walk through the VIC registers that zeroed
+  `wg_state`, repointed the screen via `$D018` and reddened the border via
+  `$D020`. The arithmetic matches the observed damage exactly, and **no
+  firmware over-claim is required to explain any of it**. Fixed by clamping
+  against `UCI_READ_CHUNK_MAX` and dropping the read; the sentinel is now
+  excluded first (below).
+
+  The wider lesson, and the reason this is worth the space: never let a
+  device-supplied count be the only bound on a store loop, and exclude the
+  sentinel before doing any arithmetic on a length.
 
   **`$FFFF` is the no-data sentinel, not a length** (measured 2026-08-24):
   with nothing pending, every `SOCKET_READ` on a UDP socket returns header
