@@ -9,11 +9,28 @@
 ; here — they are the cross-consumer half of the table.
 ;
 ; NOTE ($8A, 2026-08-24): UCI_ERR_LONG_READ was ours alone and used to sit
-; at $88, which c64-https had already assigned to UCI_ERR_NO_SOCKET. Taking
-; their table verbatim would have silently redefined a code this adapter
-; emits on every healthy fw 3.14d session (see net_poll's long-read guard),
-; turning a routine over-long read into a phantom-socket report. LONG_READ
-; moved to $8A instead; $88/$89 now match c64-https exactly.
+; at $88, which c64-https had already assigned to UCI_ERR_NO_SOCKET. Two
+; adapters emitting one byte with two meanings is what c64-lib-contract
+; SPEC 13.2's allocation table now exists to prevent; LONG_READ moved to
+; $8A and $88/$89 match c64-https exactly.
+;
+; CORRECTION (2026-08-24, later): an earlier version of this note said the
+; move mattered because this adapter emits LONG_READ "on every healthy
+; session". It did emit it constantly, but not because reads were long --
+; $FFFF is the firmware's NO-DATA sentinel (measured: every idle UDP
+; SOCKET_READ returns header $FFFF with rx_len 0, 11/11 sizes), and it
+; fell through the over-claim test because $FFFF > 512. net_poll now
+; excludes the sentinel first, so this code no longer fires on idle polls.
+;
+; The same sentinel, taken as a copy count, is the whole of the incident
+; that created this code: 65535 from udp_recv_buf ($89D4) through a store
+; loop that bumps its own high byte on every Y wrap reaches $D000 and the
+; VIC registers, which is the ~18 KB overrun in PR #62. No firmware
+; over-claim is needed to explain it. A non-sentinel over-claim has never
+; been measured on either transport, so $8A is reserved defensively rather
+; than for an observed condition -- the durable rule is the one that
+; travels: exclude the sentinel before any length arithmetic, and never
+; let a device-supplied count be the only bound on a store loop.
 
 UCI_ERR_OK             = $00    ; no error
 UCI_ERR_NOT_PRESENT    = $81    ; $DF1D did not read back UCI_ID_VALUE ($C9)
