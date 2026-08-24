@@ -96,6 +96,12 @@ uci_abort:
 CIA_TOD_TENTHS = $DC08
 CIA_TOD_HOUR   = $DC0B
 UCI_WAIT_IDLE_BUDGET_TENTHS = 50      ; 5 seconds at 10 Hz
+; Per-byte response wait. Shorter than the command budget above because it
+; sits inside a loop that runs once per response byte: the old counted
+; version intended ~150 ms, and 1 s of real time is generous for a LAN
+; round-trip while keeping a full short-read bail well inside any sane
+; caller timeout.
+UCI_RESP_WAIT_BUDGET_TENTHS = 10      ; 1 second at 10 Hz
 
 uci_wait_idle:
         ; Sample initial TENTHS for delta-tracking. Latch via HOUR,
@@ -277,8 +283,23 @@ uci_read_resp_bytes:
         ; Patch the dst pointer into the STA abs,Y instruction below.
         ; At turbo speeds the firmware may not have staged response data
         ; by the time the CPU reaches this point (e.g. TCP_CONNECT takes
-        ; a full network round-trip). Use a 16-bit spin-wait on DATA_AV
-        ; so we tolerate up to ~150 ms at 48 MHz without bailing early.
+        ; a full network round-trip), so we wait for DATA_AV per byte.
+        ;
+        ; This wait WAS a 16-bit iteration counter documented as "~150 ms
+        ; at 48 MHz, ~110 cycles per iteration". That figure was implicitly
+        ; calibrated against UCI_FENCE_INNER = 100; raising the fence to
+        ; 217 for the C64 Ultimate floor (§13.6) more than doubled every
+        ; iteration, stretching the full spin to ~7.5 s at 48 MHz — and at
+        ; 1 MHz it is minutes. Measured consequence on 2026-08-24: once the
+        ; firmware stopped answering UDP_CONNECT, net_udp_send stopped
+        ; failing in ~3.5 s and started blowing past a 10 s caller timeout
+        ; instead, with net_last_error still $00 because nothing here was
+        ; bounded in wall-clock terms.
+        ;
+        ; That is exactly the failure §13.4 forbids counted budgets to
+        ; prevent: the budget is a function of clock speed and fence width,
+        ; not of time. Same CIA1-TOD treatment as the other waits, with its
+        ; own shorter budget since this one sits in a per-byte loop.
         lda uci_resp_dst
         sta @rd_store+1
         lda uci_resp_dst+1
@@ -289,29 +310,40 @@ uci_read_resp_bytes:
         bcc @rd_not_max
         jmp @rd_done
 @rd_not_max:
-        ; 16-bit spin-wait for DATA_AV. ~65536 iterations; at 48 MHz
-        ; each iteration is ~110 cycles → total ≈ 150 ms, enough for
-        ; TCP handshakes over a LAN. X is preserved across the wait.
+        ; Wall-clock wait for DATA_AV, UCI_RESP_WAIT_BUDGET_TENTHS.
+        ; X is preserved across the wait.
         stx @rd_save_x
+        lda CIA_TOD_HOUR
+        lda CIA_TOD_TENTHS
+        sta @rd_last_tenths
         lda #$00
-        sta @rd_ctr_hi
-        ldx #$00
+        sta @rd_elapsed
 @rd_wait:
         lda UCI_STATUS
         uci_fence                   ; settle before testing DATA_AV
         and #UCI_STAT_DATA_AV
         bne @rd_have
-        dex
-        beq @rd_xzero
-        jmp @rd_wait                ; long branch: fence too wide for BNE
-@rd_xzero:
-        dec @rd_ctr_hi
-        beq @rd_timeout
-        jmp @rd_wait                ; long branch: fence too wide for BNE
+
+        ; Check TOD for elapsed tenths. Latch (HOUR) then read TENTHS.
+        lda CIA_TOD_HOUR
+        lda CIA_TOD_TENTHS
+        cmp @rd_last_tenths
+        beq @rd_wait_long           ; no change — keep waiting
+        sta @rd_last_tenths
+        inc @rd_elapsed
+        lda @rd_elapsed
+        cmp #UCI_RESP_WAIT_BUDGET_TENTHS
+        bcc @rd_wait_long           ; under budget — continue
 @rd_timeout:
-        ; Timeout: DATA_AV never appeared — bail with partial read.
+        ; Budget exhausted: DATA_AV never appeared — bail with a partial
+        ; read. uci_resp_count reports how many bytes actually landed, and
+        ; callers that care (uci_udp_connect's phantom-socket guard) check
+        ; it. Deliberately NOT an error here: a short response is a normal
+        ; outcome for some commands.
         ldx @rd_save_x
         jmp @rd_done
+@rd_wait_long:
+        jmp @rd_wait                ; long branch: fence too wide for BEQ/BCC
 @rd_have:
         ldx @rd_save_x
         lda UCI_RESP_DATA
@@ -323,8 +355,9 @@ uci_read_resp_bytes:
 @rd_done:
         sty uci_resp_count
         rts
-@rd_save_x: .byte 0
-@rd_ctr_hi: .byte 0
+@rd_save_x:      .byte 0
+@rd_last_tenths: .byte 0
+@rd_elapsed:     .byte 0
 
 ; =============================================================================
 ; uci_drain_resp — ACK remaining response bytes until DATA_AV is clear.

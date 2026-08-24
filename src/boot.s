@@ -226,6 +226,11 @@ do_cfg:
         jmp     main_loop
 
 quit:
+        ; Hand the firmware socket back before we go. Abandoning a live one
+        ; poisons the U64E's UCI lease path until a wall power cycle — see
+        ; net_udp_close and issue #58. Safe when nothing is open.
+        jsr     net_udp_close
+
         ; restore BASIC ROM before returning
         lda     proc_port
         ora     #$01

@@ -34,6 +34,7 @@
 .export net_poll
 .export net_udp_listen
 .export net_udp_send
+.export net_udp_close
 .export net_udp_recv_cb
 .export net_print_ip
 .export net_save_zp
@@ -113,6 +114,26 @@ net_init:
         ; required cold power cycles between iterations. c64-https's
         ; UCI backend does the same: abort, then go.
         jsr uci_abort
+
+        ; Close any socket still open from a previous run BEFORE we throw
+        ; the handle away. Zeroing uci_socket_id/uci_socket_open without
+        ; telling the firmware is what orphaned a live socket on every
+        ; re-init, and resetting the C64 with a live firmware socket
+        ; poisons the U64E's UCI lease path until a wall power cycle
+        ; (GET_IPADDR then returns nothing while REST/menu stay healthy).
+        ; That is issue #58: reproduced 2026-08-24 in 3 echo runs on a
+        ; freshly power-cycled U64E, with no idle window anywhere.
+        ;
+        ; Guarded on the flag holding exactly $01: this is BSS, so on a
+        ; cold boot it is whatever the RAM happened to contain, and we
+        ; must not push a garbage socket id at the firmware. A close
+        ; failure is deliberately non-fatal — net_init must still
+        ; complete, and having tried to close beats never trying.
+        lda uci_socket_open
+        cmp #$01
+        bne @ni_no_socket
+        jsr net_udp_close
+@ni_no_socket:
 
         lda #$00
         sta net_local_ip+0
@@ -436,6 +457,75 @@ net_udp_send:
 ; then port_hi (little-endian), so we swap here: send +1 first, then +0.
 ;
 ; Clobbers: A, X, Y
+; =============================================================================
+; net_udp_close — close the firmware UDP socket, if we hold one.
+;
+; The firmware hands back the same UDP handle every time (measured
+; 2026-08-24: 24 consecutive UDP_CONNECTs all returned socket_id 10), so
+; this is not about exhausting a pool. It is about not abandoning a LIVE
+; socket: the U64E poisons its own lease path when the C64 is reset while
+; one is still open, and only a wall power cycle clears that.
+;
+; Safe to call when nothing is open — returns C=0 having done nothing.
+; A firmware-side failure is reported via C=1 but the local bookkeeping is
+; cleared regardless: if we cannot close it we must at least not go on
+; believing we still own it.
+;
+; Output: C=0 on success or nothing-to-do, C=1 if the command failed.
+; Clobbers: A, X, Y
+; =============================================================================
+net_udp_close:
+        lda uci_socket_open
+        beq @uc_none                ; nothing open — nothing to do
+
+        jsr uci_wait_idle
+        bcc @uc_go
+        ; Wedged before we could issue the close. Drop our bookkeeping so a
+        ; later net_udp_send re-connects rather than writing to a handle we
+        ; can no longer manage, and report the timeout.
+        lda #$00
+        sta uci_socket_id
+        sta uci_socket_open
+        sec
+        rts
+@uc_go:
+        lda #UCI_TARGET_NETWORK
+        jsr uci_begin_cmd
+
+        lda #UCI_CMD_SOCKET_CLOSE
+        jsr uci_put_byte
+
+        lda uci_socket_id
+        jsr uci_put_byte
+
+        jsr uci_push_wait
+
+        jsr uci_check_err
+        php                         ; keep the command's verdict across the
+                                    ; drains, which have a carry of their own
+        jsr uci_drain_resp
+        jsr uci_drain_status
+        jsr uci_ack
+
+        ; Clear local state whatever the firmware said.
+        lda #$00
+        sta uci_socket_id
+        sta uci_socket_open
+
+        plp
+        bcc @uc_ok
+        lda #UCI_ERR_CMD_FAILED
+        sta net_last_error
+        sec
+        rts
+@uc_ok:
+        clc
+        rts
+
+@uc_none:
+        clc
+        rts
+
 ; =============================================================================
 uci_udp_connect:
         jsr uci_wait_idle

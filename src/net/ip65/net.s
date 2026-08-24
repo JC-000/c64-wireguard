@@ -24,6 +24,7 @@
 .export net_poll
 .export net_udp_listen
 .export net_udp_send
+.export net_udp_close
 .export net_udp_recv_cb
 .export net_print_ip
 .export net_save_zp
@@ -102,6 +103,20 @@ net_udp_listen:
         php
         jsr net_restore_zp
         plp
+        rts
+
+; =============================================================================
+; net_udp_close - close the UDP socket (no-op for ip65)
+;
+; ip65's UDP is connectionless: udp_add_listener/udp_remove_listener manage
+; a local port, and there is no firmware-side socket handle to abandon. The
+; UCI backend needs a real close (see its header and issue #58); this exists
+; so the two backends present the same surface.
+;
+; Output: C=0 always.
+; =============================================================================
+net_udp_close:
+        clc
         rts
 
 ; =============================================================================

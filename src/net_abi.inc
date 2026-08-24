@@ -29,6 +29,11 @@
 .import net_udp_send        ; send UDP packet (net_send_ptr = buffer,
                             ; udp_send_len_local = 2-byte length);
                             ; uses wg_peer_ip/wg_peer_port as destination
+.import net_udp_close       ; release the backend's UDP socket, if any.
+                            ; No-op under ip65; under UCI it hands the
+                            ; firmware handle back. Abandoning a live one
+                            ; poisons the U64E lease path until a wall
+                            ; power cycle — issue #58. Safe when idle.
 .import net_udp_recv_cb     ; invoked BY ip65 when a packet arrives;
                             ; copies data into udp_recv_buf and sets
                             ; udp_recv_ready
