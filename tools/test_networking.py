@@ -54,7 +54,7 @@ def test_build_verification(labels):
 
     # Check critical labels exist
     critical_labels = [
-        "main_loop", "start", "net_init", "net_dhcp", "net_poll",
+        "main_loop", "start", "net_init", "net_dhcp_acquire", "net_poll",
         "net_save_zp", "net_restore_zp", "net_udp_listen", "net_udp_send",
         "net_udp_recv_cb", "net_print_ip", "do_net_init",
         "zp_save_buf", "udp_recv_buf", "udp_recv_ready",

@@ -31,7 +31,7 @@ BACKENDS = ("ip65", "uci")
 # backend does not export it -- only the UCI backend does. Moved here to
 # UCI_LABELS to reflect the actual source of truth (src/net/*/net.s).
 COMMON_LABELS = (
-    "net_init", "net_dhcp", "net_poll",
+    "net_init", "net_dhcp_acquire", "net_poll",
     "net_udp_send", "net_udp_listen",
 )
 

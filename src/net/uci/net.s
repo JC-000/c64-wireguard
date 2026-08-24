@@ -4,15 +4,15 @@
 ; host-visible command interface. Unlike the TCP-oriented UCI backend in
 ; c64-https, WireGuard uses exactly one peer at a time, so this backend
 ; uses UCI's connected-UDP socket model: UDP_CONNECT pins the socket to
-; (wg_peer_ip, wg_peer_port), and all reads/writes flow through that
+; (net_udp_dest_ip, net_udp_dest_port), and all reads/writes flow through that
 ; single socket id.
 ;
 ; Lifecycle:
 ;   net_init       -> uci_abort + probe UCI_ID
-;   net_dhcp       -> read firmware IP via GET_IPADDR
+;   net_dhcp_acquire       -> read firmware IP via GET_IPADDR
 ;   net_udp_listen -> latches wg_local_port only; the actual UDP_CONNECT
 ;                     is deferred until the first net_udp_send, at which
-;                     point wg_peer_ip/wg_peer_port are known.
+;                     point net_udp_dest_ip/net_udp_dest_port are known.
 ;   net_udp_send   -> on first call, issues UDP_CONNECT(peer_ip, peer_port)
 ;                     and stores uci_socket_id. Subsequent calls go straight
 ;                     to SOCKET_WRITE on the connected socket.
@@ -35,7 +35,7 @@
 
 ; --- net_abi.inc contract ---
 .export net_init
-.export net_dhcp
+.export net_dhcp_acquire
 .export net_poll
 .export net_udp_listen
 .export net_udp_send
@@ -46,8 +46,8 @@
 .export net_restore_zp
 
 ; --- public data labels (defined in this module) ---
-.export net_send_ptr
-.export udp_send_len_local
+.export net_udp_send_ptr
+.export net_udp_send_len
 
 ; --- UCI-owned state exported for debug / future phases ---
 .export net_local_ip
@@ -77,8 +77,8 @@
 .import udp_recv_ready
 .import udp_recv_src_ip
 .import udp_recv_src_port
-.import wg_peer_ip
-.import wg_peer_port
+.import net_udp_dest_ip
+.import net_udp_dest_port
 .import wg_local_port
 
 .segment "UCI_CODE"
@@ -152,7 +152,7 @@ net_init:
         rts
 
 ; =============================================================================
-; net_dhcp — read the firmware-assigned IP via UCI GET_IPADDR
+; net_dhcp_acquire — read the firmware-assigned IP via UCI GET_IPADDR
 ;
 ; The U64E firmware runs DHCP autonomously before the PRG is launched, so
 ; this routine READS the result via GET_IPADDR rather than performing
@@ -161,7 +161,7 @@ net_init:
 ;
 ; Clobbers: A, X, Y
 ; =============================================================================
-net_dhcp:
+net_dhcp_acquire:
         jsr uci_wait_idle
         bcc @dhcp_go            ; FPGA wedged — cannot issue the command
         rts                     ; (net_last_error = UCI_ERR_WAIT_TIMEOUT, C=1)
@@ -231,7 +231,7 @@ net_dhcp:
 ; Entry: A = port_lo, X = port_hi
 ;
 ; UDP in UCI is connection-oriented: UDP_CONNECT pins the socket to a
-; single peer (IP + port). Since wg_peer_ip / wg_peer_port aren't known
+; single peer (IP + port). Since net_udp_dest_ip / net_udp_dest_port aren't known
 ; until the first outbound send, we defer the actual UDP_CONNECT to
 ; net_udp_send. This routine only stores the local port for posterity
 ; (wg_local_port is also written by the caller, so this is belt-and-
@@ -246,10 +246,10 @@ net_udp_listen:
         rts
 
 ; =============================================================================
-; net_udp_send — send a UDP packet to wg_peer_ip:wg_peer_port.
+; net_udp_send — send a UDP packet to net_udp_dest_ip:net_udp_dest_port.
 ;
-; Entry: A = buffer_lo, X = buffer_hi; udp_send_len_local = 16-bit length.
-;        wg_peer_ip / wg_peer_port must already be populated.
+; Entry: A = buffer_lo, X = buffer_hi; net_udp_send_len = 16-bit length.
+;        net_udp_dest_ip / net_udp_dest_port must already be populated.
 ;
 ; UDP adaptation vs. c64-https TCP backend:
 ;   - If the UCI socket isn't open yet (uci_socket_open == 0), issue
@@ -268,8 +268,8 @@ net_udp_listen:
 ; Clobbers: A, X, Y
 ; =============================================================================
 net_udp_send:
-        sta net_send_ptr+0
-        stx net_send_ptr+1
+        sta net_udp_send_ptr+0
+        stx net_udp_send_ptr+1
 
         ; Open the UCI UDP socket on first send.
         lda uci_socket_open
@@ -284,9 +284,9 @@ net_udp_send:
 
 @socket_ready:
         ; Copy length into a decrementing 16-bit counter for the chunk loop.
-        lda udp_send_len_local+0
+        lda net_udp_send_len+0
         sta uci_send_rem+0
-        lda udp_send_len_local+1
+        lda net_udp_send_len+1
         sta uci_send_rem+1
 
         ; Zero-length: nothing to do.
@@ -340,9 +340,9 @@ net_udp_send:
         jsr uci_put_byte
 
         ; Patch the source base into the LDA abs,Y instruction.
-        lda net_send_ptr+0
+        lda net_udp_send_ptr+0
         sta @sb_load+1
-        lda net_send_ptr+1
+        lda net_udp_send_ptr+1
         sta @sb_load+2
 
         ldy #$00
@@ -395,7 +395,7 @@ net_udp_send:
         ; if uci_check_err didn't flag, the whole chunk went out.
         ;
         ; uci_write_resp was pre-stashed = uci_chunk_len at @use_cap/@use_rem,
-        ; so the bookkeeping below still advances net_send_ptr / decrements
+        ; so the bookkeeping below still advances net_udp_send_ptr / decrements
         ; uci_send_rem by the count we actually pushed.
         jsr uci_drain_status
         bcs @sb_wedged
@@ -404,13 +404,13 @@ net_udp_send:
 @sb_had_write:
 
         ; Advance source pointer by actual written count.
-        lda net_send_ptr+0
+        lda net_udp_send_ptr+0
         clc
         adc uci_write_resp+0
-        sta net_send_ptr+0
-        lda net_send_ptr+1
+        sta net_udp_send_ptr+0
+        lda net_udp_send_ptr+1
         adc uci_write_resp+1
-        sta net_send_ptr+1
+        sta net_udp_send_ptr+1
 
         ; Subtract written count from remaining.
         lda uci_send_rem+0
@@ -444,7 +444,7 @@ net_udp_send:
         rts
 
 ; =============================================================================
-; uci_udp_connect — issue UDP_CONNECT(wg_peer_ip, wg_peer_port) to pin the
+; uci_udp_connect — issue UDP_CONNECT(net_udp_dest_ip, net_udp_dest_port) to pin the
 ; socket to the WireGuard peer. Stores the returned socket id in
 ; uci_socket_id. On error, sets net_last_error = UCI_ERR_CONNECT_FAIL
 ; and returns C=1.
@@ -456,7 +456,7 @@ net_udp_send:
 ;   <ASCII dotted-decimal host bytes>, 0x00
 ; Response: 1 byte = socket_id.
 ;
-; NOTE: wg_peer_port is stored big-endian (high byte at +0, low byte at +1)
+; NOTE: net_udp_dest_port is stored big-endian (high byte at +0, low byte at +1)
 ; because disk_config.s::parse_decimal_u16 stores network byte order and
 ; config.s copies it verbatim. The firmware's UDP_CONNECT expects port_lo
 ; then port_hi (little-endian), so we swap here: send +1 first, then +0.
@@ -544,29 +544,29 @@ uci_udp_connect:
         lda #UCI_CMD_UDP_CONNECT
         jsr uci_put_byte
 
-        ; Port (LE to firmware): wg_peer_port is BE so swap bytes on push.
-        lda wg_peer_port+1      ; low byte of port (BE byte 1)
+        ; Port (LE to firmware): net_udp_dest_port is BE so swap bytes on push.
+        lda net_udp_dest_port+1      ; low byte of port (BE byte 1)
         jsr uci_put_byte
-        lda wg_peer_port+0      ; high byte of port (BE byte 0)
+        lda net_udp_dest_port+0      ; high byte of port (BE byte 0)
         jsr uci_put_byte
 
         ; Peer IP as ASCII dotted-decimal. UCI firmware's CONNECT
         ; commands take a null-terminated hostname string; dotted-quad
         ; form is parsed directly (no DNS). Pushing raw IP bytes leaves
         ; the firmware waiting for a null byte forever.
-        lda wg_peer_ip+0
+        lda net_udp_dest_ip+0
         jsr push_byte_as_ascii
         lda #'.'
         jsr uci_put_byte
-        lda wg_peer_ip+1
+        lda net_udp_dest_ip+1
         jsr push_byte_as_ascii
         lda #'.'
         jsr uci_put_byte
-        lda wg_peer_ip+2
+        lda net_udp_dest_ip+2
         jsr push_byte_as_ascii
         lda #'.'
         jsr uci_put_byte
-        lda wg_peer_ip+3
+        lda net_udp_dest_ip+3
         jsr push_byte_as_ascii
         lda #$00
         jsr uci_put_byte              ; explicit null terminator
@@ -637,22 +637,26 @@ uci_udp_connect:
 ;
 ; Otherwise: SOCKET_READ(sock, 1500). Response = actual_len (2 B) +
 ; payload. Copy payload into udp_recv_buf, store length into udp_recv_len,
-; copy wg_peer_ip into udp_recv_src_ip (connected-UDP: the source is
+; copy net_udp_dest_ip into udp_recv_src_ip (connected-UDP: the source is
 ; always the peer we're pinned to), set udp_recv_ready = 1.
 ;
-; Output: C=0 when a packet was delivered, C=1 when nothing.
+; Output: C=1 ONLY on a backend error, with net_last_error set. C=0 carries
+; NO "data arrived" meaning — per c64-lib-contract SPEC §13.2, "no data" is
+; never an error, and availability is observed via udp_recv_ready. The main
+; loop already reads udp_recv_ready and ignores the carry, so this is a
+; producing-side change only.
 ; Clobbers: A, X, Y
 ; =============================================================================
 net_poll:
         lda uci_socket_open
         bne @sock_ok
-        sec
+        clc                     ; no socket yet — nothing to do, not an error
         rts
 @sock_ok:
         ; Don't clobber an un-consumed inbound packet.
         lda udp_recv_ready
         beq @do_poll
-        sec
+        clc                     ; caller has not drained the last one yet
         rts
 
 @do_poll:
@@ -712,11 +716,12 @@ net_poll:
         jmp @hdr_done
 
 @hdr_none:
-        ; <2 bytes returned: nothing to deliver.
+        ; <2 bytes returned: nothing to deliver. §13.2 — no datagram is not
+        ; an error, so C=0 with udp_recv_ready left clear.
         jsr uci_drain_resp
         jsr uci_drain_status
         jsr uci_ack
-        sec
+        clc
         rts
 
 @hdr_done:
@@ -725,7 +730,7 @@ net_poll:
         ; The byte loop below stores through an SMC address that bumps its
         ; own high byte every time Y wraps, so this count is the ONLY thing
         ; bounding where it writes. udp_recv_buf holds 1500 bytes and
-        ; udp_recv_len / udp_recv_src_ip / wg_peer_ip / wg_state sit
+        ; udp_recv_len / udp_recv_src_ip / net_udp_dest_ip / wg_state sit
         ; immediately after it in data.s, so an over-long count does not
         ; merely overflow a buffer — it eats the network state that the
         ; receive path itself depends on, then keeps going into $D000 I/O.
@@ -769,10 +774,11 @@ net_poll:
         sta udp_recv_len+1
         ora uci_poll_rem+0
         bne @have_data
+        ; Zero-length read: no datagram. §13.2 — not an error.
         jsr uci_drain_resp
         jsr uci_drain_status
         jsr uci_ack
-        sec
+        clc
         rts
 
 @have_data:
@@ -821,24 +827,24 @@ net_poll:
         jsr uci_drain_status
         jsr uci_ack
 
-        ; Connected UDP: source IP == wg_peer_ip. Copy it directly.
-        lda wg_peer_ip+0
+        ; Connected UDP: source IP == net_udp_dest_ip. Copy it directly.
+        lda net_udp_dest_ip+0
         sta udp_recv_src_ip+0
-        lda wg_peer_ip+1
+        lda net_udp_dest_ip+1
         sta udp_recv_src_ip+1
-        lda wg_peer_ip+2
+        lda net_udp_dest_ip+2
         sta udp_recv_src_ip+2
-        lda wg_peer_ip+3
+        lda net_udp_dest_ip+3
         sta udp_recv_src_ip+3
 
-        ; Source port == wg_peer_port (big-endian in the ip65 adapter's
+        ; Source port == net_udp_dest_port (big-endian in the ip65 adapter's
         ; contract, but the WG upper layers only check for equality with
-        ; the peer's stored port, so we mirror wg_peer_port's LE form
+        ; the peer's stored port, so we mirror net_udp_dest_port's LE form
         ; straight across — udp_recv_src_port is not load-bearing under
         ; the connected-UDP model).
-        lda wg_peer_port+0
+        lda net_udp_dest_port+0
         sta udp_recv_src_port+0
-        lda wg_peer_port+1
+        lda net_udp_dest_port+1
         sta udp_recv_src_port+1
 
         lda #$01
@@ -992,10 +998,10 @@ net_restore_zp:
 ; =============================================================================
 .segment "UCI_BSS"
 
-net_send_ptr:       .res 2          ; caller-visible: buffer pointer
-udp_send_len_local: .res 2          ; caller-visible: 16-bit length
+net_udp_send_ptr:       .res 2          ; caller-visible: buffer pointer
+net_udp_send_len: .res 2          ; caller-visible: 16-bit length
 
-net_local_ip:       .res 4          ; local IPv4 (filled by net_dhcp)
+net_local_ip:       .res 4          ; local IPv4 (filled by net_dhcp_acquire)
 net_last_error:     .res 1          ; 0 = OK, nonzero = UCI_ERR_*
 
 uci_ipaddr_resp:    .res 12         ; scratch for GET_IPADDR response

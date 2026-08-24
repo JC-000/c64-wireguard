@@ -20,14 +20,14 @@
 
 ; --- Lifecycle ---
 .import net_init            ; initialise ethernet + ip65; C=0 ok
-.import net_dhcp            ; acquire IP via DHCP; C=0 ok
+.import net_dhcp_acquire            ; acquire IP via DHCP; C=0 ok
 .import net_poll            ; process one packet from driver; C=0 packet
 
 ; --- UDP socket surface ---
 .import net_udp_listen      ; bind local_port (A=lo,X=hi); register
                             ; net_udp_recv_cb as the inbound callback
-.import net_udp_send        ; send UDP packet (net_send_ptr = buffer,
-                            ; udp_send_len_local = 2-byte length);
+.import net_udp_send        ; send UDP packet (net_udp_send_ptr = buffer,
+                            ; net_udp_send_len = 2-byte length);
                             ; uses wg_peer_ip/wg_peer_port as destination
 .import net_udp_close       ; release the backend's UDP socket, if any.
                             ; No-op under ip65; under UCI it hands the
@@ -44,5 +44,5 @@
 .import net_restore_zp      ; restore crypto ZP $02-$1B from zp_save_buf
 
 ; --- Caller-visible data ---
-.import net_send_ptr        ; 2 bytes — set by caller before net_udp_send
-.import udp_send_len_local  ; 2 bytes — set by caller before net_udp_send
+.import net_udp_send_ptr        ; 2 bytes — set by caller before net_udp_send
+.import net_udp_send_len  ; 2 bytes — set by caller before net_udp_send

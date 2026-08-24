@@ -151,7 +151,7 @@ SESSION_HS_SENT = 1
 SESSION_ACTIVE = 2
 
 REQUIRED_LABELS = (
-    "main_loop", "net_init", "net_dhcp", "net_udp_listen",
+    "main_loop", "net_init", "net_dhcp_acquire", "net_udp_listen",
     "net_poll", "do_handshake", "session_handle_packet",
     "mul_dma_hi", "wg_state", "wg_peer_ip", "wg_peer_port", "wg_local_port",
     "udp_recv_ready", "net_last_error", "net_local_ip",
@@ -922,14 +922,14 @@ def main() -> int:
                      get_uci_enabled(client))
             log.error("net_init failed")
             return 1
-        if _run_step(tr, step_id=STEP_DHCP, target=L["net_dhcp"]) != 0:
+        if _run_step(tr, step_id=STEP_DHCP, target=L["net_dhcp_acquire"]) != 0:
             # C64 Ultimate fw 1.1.0: GET_IPADDR reports 0.0.0.0
             # (net_last_error=$83) even though the socket path works — the
             # local IP is display-only (net_print_ip); UDP_CONNECT uses the
             # staged peer ip/port. Verified end-to-end by
             # test_uci_udp_echo_live on this firmware, so continue.
             err = tr.read_memory(L["net_last_error"], 1)[0]
-            log.warning("net_dhcp failed (net_last_error=$%02X) — continuing: "
+            log.warning("net_dhcp_acquire failed (net_last_error=$%02X) — continuing: "
                         "socket path does not need the local IP on this "
                         "firmware", err)
         # net_udp_listen takes A=lo, X=hi. Use a fixed C64-side local port
@@ -952,13 +952,13 @@ def main() -> int:
         log.info("driving do_handshake (timeout %.0fs)...", HS_INIT_TIMEOUT)
         # Progress probes: x25_bit_ctr ticks during scalar mult (0→255 per op);
         # wg_state goes 0→1 when session_initiate completes; net_last_error
-        # surfaces firmware errors; udp_send_len_local becomes 148 right
+        # surfaces firmware errors; net_udp_send_len becomes 148 right
         # before net_udp_send.
         probes = {
             "wg_state": L["wg_state"],
             "x25_bit": 0x2B,                    # x25_bit_ctr (ZP)
             "fe_loop": 0x27,                    # fe_loop (ZP)
-            "send_len_lo": L["udp_send_len_local"],
+            "send_len_lo": L["net_udp_send_len"],
             "net_err": L["net_last_error"],
         }
         t0 = time.monotonic()

@@ -66,10 +66,10 @@ PER_SIZE_TIMEOUT = 3.0
 
 def _required_labels() -> list[str]:
     return [
-        "main_loop", "net_init", "net_dhcp", "net_udp_listen", "net_udp_send",
+        "main_loop", "net_init", "net_dhcp_acquire", "net_udp_listen", "net_udp_send",
         "net_poll", "net_local_ip", "net_last_error", "mul_dma_hi",
         "wg_peer_ip", "wg_peer_port", "wg_local_port",
-        "udp_recv_ready", "udp_recv_len", "udp_recv_buf", "udp_send_len_local",
+        "udp_recv_ready", "udp_recv_len", "udp_recv_buf", "net_udp_send_len",
     ]
 
 
@@ -82,7 +82,7 @@ def _setup_peer(tr: Ultimate64Transport, L: dict, host_ip: str, port: int) -> No
     write_bytes(tr, L["wg_local_port"], bytes([port & 0xFF, port >> 8]))
     write_bytes(tr, L["udp_recv_ready"], bytes([0]))
     write_bytes(tr, L["udp_recv_len"], bytes([0, 0]))
-    write_bytes(tr, L["udp_send_len_local"], bytes([len(TEST_PAYLOAD), 0]))
+    write_bytes(tr, L["net_udp_send_len"], bytes([len(TEST_PAYLOAD), 0]))
     log.info("peer set to %s:%d", host_ip, port)
 
 
@@ -113,7 +113,7 @@ def _probe_one_size(
     responder.response_size = size
     _reset_recv_state(tr, L)
     write_bytes(tr, SEND_BUF, TEST_PAYLOAD)
-    write_bytes(tr, L["udp_send_len_local"], bytes([len(TEST_PAYLOAD), 0]))
+    write_bytes(tr, L["net_udp_send_len"], bytes([len(TEST_PAYLOAD), 0]))
 
     # Kick the responder.
     requests_before = responder.responses_sent
@@ -293,7 +293,7 @@ def main() -> int:
         c = _run_step(tr, step_id=STEP_INIT, target=L["net_init"])
         if c != 0:
             log.error("net_init failed; aborting probe"); return 1
-        _run_step(tr, step_id=STEP_DHCP, target=L["net_dhcp"])
+        _run_step(tr, step_id=STEP_DHCP, target=L["net_dhcp_acquire"])
         _run_step(tr, step_id=STEP_LISTEN, target=L["net_udp_listen"],
                   reg_a=responder.port & 0xFF, reg_x=responder.port >> 8)
 

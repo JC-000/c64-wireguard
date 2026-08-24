@@ -23,6 +23,7 @@ SESSION_HS_SENT = 1
 SESSION_ACTIVE  = 2
 
 ; ---- Public entry points ----------------------------------------------------
+.export session_stage_dest
 .export session_initiate
 .export session_handle_packet
 .export session_reset
@@ -53,6 +54,8 @@ SESSION_ACTIVE  = 2
 .import timer_session_start
 ; Networking
 .import net_udp_send
+.import net_udp_dest_port
+.import net_udp_dest_ip
 ; IP-layer parsers
 .import icmp_parse_reply
 .import udp_tunnel_parse
@@ -66,7 +69,7 @@ SESSION_ACTIVE  = 2
 .import hs_packet
 .import hs_resp_packet
 ; UDP I/O buffers / flags
-.import udp_send_len_local
+.import net_udp_send_len
 .import udp_recv_buf
 .import udp_recv_len
 .import udp_recv_ready
@@ -93,6 +96,43 @@ SESSION_ACTIVE  = 2
 .import recv_data_msg
 .import ping_reply_msg
 .import msg_recv_hdr
+
+.segment "APP_CODE"
+
+; =============================================================================
+; session_stage_dest — copy the peer endpoint into the §13.1 ABI cells
+;
+; The backend reads net_udp_dest_ip / net_udp_dest_port, never wg_peer_*.
+; Call immediately before net_udp_send. Kept as one routine so a roaming
+; update to wg_peer_* cannot leave a send pointed at a stale endpoint.
+;
+; Clobbers: A, X
+; =============================================================================
+; Placed in APP_EXTRA (MAIN_AREA_HI), not APP_CODE: MAIN_AREA_LO had 42
+; bytes less headroom than this routine needs, and the §6.7 image-overrun
+; assert in contract_asserts.s caught it at link time rather than letting
+; the image run into the sqtab window. MAIN_AREA_HI has ~1.9 KB free and
+; already carries code (LIB_X25519_INIT_CODE).
+.segment "APP_EXTRA"
+
+session_stage_dest:
+        ; wg_peer_ip(4) and wg_peer_port(2) are contiguous, as are
+        ; net_udp_dest_ip(4) and net_udp_dest_port(2), so one 6-byte copy
+        ; does both. data.s keeps them adjacent for exactly this reason.
+        ldx #$05
+@sd_copy:
+        lda wg_peer_ip,x
+        sta net_udp_dest_ip,x
+        dex
+        bpl @sd_copy
+        rts
+
+; The single 6-byte copy above is only correct while each pair is contiguous
+; and in this order. Inserting a variable between them would silently copy
+; the wrong bytes into the send destination — a wrong-peer bug with no crash
+; and no test that would obviously catch it. Fail the link instead.
+.assert net_udp_dest_port = net_udp_dest_ip + 4, lderror, "net_udp_dest_port must directly follow net_udp_dest_ip — session_stage_dest copies both in one 6-byte loop"
+.assert wg_peer_port = wg_peer_ip + 4, lderror, "wg_peer_port must directly follow wg_peer_ip — session_stage_dest copies both in one 6-byte loop"
 
 .segment "APP_CODE"
 
@@ -134,9 +174,10 @@ session_initiate:
 
         ; Send packet (148 bytes)
         lda #148
-        sta udp_send_len_local
+        sta net_udp_send_len
         lda #0
-        sta udp_send_len_local+1
+        sta net_udp_send_len+1
+        jsr session_stage_dest  ; §13.1: backend reads net_udp_dest_*
         lda #<hs_packet
         ldx #>hs_packet
         jsr net_udp_send
