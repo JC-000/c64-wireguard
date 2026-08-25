@@ -58,7 +58,7 @@ def test_build_verification(labels):
         "net_save_zp", "net_restore_zp", "net_udp_listen", "net_udp_send",
         "net_udp_recv_cb", "net_print_ip", "do_net_init",
         "zp_save_buf", "udp_recv_buf", "udp_recv_ready",
-        "wg_peer_ip", "wg_peer_port", "wg_local_port", "net_initialized",
+        "wg_peer_ip", "wg_peer_port", "net_udp_dest_ip", "net_udp_dest_port", "wg_local_port", "net_initialized",
         "blake2s_init", "chacha20_init", "poly1305_init",
         "fe25519_add", "x25519_scalarmult", "hs_init",
     ]

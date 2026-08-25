@@ -153,7 +153,7 @@ SESSION_ACTIVE = 2
 REQUIRED_LABELS = (
     "main_loop", "net_init", "net_dhcp_acquire", "net_udp_listen",
     "net_poll", "do_handshake", "session_handle_packet",
-    "mul_dma_hi", "wg_state", "wg_peer_ip", "wg_peer_port", "wg_local_port",
+    "mul_dma_hi", "wg_state", "wg_peer_ip", "wg_peer_port", "net_udp_dest_ip", "net_udp_dest_port", "wg_local_port",
     "udp_recv_ready", "net_last_error", "net_local_ip",
     "cfg_static_priv", "cfg_static_pub", "cfg_peer_pub",
     "cfg_peer_endpoint_ip", "cfg_peer_endpoint_port",
@@ -569,6 +569,10 @@ def _stage_net_ports(tr: Ultimate64Transport, L: dict[str, int],
     """Mirror echo test: wg_peer_port BE, wg_local_port LE."""
     write_bytes(tr, L["wg_peer_port"],
                 bytes([resp_port >> 8, resp_port & 0xFF]))
+    # No net_udp_dest_* staging needed here: this test drives do_handshake ->
+    # session_initiate, which calls session_stage_dest itself. Tools that call
+    # net_udp_send DIRECTLY must stage the dest cells (see the echo test and
+    # the size probe) — the backend no longer reads wg_peer_* (§13.1).
     write_bytes(tr, L["wg_local_port"],
                 bytes([local_port & 0xFF, local_port >> 8]))
 

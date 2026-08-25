@@ -68,7 +68,7 @@ def _required_labels() -> list[str]:
     return [
         "main_loop", "net_init", "net_dhcp_acquire", "net_udp_listen", "net_udp_send",
         "net_poll", "net_local_ip", "net_last_error", "mul_dma_hi",
-        "wg_peer_ip", "wg_peer_port", "wg_local_port",
+        "wg_peer_ip", "wg_peer_port", "net_udp_dest_ip", "net_udp_dest_port", "wg_local_port",
         "udp_recv_ready", "udp_recv_len", "uci_read_hdr", "udp_recv_buf", "net_udp_send_len",
     ]
 
@@ -79,6 +79,12 @@ def _setup_peer(tr: Ultimate64Transport, L: dict, host_ip: str, port: int) -> No
     # wg_peer_port = BE (ip65 native + disk_config storage; uci/net.s swaps
     # on push). wg_local_port = LE (net_udp_listen stores A=lo,X=hi).
     write_bytes(tr, L["wg_peer_port"], bytes([port >> 8, port & 0xFF]))
+    # §13.1: the backend reads net_udp_dest_*, NOT wg_peer_*.
+    # In the app these are staged by session_stage_dest before each
+    # send; a host-side driver calling net_udp_send directly is the
+    # caller and must stage them itself.
+    write_bytes(tr, L["net_udp_dest_ip"], octets)
+    write_bytes(tr, L["net_udp_dest_port"], bytes([port >> 8, port & 0xFF]))
     write_bytes(tr, L["wg_local_port"], bytes([port & 0xFF, port >> 8]))
     write_bytes(tr, L["udp_recv_ready"], bytes([0]))
     write_bytes(tr, L["udp_recv_len"], bytes([0, 0]))

@@ -253,7 +253,7 @@ def _ensure_gitignore_artifacts() -> None:
 REQUIRED_LABELS = (
     "main_loop", "net_init", "net_dhcp_acquire", "net_udp_listen", "net_udp_send",
     "net_poll", "net_local_ip", "net_last_error", "mul_dma_hi",
-    "wg_peer_ip", "wg_peer_port", "wg_local_port",
+    "wg_peer_ip", "wg_peer_port", "net_udp_dest_ip", "net_udp_dest_port", "wg_local_port",
     "udp_recv_ready", "udp_recv_len", "udp_recv_buf", "net_udp_send_len",
 )
 
@@ -276,6 +276,12 @@ def _run_sequence(
              local_ip, listener.port, ip_bytes.hex(), port_be.hex(), port_le.hex())
     write_bytes(tr, L["wg_peer_ip"], ip_bytes)
     write_bytes(tr, L["wg_peer_port"], port_be)
+    # §13.1: the backend reads net_udp_dest_*, NOT wg_peer_*. In the app
+    # session_stage_dest copies peer -> dest before each send; a host-side
+    # driver that calls net_udp_send directly IS the caller and must stage
+    # them itself. Omitting this sends to 0.0.0.0 with carry clear.
+    write_bytes(tr, L["net_udp_dest_ip"], ip_bytes)
+    write_bytes(tr, L["net_udp_dest_port"], port_be)
     write_bytes(tr, L["wg_local_port"], port_le)
     write_bytes(tr, L["udp_recv_ready"], bytes([0]))
     write_bytes(tr, L["udp_recv_len"], bytes([0, 0]))
