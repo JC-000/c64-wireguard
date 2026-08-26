@@ -768,12 +768,24 @@ net_poll:
         cmp #$FF
         beq @hdr_none               ; $FFFF — nothing pending, not an error
 
+        ; Full 16-bit "header > cap" comparison. The previous form ended
+        ; `lda uci_read_hdr+0 / beq @len_ok`, i.e. it accepted the equal-high-
+        ; byte case ONLY when the low byte was zero. That is correct for a cap
+        ; of 512 ($0200) and silently wrong for any other shape: measured
+        ; 2026-08-26 with the cap at 893 ($037D), datagrams of 800/861/893 —
+        ; all legal, all delivered by the firmware — were DROPPED by this
+        ; check and reported as $8A, because their high byte was $03 and their
+        ; low byte was not zero. A guard whose correctness depends on the
+        ; low byte of an unrelated constant is a trap for the next person to
+        ; retune the cap, which is exactly what happened.
         lda uci_read_hdr+1
         cmp #>UCI_READ_CHUNK_MAX
-        bcc @len_ok                 ; hi < 2 → certainly under the cap
-        bne @len_bad                ; hi > 2 → certainly over it
-        lda uci_read_hdr+0          ; hi == 2 → only exactly 512 is legal
-        beq @len_ok
+        bcc @len_ok                 ; hi < cap_hi → certainly under
+        bne @len_bad                ; hi > cap_hi → certainly over
+        lda uci_read_hdr+0          ; hi == cap_hi → decide on the low byte
+        cmp #<UCI_READ_CHUNK_MAX
+        beq @len_ok                 ; exactly the cap → legal
+        bcc @len_ok                 ; below the cap → legal
 
 @len_bad:
         ; A genuine over-claim: a length above what we requested that is NOT

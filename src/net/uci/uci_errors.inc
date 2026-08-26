@@ -54,6 +54,23 @@ UCI_TCP_CONNECT_FAIL   = $03    ; connect did not yield a usable socket
 UCI_DATA_QUEUE_MAX     = 800
 
 ; SOCKET_READ max-length cap we ask for per net_poll cycle.
-; 512 bytes is well under the 4 KB ring and the firmware data queue,
-; and matches the conservative Phase 3 MVP choice.
-UCI_READ_CHUNK_MAX     = 512
+;
+; 893, and the exact value matters — 894 is a HANG on this firmware.
+;
+; The firmware's real limit is 894 (CMD_MAX_REPLY_LEN 896 minus the 2-byte
+; length header), fixed by the FPGA's command-interface RAM partition; a
+; larger request is REJECTED with `82,PARAMETER(S) OUT OF RANGE` on the
+; STATUS channel. But a read of exactly 894 builds a 2+894 = 896-byte reply,
+; exactly the response-queue size: the FPGA stops the response pointer at
+; the last byte while still asserting DATA_AV, so the flag never clears and
+; the queue repeats its final byte forever (GideonZ/1541ultimate#802, found
+; by chrisgleissner; their fix moves the refusal to 894 but ships in 3.15,
+; which is not downloadable — we are on 3.14d, where 894 is ACCEPTED and
+; will do this). 893 is the largest value that both fits and drains.
+;
+; This was 512 until 2026-08-26, described here as "the conservative Phase 3
+; MVP choice" — which it was. It was never a firmware limit, though this
+; project reasoned about it as one for months. Measured on our own U64E
+; (fw 3.14d): datagrams of 512/600/700/800/861/893 all arrive WHOLE in a
+; single poll with the header reporting their true length.
+UCI_READ_CHUNK_MAX     = 893

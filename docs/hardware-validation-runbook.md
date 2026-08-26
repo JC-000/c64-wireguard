@@ -92,8 +92,26 @@ of `$A000` BASIC ROM shadow with ~700 bytes headroom.
 - **`runner_health_check()` lies** — returns None even when UCI is
   wedged. Detect the wedge from the test's own progress log
   (`step $66 still running [send_len_lo=...]`).
-- **SOCKET_READ: always request 512 bytes, AND validate the length it
-  returns.** >512 truncates silently; 1500 returns `0xFFFF`.
+- **SOCKET_READ: request 893 bytes — never 894 — AND validate the length it
+  returns.** The firmware's limit is 894 (`CMD_MAX_REPLY_LEN` 896 minus the
+  2-byte header); anything above it is rejected with
+  `82,PARAMETER(S) OUT OF RANGE` **on the status channel**, which this
+  adapter drains without reading, so a rejected read looks like an empty one.
+  A read of *exactly* 894 builds a 896-byte reply — the response-queue size —
+  and the FPGA then holds the pointer at the last byte while still asserting
+  `DATA_AV`, so the queue repeats forever. 893 both fits and drains.
+
+  **This was "always request 512" until 2026-08-26, and that was our own
+  number, not the firmware's.** Having only ever asked for 512 we only ever
+  received 512, and read that back as a hardware ceiling; the one larger
+  request tried (1024) was above the real cap and being rejected on a channel
+  we ignore. Re-measured on the U64E: 512/600/700/800/861/893-byte datagrams
+  all arrive whole in one poll with the header reporting the true length.
+  Upstream: GideonZ/1541ultimate#802.
+
+  A datagram larger than the request is still truncated with the remainder
+  **discarded**, and 1472 B is the largest that reaches the device at all
+  (`IP_REASSEMBLY = 0`, device-wide).
 
   **The red-screen incident (PR #62) was the sentinel, not an over-claim.**
   `net_poll` trusted the response header as a byte count and fed it to an

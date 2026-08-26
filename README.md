@@ -366,37 +366,25 @@ Two interchangeable backends sit behind the `src/net_abi.inc` façade (`net_init
 
 ### Tunnel MTU
 
-**Peers must be configured with `MTU = 480`.** WireGuard's default is 1420; leaving it there will appear to work and then fail on anything large.
+**Peers must be configured with `MTU = 861`.** WireGuard's default is 1420; leaving it there will appear to work and then fail on anything large.
 
-The UCI firmware's `SOCKET_READ` **truncates** an oversized datagram instead of splitting it (fw 3.14d clamps 600–1280-byte requests to 512 and returns `$FFFF` for ≥1500). A WireGuard Type-4 datagram is `payload + 32` (16-byte header + 16-byte Poly1305 tag), so the largest inner payload that survives one read is `512 − 32 = 480`. Anything larger loses its tail and fails authentication — and the loss is **silent**: no error is raised on either side. The symptom is a tunnel that passes `ping` and dies on an HTTP response.
-
-`WG_MTU` is defined once in `src/constants.inc` and checked at assembly time against `UCI_READ_CHUNK_MAX`, so an inconsistent pin fails the build rather than the wire.
-
-In a peer's WireGuard config:
+A WireGuard Type-4 datagram is `payload + 32` (16-byte header + 16-byte Poly1305 tag), and one `SOCKET_READ` on this firmware can deliver at most **893** bytes — so the largest inner payload is `893 − 32 = 861`.
 
 ```ini
 [Interface]
-MTU = 480
+MTU = 861
 ```
 
-This is pinned in **both** directions even though only the inbound path forces it — `net_udp_send` chunks and could push ~1468 — because MTU is negotiated per-peer at both ends. A peer left at 1420 would answer our large packets with large packets we then drop, so we cap what we send to what we can receive and let a mismatch fail loudly at the sender.
+**Why 893 and not 894:** the firmware's own limit is 894 (`CMD_MAX_REPLY_LEN` 896 minus the 2-byte length header), but a read of *exactly* 894 builds a 896-byte reply — precisely the response-queue size — and the FPGA then stops the response pointer while still asserting `DATA_AV`, so the queue repeats its last byte forever. 893 is the largest value that both fits and drains. Requests above 894 are rejected with `82,PARAMETER(S) OUT OF RANGE` on the status channel.
 
-**This is a hardware ceiling, measured.** `tools/test_uci_udp_size_probe.py` on U64E fw 3.14d (2026-08-24):
+**Correction (2026-08-26).** This section previously stated `MTU = 480` and called `512 − 32` a *measured hardware ceiling*. That was wrong, and the mistake is worth recording: 512 was **this project's own** `UCI_READ_CHUNK_MAX`, chosen as a Phase 3 MVP value. Having only ever asked for 512, we measured that we only ever received 512 and concluded the firmware could do no more. The one larger request we tried (1024) returned nothing, which looked like confirmation — but 1024 is above the real 894 cap and was being *rejected* on the status channel, which this adapter drains without reading. Every individual measurement was sound; the inference joining them was not. Root-caused upstream by chrisgleissner ([GideonZ/1541ultimate#802](https://github.com/GideonZ/1541ultimate/issues/802)) and re-measured here on our own U64E: datagrams of 512, 600, 700, 800, 861 and 893 bytes all arrive whole in a single `net_poll`, the header reporting the true length.
 
-| requested | received | remainder on a later poll |
-|---:|---:|---|
-| ≤ 512 | exact | — |
-| 600 | 512 | **never arrives** |
-| 768 | 512 | **never arrives** |
-| 1024 | 512 | **never arrives** |
-| 1280 | 512 | **never arrives** |
-| 1500 | 0 | nothing delivered at all |
+**A standard 1420-byte MTU is still unreachable**, for two independent reasons:
 
-The remainder is **discarded, not queued** — no second datagram appeared in any of the ten oversized trials — so multi-read reassembly cannot recover it and a standard 1420 MTU is unreachable on this firmware. Raising `WG_MTU` would require a firmware change, not a code change.
+- One `READ_SOCKET` delivers at most 893 bytes, and a datagram larger than the request is truncated with the remainder **discarded, not queued** — so multi-read reassembly cannot recover it. Reading a 1420-byte packet whole needs Data More support on the network target, which the firmware does not implement.
+- **1472 bytes** is the largest datagram that reaches the device at all: lwIP is built with `IP_REASSEMBLY = 0`, so anything that fragments is dropped before a socket sees it. That applies to every network service on the device, not just UCI.
 
-Asking the firmware for more does not help — it is strictly worse. Rebuilt with `UCI_READ_CHUNK_MAX = 1024`, the same device in the same session delivered **nothing** for every size from 600 to 1280 (including 600 and 768, which are *smaller* than the request); back at 512 the same datagrams arrive in a single poll. Reported upstream as [GideonZ/1541ultimate#802](https://github.com/GideonZ/1541ultimate/issues/802).
-
-Reproducing this needs care with **run order**: an earlier pass with the large sizes last reported `1024 → 0 bytes`, which turned out to be the device's own after-~5-cycles degradation rather than firmware behaviour. Probe large-first on a freshly power-cycled unit.
+**Cost at stock speed.** Every byte read carries a `uci_fence`, and the C64-Ultimate-conformant fence (`UCI_FENCE_INNER = 217`) is ~5.45 ms at 1 MHz — so an 893-byte read takes several seconds of wall clock at stock speed, against roughly a tenth of that at 48 MHz. Raising the MTU raises that cost proportionally. It is a genuine tension between §13.6 conformance and the no-REU/1 MHz configuration.
 
 ### Session State Machine
 
