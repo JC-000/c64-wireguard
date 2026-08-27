@@ -54,6 +54,7 @@ SESSION_ACTIVE  = 2
 .import timer_session_start
 ; Networking
 .import net_udp_send
+.import net_udp_close
 .import net_udp_dest_port
 .import net_udp_dest_ip
 ; IP-layer parsers
@@ -379,11 +380,25 @@ session_handle_packet:
 ; =============================================================================
 ; session_reset - Reset session to IDLE state
 ;
-; Clobbers: A
+; This is the canonical teardown primitive: the session is being dropped, so
+; hand the backend's UDP socket back as well. The UCI firmware never reclaims
+; an abandoned connected UDP socket (issue #71; GideonZ/1541ultimate#808) — a
+; dropped session that keeps its socket open leaks it until a wall power cycle.
+; net_udp_close is safe when nothing is open (returns having done nothing), and
+; the ip65 backend's net_udp_close is a no-op, so this is correct for both.
+;
+; Reopening is automatic: net_udp_close clears uci_socket_open, so the next
+; net_udp_send re-issues UDP_CONNECT on its first-call path. The rekey path
+; does NOT go through here (it re-handshakes via session_initiate, which keeps
+; wg_state and the live socket), so closing on every session_reset never
+; churns a socket that a rekey wants to reuse.
+;
+; Clobbers: A, X, Y (net_udp_close uses all three)
 ; =============================================================================
 session_reset:
         lda #SESSION_IDLE
         sta wg_state
+        jsr net_udp_close       ; hand the firmware UDP socket back (#71)
         rts
 
 ; =============================================================================

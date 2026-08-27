@@ -86,6 +86,8 @@
 .import uci_read_resp_bytes
 .import uci_drain_resp
 .import uci_drain_status
+.import uci_status_seen
+.import uci_status_leading_code
 .import uci_ack
 .import uci_resp_dst
 .import uci_resp_max
@@ -558,11 +560,20 @@ net_udp_send:
 ; =============================================================================
 ; net_udp_close — close the firmware UDP socket, if we hold one.
 ;
-; The firmware hands back the same UDP handle every time (measured
-; 2026-08-24: 24 consecutive UDP_CONNECTs all returned socket_id 10), so
-; this is not about exhausting a pool. It is about not abandoning a LIVE
-; socket: the U64E poisons its own lease path when the C64 is reset while
-; one is still open, and only a wall power cycle clears that.
+; There IS a pool, and it is finite: lwIP's MEMP_NUM_UDP_PCB = 8
+; (GideonZ/1541ultimate#808). The 2026-08-24 observation that 24 consecutive
+; UDP_CONNECTs all returned socket_id 10 did NOT prove "the firmware hands back
+; the same handle regardless" — that run CLOSED between every open, so slot 10
+; was simply freed and immediately re-leased each time. It says nothing about
+; how many sockets can be open AT ONCE. Leaking opens (never reaching this
+; close) walks through the 8 slots and then the 9th UDP_CONNECT is refused with
+; `85,ERROR OPENING SOCKET` on the STATUS channel — the refusal that
+; uci_udp_connect now surfaces as UCI_ERR_OPEN_REFUSED (issue #72).
+;
+; So closing matters for two reasons: to return the slot to that 8-deep pool,
+; and to not abandon a LIVE socket — the U64E poisons its own lease path when
+; the C64 is reset while one is still open, and only a wall power cycle clears
+; that.
 ;
 ; Safe to call when nothing is open — returns C=0 having done nothing.
 ; A firmware-side failure is reported via C=1 but the local bookkeeping is
@@ -678,6 +689,38 @@ uci_udp_connect:
         rts
 
 @uc_no_err:
+        ; REFUSAL FAST-PATH (issue #72; GideonZ/1541ultimate#808).
+        ; A refused open — the firmware's UDP-PCB pool (MEMP_NUM_UDP_PCB=8) is
+        ; exhausted — does NOT set the hardware ERROR bit (so uci_check_err
+        ; passed above) and returns NO socket_id on RESP_DATA. It reports the
+        ; refusal ONLY on the $DF1F STATUS channel as `85,ERROR OPENING SOCKET`.
+        ;
+        ; uci_push_wait has already waited for CMD_BUSY=0, so if a status line
+        ; exists it is posted by now. Drain it FIRST: if a non-"00" refusal code
+        ; is present we can name it (UCI_ERR_OPEN_REFUSED) and bail immediately,
+        ; instead of sitting out uci_read_resp_bytes' full wall-clock budget
+        ; waiting for a socket_id byte that will never arrive and then surfacing
+        ; a generic $88. Draining status here does not disturb the socket_id on
+        ; the separate RESP_DATA queue (no NEXT_DATA flush happens until the
+        ; final uci_ack), so the success path below reads it unchanged.
+        jsr uci_drain_status
+        lda uci_status_seen
+        cmp #$02                    ; need at least the two "NN" digits
+        bcc @uc_read_id             ; no status posted -> not a refusal (wedge):
+                                    ; fall through to the socket_id read, whose
+                                    ; short-read guard yields $88 as before.
+        jsr uci_status_leading_code ; A = decimal NN; Z=1 iff "00" (OK)
+        beq @uc_read_id             ; "00,..." = success status -> read the id
+        ; Non-zero code: the firmware refused the open. The captured line in
+        ; uci_status_buf carries the decimal code (e.g. 85).
+        lda #UCI_ERR_OPEN_REFUSED
+        sta net_last_error
+        jsr uci_drain_resp          ; nothing expected on RESP, but keep the
+        jsr uci_ack                 ; queues clean for the next command
+        sec
+        rts
+
+@uc_read_id:
         ; 1-byte socket_id response.
         ;
         ; Pre-zero uci_socket_id so a short read leaves a known sentinel:

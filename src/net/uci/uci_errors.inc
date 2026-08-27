@@ -58,6 +58,19 @@ UCI_ERR_SEND_TOO_LONG  = $8C    ; datagram exceeds NET_UDP_SEND_MAX (892, the
                                 ; allocated in SPEC §13.2 before use, per the
                                 ; rule added after the $88 collision.
 UCI_ERR_LONG_READ      = $8A    ; SOCKET_READ claimed more bytes than we asked for
+UCI_ERR_OPEN_REFUSED   = $8D    ; the firmware REFUSED a socket open: it cleared
+                                ; the hardware ERROR bit and returned no socket
+                                ; id, but posted a named refusal on the $DF1F
+                                ; STATUS channel (e.g. `85,ERROR OPENING SOCKET`,
+                                ; the UDP-PCB pool MEMP_NUM_UDP_PCB=8 exhausted,
+                                ; GideonZ/1541ultimate#808). DISTINCT from $88
+                                ; NO_SOCKET (no id AND no status = short read /
+                                ; phantom socket) and $89 WAIT_TIMEOUT (a bounded
+                                ; wait elapsed with no device response = wedge):
+                                ; $8D means a refusal STATUS was actually seen.
+                                ; The captured line (uci_status_buf) carries the
+                                ; firmware's decimal STATUS code (85).
+                                ; c64-lib-contract#147 allocates it in §13.2.
 
 ; TCP state values stored in net_tcp_state
 UCI_TCP_CLOSED         = $00    ; no active socket
