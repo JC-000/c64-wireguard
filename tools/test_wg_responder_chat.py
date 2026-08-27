@@ -35,6 +35,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "tools"))
 from test_wg_responder_loopback import build_type1  # noqa: E402
 from wg_responder.keys import generate_keypair      # noqa: E402
 from wg_responder.responder import MSG_TYPE_TRANSPORT  # noqa: E402
+from c64_caps import C64_RECV_MAX, C64_RECV_MTU, C64_TUNNEL_MTU  # noqa: E402
 
 T4_HDR_LEN = 16
 PORT = 51899
@@ -128,16 +129,44 @@ def main() -> int:
                     f"msg {n}: got {plain!r} counter={counter}, "
                     f"expected {expect!r} counter={n}")
 
-        # ── oversize is truncated, not fatal ─────────────────────────────
-        proc.stdin.write("X" * 400 + "\n")
-        proc.stdin.flush()
-        data, _ = sock.recvfrom(65535)
-        plain = bytes(noise.decrypt(bytes(data[T4_HDR_LEN:])))
-        good = len(plain) == 240
-        print(f"  {'PASS' if good else 'FAIL'}: oversize truncated to "
-              f"{len(plain)}B (cap 240, SOCKET_READ limit #46)")
+        # ── oversize: DISCOVER the server's ceiling, don't assume it ────
+        # A hardcoded expected cap once hid a real bug for months (README,
+        # "Correction (2026-08-26)"), so bisect for the largest line the
+        # server forwards whole, between the C64's tunnel MTU and its
+        # receive ceiling, and report the measured number. The only hard
+        # requirement is that the host never caps the tunnel below what
+        # the C64 advertises.
+        def forwarded_len(n: int) -> int:
+            proc.stdin.write("X" * n + "\n")
+            proc.stdin.flush()
+            data, _ = sock.recvfrom(65535)
+            return len(bytes(noise.decrypt(bytes(data[T4_HDR_LEN:]))))
+
+        # Well past anything the C64 can receive: must come back truncated.
+        over = C64_RECV_MAX + 64
+        got = forwarded_len(over)
+        if got == over:
+            failures.append(f"server forwarded {over}B untruncated, above "
+                            f"C64_RECV_MAX {C64_RECV_MAX}")
+        # Seed: the C64's own MTU must go through whole; that is the floor.
+        if forwarded_len(C64_TUNNEL_MTU) != C64_TUNNEL_MTU:
+            failures.append(f"server truncated a {C64_TUNNEL_MTU}B line "
+                            f"(the C64 tunnel MTU)")
+        lo, hi = C64_TUNNEL_MTU, C64_RECV_MAX   # lo: known-whole, hi: cut
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            if forwarded_len(mid) == mid:
+                lo = mid
+            else:
+                hi = mid
+        ceiling = lo
+        good = ceiling >= C64_TUNNEL_MTU
+        print(f"  {'PASS' if good else 'FAIL'}: oversize -> measured host "
+              f"chat ceiling {ceiling}B (C64 tunnel MTU {C64_TUNNEL_MTU}, "
+              f"recv-side {C64_RECV_MTU}, {over}B request gave {got}B)")
         if not good:
-            failures.append(f"oversize gave {len(plain)}B, expected 240")
+            failures.append(f"host caps chat at {ceiling}B, below the C64 "
+                            f"tunnel MTU {C64_TUNNEL_MTU}")
 
     finally:
         proc.terminate()

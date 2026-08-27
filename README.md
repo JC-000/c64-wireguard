@@ -362,27 +362,38 @@ Two interchangeable backends sit behind the `src/net_abi.inc` façade (`net_init
 
 **ip65 / RR-Net** (`BACKEND=ip65`, the default — VICE-testable): UDP via [ip65](https://github.com/cc65/ip65), driving the RR-Net CS8900a ethernet adapter. The ip65 library is built as a standalone binary blob (ca65/ld65) and linked into the final PRG at $2000 via ca65's `.incbin` directive in `src/net/ip65/ip65_blob.s`. A 10-entry jump table provides: init, process, DHCP, DNS, UDP add/remove listener, UDP send, and helper wrappers. The UDP receive callback fires during `ip65_process` while ip65 owns the zero page; it copies incoming data to `udp_recv_buf` and sets a flag for the main loop — no crypto ZP is touched.
 
-**UCI** (`BACKEND=uci` — the hardware-proven backend for the milestone and v1.0.0 runs): the same ABI implemented over the Ultimate 64 / C64 Ultimate Command Interface sockets ($DF1B-$DF1F, `src/net/uci/`), no ip65 dependency. Firmware caveats: inbound `SOCKET_READ` is capped at 512 bytes and the firmware **truncates** larger datagrams rather than splitting them, which pins the tunnel MTU — see [Tunnel MTU](#tunnel-mtu) below ([#46](https://github.com/JC-000/c64-wireguard/issues/46)). The device busy-waits are now wall-clock bounded ([#45](https://github.com/JC-000/c64-wireguard/issues/45)). See `docs/hardware-validation-runbook.md`.
+**UCI** (`BACKEND=uci` — the hardware-proven backend for the milestone and v1.0.0 runs): the same ABI implemented over the Ultimate 64 / C64 Ultimate Command Interface sockets ($DF1B-$DF1F, `src/net/uci/`), no ip65 dependency. **Requires Ultimate firmware 3.15 or later** (multi-block `SOCKET_READ`, [GideonZ/1541ultimate#806](https://github.com/GideonZ/1541ultimate/issues/806)). 3.14d is no longer supported: its 893-byte single-read cap and the hang on a 894-byte request cannot be worked around from the C64 side. With 3.15 the C64 can **send** at most 892 bytes per datagram (`SOCKET_WRITE` has no continuation, so anything larger fragments) and **receive** up to 1472; the smaller of the two pins the tunnel MTU — see [Tunnel MTU](#tunnel-mtu) below ([#46](https://github.com/JC-000/c64-wireguard/issues/46)). The device busy-waits are now wall-clock bounded ([#45](https://github.com/JC-000/c64-wireguard/issues/45)). See `docs/hardware-validation-runbook.md`.
 
 ### Tunnel MTU
 
-**Peers must be configured with `MTU = 861`.** WireGuard's default is 1420; leaving it there will appear to work and then fail on anything large.
+**Peers must be configured with `MTU = 860`, and the Ultimate must run firmware 3.15 or later.** WireGuard's default is 1420; leaving it there will appear to work and then fail on anything large. Firmware 3.14d is not supported (see the UCI paragraph above): its single-read cap of 893 bytes and the 894-request hang are firmware behaviour, fixed upstream in 3.15's multi-block `SOCKET_READ` ([#806](https://github.com/GideonZ/1541ultimate/issues/806)).
 
-A WireGuard Type-4 datagram is `payload + 32` (16-byte header + 16-byte Poly1305 tag), and one `SOCKET_READ` on this firmware can deliver at most **893** bytes — so the largest inner payload is `893 − 32 = 861`.
+A WireGuard Type-4 datagram is `payload + 32` (16-byte header + 16-byte Poly1305 tag). On firmware 3.15 the C64 has two different ceilings, both hardware-verified and both declared in `src/net/uci/net_caps.inc`:
+
+| Direction | Cap | Why |
+|---|---|---|
+| **Send** (`NET_UDP_SEND_MAX`) | **892** B | `SOCKET_WRITE` carries at most 892 bytes of payload in one command and the firmware has no continuation (`WRITE_SOCKET_MORE`), so a larger datagram is split into several — which a WireGuard peer rejects. |
+| **Receive** (`NET_UDP_RECV_MAX`) | **1472** B | Multi-block `SOCKET_READ` (firmware 3.15, [GideonZ/1541ultimate#806](https://github.com/GideonZ/1541ultimate/issues/806)) reassembles up to the largest datagram that reaches the device at all — lwIP is built with `IP_REASSEMBLY = 0`. |
+
+The tunnel MTU is the smaller of the two minus the overhead: `WG_MTU = min(892, 1472) − 32 = 860`, derived in `src/constants.inc` from `net_caps.inc` — it is **send-bound**. The host-side tools read the same two files (`tools/c64_caps.py`) so no Python constant can drift from the assembly.
 
 ```ini
 [Interface]
-MTU = 861
+MTU = 860
 ```
+
+**If upstream ships `WRITE_SOCKET_MORE`** ([GideonZ/1541ultimate#802](https://github.com/GideonZ/1541ultimate/issues/802)), the send side stops being the bottleneck: `NET_UDP_SEND_MAX` becomes 1472 too and the tunnel MTU rises to `1472 − 32 = 1440`. That is a one-line change in `net_caps.inc`; the responder already accepts 1440-byte payloads today.
 
 **Why 893 and not 894:** the firmware's own limit is 894 (`CMD_MAX_REPLY_LEN` 896 minus the 2-byte length header), but a read of *exactly* 894 builds a 896-byte reply — precisely the response-queue size — and the FPGA then stops the response pointer while still asserting `DATA_AV`, so the queue repeats its last byte forever. 893 is the largest value that both fits and drains. Requests above 894 are rejected with `82,PARAMETER(S) OUT OF RANGE` on the status channel.
 
 **Correction (2026-08-26).** This section previously stated `MTU = 480` and called `512 − 32` a *measured hardware ceiling*. That was wrong, and the mistake is worth recording: 512 was **this project's own** `UCI_READ_CHUNK_MAX`, chosen as a Phase 3 MVP value. Having only ever asked for 512, we measured that we only ever received 512 and concluded the firmware could do no more. The one larger request we tried (1024) returned nothing, which looked like confirmation — but 1024 is above the real 894 cap and was being *rejected* on the status channel, which this adapter drains without reading. Every individual measurement was sound; the inference joining them was not. Root-caused upstream by chrisgleissner ([GideonZ/1541ultimate#802](https://github.com/GideonZ/1541ultimate/issues/802)) and re-measured here on our own U64E: datagrams of 512, 600, 700, 800, 861 and 893 bytes all arrive whole in a single `net_poll`, the header reporting the true length.
 
+**Follow-up (2026-08-27): 861 → 860.** The previous revision of this section said `MTU = 861`, derived from the *read* side (893 − 32); that was itself one byte too generous, because the ceiling that actually binds is the *send* side: `SOCKET_WRITE` takes at most 892 payload bytes per command and, with no `WRITE_SOCKET_MORE`, the adapter was silently fragmenting anything larger into two datagrams. Receive is no longer the constraint at all — with multi-block reads (fw 3.15, [#806](https://github.com/GideonZ/1541ultimate/issues/806)) the C64 accepts up to 1472 — so the MTU is `892 − 32 = 860`, and it now lives in `net_caps.inc` as `NET_UDP_SEND_MAX` rather than being re-derived by hand.
+
 **A standard 1420-byte MTU is still unreachable**, for two independent reasons:
 
-- One `READ_SOCKET` delivers at most 893 bytes, and a datagram larger than the request is truncated with the remainder **discarded, not queued** — so multi-read reassembly cannot recover it. Reading a 1420-byte packet whole needs Data More support on the network target, which the firmware does not implement.
-- **1472 bytes** is the largest datagram that reaches the device at all: lwIP is built with `IP_REASSEMBLY = 0`, so anything that fragments is dropped before a socket sees it. That applies to every network service on the device, not just UCI.
+- One `SOCKET_WRITE` carries at most **892** bytes and the firmware has no continuation command, so a larger outbound datagram is emitted as several — a WireGuard peer rejects each fragment. This is the binding limit today; [GideonZ/1541ultimate#802](https://github.com/GideonZ/1541ultimate/issues/802) tracks `WRITE_SOCKET_MORE`, which would raise it to 1440.
+- **1472 bytes** is the largest datagram that reaches the device at all: lwIP is built with `IP_REASSEMBLY = 0`, so anything that fragments is dropped before a socket sees it. That applies to every network service on the device, not just UCI, and is why 1440 rather than 1420-plus would be the ceiling even after #802.
 
 **Cost at stock speed.** Every byte read carries a `uci_fence`, and the C64-Ultimate-conformant fence (`UCI_FENCE_INNER = 217`) is ~5.45 ms at 1 MHz — so an 893-byte read takes several seconds of wall clock at stock speed, against roughly a tenth of that at 48 MHz. Raising the MTU raises that cost proportionally. It is a genuine tension between §13.6 conformance and the no-REU/1 MHz configuration.
 

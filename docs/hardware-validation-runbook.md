@@ -74,7 +74,12 @@ of `$A000` BASIC ROM shadow with ~700 bytes headroom.
 - [ ] Preserve `artifacts/aead_diag*.log` from 2026-05-17 (the one good
       post-fix-1 dump). Do not overwrite or delete.
 
-### Device quirks that will bite you (all firmware 3.14d)
+### Device quirks that will bite you (measured on firmware 3.14d)
+
+**The UCI backend now requires firmware 3.15 or later** (multi-block
+`SOCKET_READ`, GideonZ/1541ultimate#806); 3.14d is unsupported because its
+893-byte read cap and the 894-request hang below cannot be worked around from
+our side. The 3.14d notes are kept because the other quirks still apply.
 
 - **Session budget: NOT 3 runs — but the wedge is real.** The old "≤3
   `run_prg` per power-cycle" figure is wrong; 7 clean bring-ups in a row
@@ -109,9 +114,18 @@ of `$A000` BASIC ROM shadow with ~700 bytes headroom.
   all arrive whole in one poll with the header reporting the true length.
   Upstream: GideonZ/1541ultimate#802.
 
-  A datagram larger than the request is still truncated with the remainder
-  **discarded**, and 1472 B is the largest that reaches the device at all
+  On fw 3.14d a datagram larger than the request is truncated with the
+  remainder **discarded** — which is why 3.14d is no longer supported.
+  fw 3.15's multi-block reads (GideonZ/1541ultimate#806) lift the receive
+  side to 1472 B, the largest that reaches the device at all
   (`IP_REASSEMBLY = 0`, device-wide).
+  `NET_UDP_RECV_MAX = 1472` in `src/net/uci/net_caps.inc`.
+- **SOCKET_WRITE: 892 bytes per datagram, and this is what pins the MTU
+  (2026-08-27).** There is no `WRITE_SOCKET_MORE` (GideonZ/1541ultimate#802),
+  so anything larger goes out as two datagrams and the peer drops both. Hence
+  `NET_UDP_SEND_MAX = 892` and `WG_MTU = 892 − 32 = 860` (not 861, which was
+  read-side arithmetic). The host tools take these from the .inc files via
+  `tools/c64_caps.py`; do not hardcode them.
 
   **The red-screen incident (PR #62) was the sentinel, not an over-claim.**
   `net_poll` trusted the response header as a byte count and fed it to an

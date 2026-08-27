@@ -197,7 +197,7 @@ captured in persistent memory:
 
 | Quirk | Behaviour | Recovery |
 |---|---|---|
-| `SOCKET_READ` size cap | Truncates 600–1280 → 512; returns `0xFFFF` for ≥1500 | Always request 512 |
+| `SOCKET_READ` size cap | Truncates 600–1280 → 512; returns `0xFFFF` for ≥1500 | Always request 512 — **superseded 2026-08-26/27**: 512 was our own request size, not a firmware cap; receive is 1472 (multi-block, fw 3.15) and the MTU is send-bound at 892 → `MTU = 860`. See README "Tunnel MTU". |
 | `SOCKET_WRITE` response | No written-count to RESP_DATA, status-only to STATUS_DATA | Use the harness pattern |
 | `uci_wait_idle` wedge | C64-side spin on stuck STATE bit | `client.reboot()` direct (not `recover()`) |
 | `writemem` POST degradation | Transient: >128 B body returns 404 "Could not read data from attachment" | Physical power-cycle |
