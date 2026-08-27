@@ -17,6 +17,7 @@ from __future__ import annotations
 import datetime as _dt
 import logging
 import os
+import struct
 import socket
 import subprocess
 import sys
@@ -292,7 +293,7 @@ def _run_sequence(
     send_buf = SEND_BUF if len(TEST_PAYLOAD) <= 64 else L["udp_recv_buf"]
     log.info("payload %d B staged at $%04X", len(TEST_PAYLOAD), send_buf)
     write_bytes(tr, send_buf, TEST_PAYLOAD)
-    write_bytes(tr, L["net_udp_send_len"], bytes([len(TEST_PAYLOAD), 0]))
+    write_bytes(tr, L["net_udp_send_len"], struct.pack("<H", len(TEST_PAYLOAD)))
     _install_trampoline(tr, L["main_loop"])
     time.sleep(0.05)
 
