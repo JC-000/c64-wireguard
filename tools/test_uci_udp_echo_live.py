@@ -60,6 +60,13 @@ TEST_PAYLOAD = bytes(0x40 + (i % 32) for i in range(_PAYLOAD_LEN))
 SEND_BUF = 0x02A7                        # free space before cassette buffer (<= 64 B);
                                          # larger payloads are staged in udp_recv_buf
 BOOT_TIMEOUT, STEP_TIMEOUT, ECHO_TIMEOUT = 60.0, 10.0, 5.0
+
+
+class _NoCapture:
+    """Stand-in capture result when U64_NO_CAPTURE=1 (no debug stream)."""
+    packets_received = packets_dropped = total_cycles = 0
+    duration_seconds = 0.0
+    trace = ()
 ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
 
 logging.basicConfig(level=logging.INFO,
@@ -452,8 +459,15 @@ def main() -> int:
     try:
         listener.start()
         log.info("echo listener bound on %s:%d", local_ip, listener.port)
-        cap.start()
-        set_debug_stream_mode(client, DEBUG_MODE_6510)
+        # U64_NO_CAPTURE=1 skips the 6510 debug-bus stream entirely (no
+        # set_debug_stream_mode, no stream_debug_start) — the firmware then
+        # sends nothing but the echo itself. Used to A/B the #58 send stall.
+        capture = os.environ.get("U64_NO_CAPTURE") != "1"
+        if capture:
+            cap.start()
+            set_debug_stream_mode(client, DEBUG_MODE_6510)
+        else:
+            log.info("U64_NO_CAPTURE set — debug stream disabled for this run")
         set_turbo_mhz(client, 1)
         # Verify turbo stuck at 1 MHz (harness PR #106 footgun: prior 48 MHz
         # session can survive reset() and silently warp our measurements).
@@ -464,8 +478,9 @@ def main() -> int:
         _safe(set_reu, client, True, "512 KB")  # reu_mul_init needs REU
         time.sleep(0.5)
         try:
-            client.stream_debug_start(f"{local_ip}:{DEBUG_PORT}")
-            streamed = True
+            if capture:
+                client.stream_debug_start(f"{local_ip}:{DEBUG_PORT}")
+                streamed = True
         except Ultimate64Error as exc:
             # C64 Ultimate fw 1.1.0 has no 6510 debug stream (HTTP 500 on
             # /v1/streams/debug:start) — the echo test is still valid, just
@@ -480,8 +495,11 @@ def main() -> int:
         _safe(client.stream_debug_stop)
         streamed = False
         time.sleep(0.3)
-        result = cap.stop()
-        trace_path = _persist_trace(result, labels, mhz=1, mode=DEBUG_MODE_6510)
+        if capture:
+            result = cap.stop()
+            trace_path = _persist_trace(result, labels, mhz=1, mode=DEBUG_MODE_6510)
+        else:
+            result, trace_path = _NoCapture(), "(capture disabled)"
         if failures:
             print("FAIL — assertions did not hold:")
             for f in failures:
@@ -498,7 +516,7 @@ def main() -> int:
     finally:
         if streamed:
             _safe(client.stream_debug_stop)
-        if result is None:
+        if result is None and capture:
             try:
                 time.sleep(0.2)
                 trace_path = _persist_trace(
