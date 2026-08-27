@@ -77,6 +77,7 @@
 ; --- primitives from uci_cmd.s ---
 .import uci_abort
 .import uci_wait_idle
+.import uci_tod_start
 .import uci_wait_not_busy
 .import uci_begin_cmd
 .import uci_put_byte
@@ -130,6 +131,10 @@ net_init:
         rts
 
 @present:
+        jsr uci_tod_start           ; bounded waits need a RUNNING TOD (uci_cmd.s, #58)
+        bcc @tod_ok
+        rts                         ; C=1, net_last_error = NET_ERR_TIMEBASE_STOPPED
+@tod_ok:
         ; UCI present. uci_abort's intrinsic settle delay is sufficient
         ; preparation for the first command — we deliberately do NOT
         ; jsr uci_wait_idle here. Calling wait_idle after abort makes

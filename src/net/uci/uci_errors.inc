@@ -43,6 +43,10 @@ UCI_ERR_READ_FAIL      = $86    ; SOCKET_READ returned an error bit
 UCI_ERR_SHORT_WRITE    = $87    ; SOCKET_WRITE's returned count != requested
                                 ; length (or no 2-byte count arrived). On UDP
                                 ; the torn datagram is already gone — no retry.
+; Contract-generic (§13.2 range $01-$3F, c64-lib-contract#145): the wall-clock
+; timebase the bounded waits depend on did not start ticking. Any family may
+; emit it. Measured 2026-08-27: the U64E's CIA1 TOD is stopped after reset.
+NET_ERR_TIMEBASE_STOPPED = $01
 UCI_ERR_NO_SOCKET      = $88    ; socket-open response yielded no socket_id
 UCI_ERR_WAIT_TIMEOUT   = $89    ; a bounded wait exceeded its wall-clock budget
 UCI_ERR_SEND_TOO_LONG  = $8C    ; datagram exceeds NET_UDP_SEND_MAX (892, the
