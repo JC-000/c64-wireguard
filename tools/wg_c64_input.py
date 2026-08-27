@@ -36,7 +36,11 @@ KBD_MAX    = 10         # queue length; $0289 XMAX, never assume more
 # read_input_line stops storing at 40 characters and silently drops the rest,
 # so a longer line would be truncated on the C64 rather than here, where the
 # caller can see it happen.
-C64_INPUT_MAX = 40
+try:  # MSG_TEXT_MAX = WG_MTU - 28 (IP+UDP headers); 832 on the UCI build
+    from c64_caps import C64_TUNNEL_MTU as _MTU
+    C64_INPUT_MAX = _MTU - 28
+except Exception:  # pragma: no cover - keeps the helper usable standalone
+    C64_INPUT_MAX = 832
 
 
 def _wait_drained(tr, timeout: float = 10.0) -> bool:

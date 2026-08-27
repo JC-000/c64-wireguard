@@ -52,8 +52,12 @@ TRAMP, GO_FLAG, SENTINEL, CARRY, STEP_ID = 0x0334, 0x03E0, 0x03E1, 0x03E2, 0x03E
 # SMC offsets inside the trampoline image (see _build_trampoline).
 SMC_REG_A, SMC_REG_X, SMC_TARG_LO, SMC_TARG_HI = 14, 16, 18, 19
 STEP_INIT, STEP_DHCP, STEP_LISTEN, STEP_SEND, STEP_POLL = 0x11, 0x22, 0x33, 0x44, 0x55
-TEST_PAYLOAD = bytes(range(0x40, 0x60))  # 32 bytes, no $00 for trace eyeballing
-SEND_BUF = 0x02A7                        # free space before cassette buffer
+# ECHO_PAYLOAD_LEN (default 32) sizes the round trip; 892 = NET_UDP_SEND_MAX
+# exercises the full-size send path. Pattern avoids $00 for trace eyeballing.
+_PAYLOAD_LEN = int(os.environ.get("ECHO_PAYLOAD_LEN", "32"))
+TEST_PAYLOAD = bytes(0x40 + (i % 32) for i in range(_PAYLOAD_LEN))
+SEND_BUF = 0x02A7                        # free space before cassette buffer (<= 64 B);
+                                         # larger payloads are staged in udp_recv_buf
 BOOT_TIMEOUT, STEP_TIMEOUT, ECHO_TIMEOUT = 60.0, 10.0, 5.0
 ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
 
@@ -285,7 +289,9 @@ def _run_sequence(
     write_bytes(tr, L["wg_local_port"], port_le)
     write_bytes(tr, L["udp_recv_ready"], bytes([0]))
     write_bytes(tr, L["udp_recv_len"], bytes([0, 0]))
-    write_bytes(tr, SEND_BUF, TEST_PAYLOAD)
+    send_buf = SEND_BUF if len(TEST_PAYLOAD) <= 64 else L["udp_recv_buf"]
+    log.info("payload %d B staged at $%04X", len(TEST_PAYLOAD), send_buf)
+    write_bytes(tr, send_buf, TEST_PAYLOAD)
     write_bytes(tr, L["net_udp_send_len"], bytes([len(TEST_PAYLOAD), 0]))
     _install_trampoline(tr, L["main_loop"])
     time.sleep(0.05)
@@ -325,7 +331,7 @@ def _run_sequence(
         fail.append("net_udp_listen C=1")
     # net_udp_send
     c, nle = call("net_udp_send", STEP_SEND,
-                  reg_a=SEND_BUF & 0xFF, reg_x=SEND_BUF >> 8)
+                  reg_a=send_buf & 0xFF, reg_x=send_buf >> 8)
     if c != 0:
         fail.append(f"net_udp_send C=1 (net_last_error=${nle:02X}; "
                     "$84=CONNECT_FAIL, $85=SEND_FAIL, $87=SHORT_WRITE)")
