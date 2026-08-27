@@ -205,7 +205,10 @@ def _poll_until_recv_ready(tr, ready_addr, net_poll_addr, timeout) -> bool:
     deadline = time.monotonic() + timeout
     iters = 0
     while time.monotonic() < deadline:
-        _run_step(tr, step_id=STEP_POLL, target=net_poll_addr)
+        # Every received byte costs two uci_fences (~11 ms at 1 MHz), so the
+        # poll budget scales with the payload: 892 B is ~10 s at stock speed.
+        _run_step(tr, step_id=STEP_POLL, target=net_poll_addr,
+                  timeout=STEP_TIMEOUT + 0.02 * len(TEST_PAYLOAD))
         iters += 1
         if tr.read_memory(ready_addr, 1)[0] != 0:
             log.info("udp_recv_ready set after %d polls", iters)
@@ -332,7 +335,8 @@ def _run_sequence(
         fail.append("net_udp_listen C=1")
     # net_udp_send
     c, nle = call("net_udp_send", STEP_SEND,
-                  reg_a=send_buf & 0xFF, reg_x=send_buf >> 8)
+                  reg_a=send_buf & 0xFF, reg_x=send_buf >> 8,
+                  timeout=STEP_TIMEOUT + 0.01 * len(TEST_PAYLOAD))  # 1 fence/byte
     if c != 0:
         fail.append(f"net_udp_send C=1 (net_last_error=${nle:02X}; "
                     "$84=CONNECT_FAIL, $85=SEND_FAIL, $87=SHORT_WRITE)")
