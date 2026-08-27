@@ -38,8 +38,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import wg_c64_input                                          # noqa: E402
 
 # Distinct per direction so a hit can never be attributed to the wrong one.
-MARKER_C64 = "ZEBRA QUARTZ ONE TWO THREE"
-MARKER_HOST = "QUASAR EIGHT NINE SIXTY"
+import os as _os
+
+def _sized(marker: str, tail: str) -> str:
+    """WIRE_MSG_LEN pads a marker with filler to that many chars (832 =
+    MSG_TEXT_MAX drives the full-size tunnel path); unset keeps it short."""
+    n = int(_os.environ.get("WIRE_MSG_LEN", "0"))
+    if n <= len(marker) + len(tail) + 1:
+        return marker
+    filler = "ABCDEFGHIJKLMNOPQRSTUVWXY "
+    body = (filler * (n // len(filler) + 1))[: n - len(marker) - len(tail) - 2]
+    return f"{marker} {body} {tail}"
+
+MARKER_C64 = _sized("ZEBRA QUARTZ ONE TWO THREE", "END ZEBRA")
+MARKER_HOST = _sized("QUASAR EIGHT NINE SIXTY", "END QUASAR")
 MARKER_TAMPER = "MUTANT PACKET SHOULD NOT APPEAR"
 
 T4_HDR_LEN = 16     # type(1) + reserved(3) + receiver_idx(4) + counter(8)

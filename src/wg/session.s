@@ -353,21 +353,16 @@ session_handle_packet:
         lda #<msg_recv_hdr
         ldy #>msg_recv_hdr
         jsr print_string
-        ; print msg_recv_len bytes from msg_recv_ptr
+        ; print msg_recv_len (16-bit) bytes from msg_recv_ptr, raw
         lda msg_recv_ptr
         sta zp_ptr1
         lda msg_recv_ptr+1
         sta zp_ptr1+1
-        ldy #0
+        lda #0
+        sta zp_tmp1             ; no printable filter
         ldx msg_recv_len
-        beq @t4_udp_done
-@t4_udp_print:
-        lda (zp_ptr1),y
-        jsr chrout
-        iny
-        dex
-        bne @t4_udp_print
-@t4_udp_done:
+        lda msg_recv_len+1
+        jsr print_buf16
         lda #$0d
         jsr chrout
         rts
@@ -452,24 +447,74 @@ display_payload:
         ldy #>recv_data_msg
         jsr print_string
 
-        ldy #0
+        lda #<(tp_packet+16)
+        sta zp_ptr1
+        lda #>(tp_packet+16)
+        sta zp_ptr1+1
+        lda #1
+        sta zp_tmp1             ; replace non-printables with '.'
         ldx tp_payload_len
-        beq @done               ; no payload
-@loop:
-        lda tp_packet+16,y
+        lda tp_payload_len+1
+        jsr print_buf16
+        lda #$0d                ; newline
+        jsr chrout
+        rts
+
+; MAIN_AREA_LO is full (§6.7 image-overrun assert fires 42 bytes over once
+; the 16-bit length paths are in), so the two new routines that widened the
+; message path — this one and udp_tunnel_parse in ip_build.s — live in
+; APP_EXTRA (MAIN_AREA_HI) beside session_stage_dest. Same precedent, same
+; reason.
+.segment "APP_EXTRA"
+
+; =============================================================================
+; print_buf16 - Print a 16-bit-length byte run through chrout
+;
+; Input:  zp_ptr1 = source pointer
+;         X       = length low byte
+;         A       = length high byte
+;         zp_tmp1 = 0 print raw, nonzero replace bytes outside $20-$7E by '.'
+; Clobbers: A, X, Y, zp_ptr1 (advanced past the full pages), zp_tmp2
+;
+; Full pages first (Y wraps once per page, zp_ptr1+1 advances), then the
+; low-byte remainder held in X. @emit touches only A: it relies on KERNAL
+; CHROUT preserving X and Y (it does; the old 8-bit loop leaned on that too).
+; =============================================================================
+print_buf16:
+        sta zp_tmp2             ; full pages remaining
+        beq @rem
+        ldy #0
+@page:
+        jsr @emit
+        iny
+        bne @page
+        inc zp_ptr1+1
+        dec zp_tmp2
+        bne @page
+@rem:
+        cpx #0
+        beq @done
+        ldy #0
+@lo:
+        jsr @emit
+        iny
+        dex
+        bne @lo
+@done:
+        rts
+@emit:
+        lda zp_tmp1
+        beq @raw_load
+        lda (zp_ptr1),y
         cmp #$20
         bcc @dot                ; < space
         cmp #$7f
-        bcs @dot                ; >= $7F
-        jmp @print
+        bcc @out                ; printable
 @dot:
         lda #'.'
-@print:
-        jsr chrout
-        iny
-        dex
-        bne @loop
-@done:
-        lda #$0d                ; newline
+        bne @out                ; always ('.' is nonzero)
+@raw_load:
+        lda (zp_ptr1),y
+@out:
         jsr chrout
         rts

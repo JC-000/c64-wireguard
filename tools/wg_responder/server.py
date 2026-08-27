@@ -23,6 +23,12 @@ import threading
 
 from c64_test_harness.encoding import char_to_petscii
 
+# tools/ on the path so the caps helper resolves whether we are run as
+# `python -m tools.wg_responder.server` (from the repo root) or
+# `python -m wg_responder.server` (from tools/).
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
+from c64_caps import C64_RECV_MAX, C64_RECV_MTU, C64_TUNNEL_MTU  # noqa: E402
+
 from .responder import (
     MSG_TYPE_INITIATION,
     MSG_TYPE_RESPONSE,
@@ -123,15 +129,16 @@ def strip_tunnel_headers(plaintext: bytes) -> bytes:
     return plaintext
 
 
-# The C64's inbound path is the binding constraint, not the 1500-byte
-# tp_packet buffer: the Ultimate's SOCKET_READ truncates above 512 bytes
-# silently (issue #46). Stay well under it — 16 bytes of Type-4 header and
-# 16 of Poly1305 tag ride along with the plaintext.
-# Kept well under WG_MTU (480, src/constants.inc): the UCI firmware truncates
-# inbound datagrams larger than 512 B silently, and a WireGuard Type-4 frame is
-# payload + 32. 240 is the historical chat cap and is not the protocol limit —
-# do not raise it past WG_MTU without reading the "Tunnel MTU" README section.
-MAX_CHAT_PAYLOAD = 240
+# The host has no RAM constraint and must never be the thing that caps the
+# tunnel, so the chat cap is the C64's RECEIVE-side limit, not its (smaller)
+# send-side one: NET_UDP_RECV_MAX (1472) minus the 32-byte Type-4 overhead,
+# i.e. 1440 today. That is deliberately larger than the tunnel MTU the C64
+# currently advertises (860, which is bound by its 892-byte SEND ceiling), so
+# the responder is already right if the firmware ships WRITE_SOCKET_MORE
+# (GideonZ/1541ultimate#802). Both numbers are read from the .inc files by
+# tools/c64_caps.py — do not hardcode them here again; a hardcoded 240/512
+# once hid a real bug for months (README, "Tunnel MTU" / "Correction").
+MAX_CHAT_PAYLOAD = C64_RECV_MTU
 
 
 def _decode_type(data: bytes) -> str:
@@ -189,9 +196,14 @@ class _Session:
         payload = ascii_to_petscii(text)
         if len(payload) > MAX_CHAT_PAYLOAD:
             _say(f"!! message truncated to {MAX_CHAT_PAYLOAD} bytes "
-                 f"(was {len(payload)}) — the Ultimate's SOCKET_READ "
-                 f"silently truncates above 512 (#46)")
+                 f"(was {len(payload)}) — larger than the C64 can receive "
+                 f"({C64_RECV_MAX} B datagram minus 32 B overhead; "
+                 f"src/net/uci/net_caps.inc)")
             payload = payload[:MAX_CHAT_PAYLOAD]
+        elif len(payload) > C64_TUNNEL_MTU:
+            _say(f"-- note: {len(payload)} B exceeds the C64's advertised "
+                 f"tunnel MTU ({C64_TUNNEL_MTU}, send-bound) but fits its "
+                 f"receive ceiling; sending whole")
         with self.lock:
             if not self.active or self.peer_addr is None:
                 _say("!! no session yet — waiting for the C64's handshake. "

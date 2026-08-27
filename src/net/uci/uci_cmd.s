@@ -35,6 +35,7 @@
 
 .export uci_abort
 .export uci_wait_idle
+.export uci_tod_start
 .export uci_wait_not_busy
 .export uci_begin_cmd
 .export uci_put_byte
@@ -104,6 +105,71 @@ UCI_WAIT_IDLE_BUDGET_TENTHS = 50      ; 5 seconds at 10 Hz
 ; round-trip while keeping a full short-read bail well inside any sane
 ; caller timeout.
 UCI_RESP_WAIT_BUDGET_TENTHS = 10      ; 1 second at 10 Hz
+
+; =============================================================================
+; uci_tod_start — start the CIA1 TOD clock the bounded waits depend on, and
+; VERIFY that it ticks.
+;
+; MEASURED 2026-08-27 (U64E fw 3.15, IRQ-hooked sampling on a hung machine):
+; the TOD is STOPPED after reset — 207 samples over 3 s all read 00:00:00.0
+; (hour byte $91, the untouched reset value). A CIA TOD does not run until
+; its TENTHS register is written; writing HOURS halts it. Nothing in this
+; adapter (or the c64-https original it was ported from) ever wrote it, so
+; every "TOD-bounded" wait below was unbounded on real hardware: a firmware
+; command that never completed hung the C64 forever, and no live run ever
+; produced UCI_ERR_WAIT_TIMEOUT. Starting the clock from an IRQ hook made a
+; hung net_udp_send expire within 2 s and return C=1 (issue #58).
+;
+; Contract (c64-lib-contract#145, SPEC v0.13.0 §13.4): start, then spin until
+; the tenths digit changes; the spin is paced by uci_fence so its bound is
+; wall-clock-ish regardless of CPU clock (4096 fences ~ 0.35 s at 64 MHz,
+; >= 2 tenths; ~22 s at 1 MHz but only on the failure path). If it never
+; changes: C=1, net_last_error = NET_ERR_TIMEBASE_STOPPED ($01).
+;
+; CRB bit 7 must be 0 so the writes address the clock, not the alarm. Write
+; order: HOURS/MIN/SEC first, TENTHS last. Every reset stops the TOD again,
+; so this belongs in net_init, not a one-off. Clobbers: A
+; =============================================================================
+CIA_TOD_MIN    = $DC09
+CIA_TOD_SEC    = $DC0A
+CIA_CRB        = $DC0F
+uci_tod_start:
+        lda CIA_CRB
+        and #$7F                    ; bit 7 = 0: TOD writes set the clock
+        sta CIA_CRB
+        lda #$00
+        sta CIA_TOD_HOUR            ; halts the clock (already halted)
+        sta CIA_TOD_MIN
+        sta CIA_TOD_SEC
+        sta CIA_TOD_TENTHS          ; starts the clock
+        ; Verify: latch (HOUR), read TENTHS, then spin until it changes.
+        lda CIA_TOD_HOUR
+        lda CIA_TOD_TENTHS
+        sta @ts_first
+        lda #$00
+        sta @ts_lo
+        lda #$10
+        sta @ts_hi                  ; 16 * 256 = 4096 fenced polls
+@ts_loop:
+        uci_fence
+        lda CIA_TOD_HOUR
+        lda CIA_TOD_TENTHS
+        cmp @ts_first
+        bne @ts_ok
+        dec @ts_lo
+        bne @ts_loop
+        dec @ts_hi
+        bne @ts_loop
+        lda #NET_ERR_TIMEBASE_STOPPED
+        sta net_last_error
+        sec
+        rts
+@ts_ok:
+        clc
+        rts
+@ts_first: .byte 0
+@ts_lo:    .byte 0
+@ts_hi:    .byte 0
 
 uci_wait_idle:
         ; Sample initial TENTHS for delta-tracking. Latch via HOUR,

@@ -19,7 +19,7 @@
 ; session". It did emit it constantly, but not because reads were long --
 ; $FFFF is the firmware's NO-DATA sentinel (measured: every idle UDP
 ; SOCKET_READ returns header $FFFF with rx_len 0, 11/11 sizes), and it
-; fell through the over-claim test because $FFFF > 512. net_poll now
+; fell through the over-claim test because $FFFF > the read cap (512 then). net_poll now
 ; excludes the sentinel first, so this code no longer fires on idle polls.
 ;
 ; The same sentinel, taken as a copy count, is the whole of the incident
@@ -37,13 +37,23 @@ UCI_ERR_NOT_PRESENT    = $81    ; $DF1D did not read back UCI_ID_VALUE ($C9)
 UCI_ERR_CMD_FAILED     = $82    ; UCI reported an error bit after PUSH_CMD
 UCI_ERR_NO_IP          = $83    ; GET_IPADDR returned all-zero IP
 UCI_ERR_CONNECT_FAIL   = $84    ; TCP_CONNECT returned an error bit
-UCI_ERR_SEND_FAIL      = $85    ; SOCKET_WRITE returned an error bit
+UCI_ERR_SEND_FAIL      = $85    ; SOCKET_WRITE returned an error bit, or a
+                                ; written count of $FFFF (lwip_send ret -1)
 UCI_ERR_READ_FAIL      = $86    ; SOCKET_READ returned an error bit
-UCI_ERR_SHORT_WRITE    = $87    ; SOCKET_WRITE wrote fewer bytes than requested
+UCI_ERR_SHORT_WRITE    = $87    ; SOCKET_WRITE's returned count != requested
+                                ; length (or no 2-byte count arrived). On UDP
+                                ; the torn datagram is already gone — no retry.
+; Contract-generic (§13.2 range $01-$3F, c64-lib-contract#145): the wall-clock
+; timebase the bounded waits depend on did not start ticking. Any family may
+; emit it. Measured 2026-08-27: the U64E's CIA1 TOD is stopped after reset.
+NET_ERR_TIMEBASE_STOPPED = $01
 UCI_ERR_NO_SOCKET      = $88    ; socket-open response yielded no socket_id
 UCI_ERR_WAIT_TIMEOUT   = $89    ; a bounded wait exceeded its wall-clock budget
-UCI_ERR_SEND_TOO_LONG  = $8C    ; datagram exceeds UCI_DATA_QUEUE_MAX; a
-                                ; split would emit multiple UDP packets.
+UCI_ERR_SEND_TOO_LONG  = $8C    ; datagram exceeds NET_UDP_SEND_MAX (892, the
+                                ; adapter's published net_caps.inc guarantee);
+                                ; refused BEFORE any register is touched
+                                ; (c64-lib-contract#141/#142) because a split
+                                ; would emit multiple UDP packets.
                                 ; $8B is c64-https's UCI_ERR_BAD_READ_HDR —
                                 ; allocated in SPEC §13.2 before use, per the
                                 ; rule added after the $88 collision.
@@ -55,7 +65,8 @@ UCI_TCP_CONNECTED      = $01    ; connected, reads/writes valid
 UCI_TCP_ERROR          = $02    ; saw an error on a read — stop polling
 UCI_TCP_CONNECT_FAIL   = $03    ; connect did not yield a usable socket
 
-; UCI firmware data queue max per SOCKET_WRITE push (see uci_network.py)
+; Per-SOCKET_WRITE payload ceiling (c64-test-harness uci_network.py's
+; SOCKET_WRITE_MAX_BYTES agrees: 892, hardware-verified).
 ; Largest payload in ONE SOCKET_WRITE — and therefore the largest datagram
 ; this adapter can SEND, because a connected UDP socket emits one datagram
 ; per write. This is NOT a chunk size: raising the tunnel MTU above it does
@@ -80,24 +91,29 @@ UCI_DATA_QUEUE_MAX     = 892
 
 ; SOCKET_READ max-length cap we ask for per net_poll cycle.
 ;
-; 893, and the exact value matters — 894 is a HANG on this firmware.
+; Firmware baseline: 3.15 or later (3.14d is no longer supported — see the
+; history line below). Current behaviour, fw 3.15:
+;   - 1472 = the largest UDP payload in a 1500-byte Ethernet frame (20 IP +
+;     8 UDP). A reply larger than one 896-byte response block is delivered
+;     across "Data More" blocks (GideonZ/1541ultimate#806); net_poll
+;     reassembles them into udp_recv_buf, and the 2-byte header — the TOTAL
+;     length — is what this value is validated against.
+;   - A datagram larger than the request is cut by the firmware and reported
+;     on the STATUS channel as `04,DATAGRAM TRUNCATED: <n>` (UCI_STATUS_MAX
+;     below is sized for that line).
+;   - $FFFF in the header is the firmware's NO-DATA sentinel, not a length
+;     (see the $8A note above); net_poll excludes it before any comparison.
+;   - Receive is therefore NOT bounded by the command-interface RAM the way
+;     send is (892 per SOCKET_WRITE, above): the tunnel MTU is set by the
+;     send side.
 ;
-; The firmware's real limit is 894 (CMD_MAX_REPLY_LEN 896 minus the 2-byte
-; length header), fixed by the FPGA's command-interface RAM partition; a
-; larger request is REJECTED with `82,PARAMETER(S) OUT OF RANGE` on the
-; STATUS channel. But a read of exactly 894 builds a 2+894 = 896-byte reply,
-; exactly the response-queue size: the FPGA stops the response pointer at
-; the last byte while still asserting DATA_AV, so the flag never clears and
-; the queue repeats its final byte forever (GideonZ/1541ultimate#802, found
-; by chrisgleissner; their fix moves the refusal to 894 but ships in 3.15,
-; which is not downloadable — we are on 3.14d, where 894 is ACCEPTED and
-; will do this). 893 is the largest value that both fits and drains.
-;
-; This was 512 until 2026-08-26, described here as "the conservative Phase 3
-; MVP choice" — which it was. It was never a firmware limit, though this
-; project reasoned about it as one for months. Measured on our own U64E
-; (fw 3.14d): datagrams of 512/600/700/800/861/893 all arrive WHOLE in a
-; single poll with the header reporting their true length.
+; HISTORY (why 3.14d is unsupported): 3.14d has no multi-block reply, so a
+; single SOCKET_READ tops out at 894 and a request of EXACTLY 894 hangs the
+; interface — the 2+894 = 896-byte reply fills the response queue and
+; DATA_AV never clears (GideonZ/1541ultimate#802). The cap sat at 893 from
+; 2026-08-26 until the 3.15 reassembly landed, and before that at 512 —
+; this project's own Phase 3 MVP choice, misread for months as a firmware
+; ceiling because we only ever ASKED for 512.
 UCI_READ_CHUNK_MAX     = 1472
 
 ; Bytes of the $DF1F status line kept by uci_drain_status. Long enough for

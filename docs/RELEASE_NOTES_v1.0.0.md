@@ -86,6 +86,10 @@ survives only in the non-shipped `USE_*_SIBLING=0` dev build.)
 
 - Inbound datagrams are capped at 512 bytes on the UCI backend
   (firmware truncation, #46) — keep tunnel MTU conservative.
+  *(Superseded 2026-08-27: the 512 was this project's own read size, not a
+  firmware limit; the real constraint is the 892-byte send side, giving
+  `MTU = 860`. See the README's "Tunnel MTU" section. Kept as a record of
+  what v1.0.0 believed.)*
 - A full handshake takes ~25 min wall-clock at 1 MHz including
   responder round-trips; standard `wg` peers time out long before
   that, so interop currently needs a patient responder (the Python

@@ -38,6 +38,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import wg_c64_input                                          # noqa: E402
+from c64_caps import C64_TUNNEL_MTU                          # noqa: E402
 
 CHAT_TURBO_MHZ = 48
 IDLE_TURBO_MHZ = 1
@@ -112,10 +113,11 @@ def build_chat_loop():
                           "listening; try again shortly", flush=True)
                     continue
                 payload = ascii_to_petscii(line)
-                if len(payload) > 240:
-                    print("!! truncated to 240B (SOCKET_READ caps at 512, "
-                          "#46)", flush=True)
-                    payload = payload[:240]
+                if len(payload) > C64_TUNNEL_MTU:
+                    print(f"!! truncated to {C64_TUNNEL_MTU}B (C64 tunnel "
+                          f"MTU, derived from src/net/uci/net_caps.inc)",
+                          flush=True)
+                    payload = payload[:C64_TUNNEL_MTU]
                 try:
                     with lock:
                         pkt = responder.encrypt_transport(payload)
