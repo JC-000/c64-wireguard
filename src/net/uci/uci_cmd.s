@@ -46,6 +46,8 @@
 .export uci_drain_status
 .export uci_status_buf
 .export uci_status_len
+.export uci_status_seen
+.export uci_status_leading_code
 .export uci_ack
 
 .export uci_resp_dst
@@ -575,6 +577,14 @@ uci_drain_status:
         ; first capture wins and stays until the consumer zeroes
         ; uci_status_len to arm the next one.
         lda @dst_idx
+        sta uci_status_seen         ; NON-STICKY: bytes this drain actually saw.
+                                    ; uci_status_len is sticky-first (above) and
+                                    ; has no consumer that clears it, so it can
+                                    ; hold a line from an EARLIER drain; callers
+                                    ; that must know "did THIS drain see a status"
+                                    ; (uci_udp_connect's refusal fast-path) read
+                                    ; uci_status_seen, which is rewritten — 0
+                                    ; included — on every drain.
         beq @dst_commit_done        ; nothing captured this time
         ldx uci_status_len
         bne @dst_commit_done        ; one already held, do not clobber it
@@ -596,6 +606,45 @@ uci_drain_status:
 ; Not NUL-terminated; uci_status_len says how many bytes are valid.
 uci_status_buf:  .res UCI_STATUS_MAX, 0
 uci_status_len:  .byte 0
+; Bytes captured by the MOST RECENT uci_drain_status call (non-sticky; see the
+; note in @dst_commit). 0 means that drain saw no status line at all.
+uci_status_seen: .byte 0
+
+; =============================================================================
+; uci_status_leading_code — parse the leading "NN" decimal code of the captured
+; status line (uci_status_buf) into a byte.
+;
+; The $DF1F status channel is `NN,TEXT` where NN is a two-ASCII-digit decimal
+; code: "00" = OK, and every non-zero code is a failure the firmware names in
+; TEXT (e.g. "85,ERROR OPENING SOCKET", "82,PARAMETER(S) OUT OF RANGE").
+;
+; Caller MUST have just run uci_drain_status and confirmed uci_status_seen >= 2
+; so that uci_status_buf+0/+1 hold this line's digits (not stale bytes).
+;
+; Output: A = (buf+0 - '0')*10 + (buf+1 - '0'); Z set iff A == 0 (i.e. "00").
+;         Non-digit bytes yield a non-zero value, which is the safe verdict —
+;         a malformed status is not "00,OK", so treating it as a failure code
+;         cannot mask a refusal.
+; Clobbers: A
+; =============================================================================
+uci_status_leading_code:
+        lda uci_status_buf+0
+        sec
+        sbc #'0'                    ; tens digit value
+        sta @slc_tmp
+        asl a                       ; 2*tens
+        asl a                       ; 4*tens
+        clc
+        adc @slc_tmp                ; 5*tens
+        asl a                       ; 10*tens
+        sta @slc_tmp
+        lda uci_status_buf+1
+        sec
+        sbc #'0'                    ; ones digit value
+        clc
+        adc @slc_tmp                ; 10*tens + ones
+        rts                         ; Z reflects the final A
+@slc_tmp:        .byte 0
 
 ; =============================================================================
 ; Control block for uci_read_resp_bytes — lives in UCI_BSS so no ZP is needed
