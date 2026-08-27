@@ -20,18 +20,17 @@
 
 ; ---- Public entry points -----------------------------------------------------
 .export net_init
-.export net_dhcp
+.export net_dhcp_acquire
 .export net_poll
 .export net_udp_listen
 .export net_udp_send
+.export net_udp_close
 .export net_udp_recv_cb
 .export net_print_ip
-.export net_save_zp
-.export net_restore_zp
 
 ; ---- Public data labels (defined in this module) -----------------------------
-.export net_send_ptr
-.export udp_send_len_local
+.export net_udp_send_ptr
+.export net_udp_send_len
 
 ; ---- External data symbols (defined in wg/data.s) ----------------------------
 .import udp_recv_buf
@@ -40,8 +39,8 @@
 .import udp_recv_src_ip
 .import udp_recv_src_port
 .import wg_local_port
-.import wg_peer_ip
-.import wg_peer_port
+.import net_udp_dest_ip
+.import net_udp_dest_port
 .import zp_save_buf
 
 ; =============================================================================
@@ -63,10 +62,10 @@ net_init:
         rts
 
 ; =============================================================================
-; net_dhcp - obtain IP address via DHCP
+; net_dhcp_acquire - obtain IP address via DHCP
 ; Output: C=0 success, C=1 failure
 ; =============================================================================
-net_dhcp:
+net_dhcp_acquire:
         jsr net_save_zp
         jsr ip65_dhcp_init
         php
@@ -82,6 +81,12 @@ net_poll:
         jsr net_save_zp
         jsr ip65_process
         jsr net_restore_zp
+        ; §13.2: C=1 means a BACKEND ERROR, and this path has none to report —
+        ; ip65_process's own carry is a "did work" flag, and net_restore_zp does
+        ; not preserve it anyway, so the carry reaching the caller was previously
+        ; undefined. Inbound data is signalled by udp_recv_ready, set from the
+        ; receive callback. Say so explicitly rather than leaking a stale flag.
+        clc
         rts
 
 ; =============================================================================
@@ -105,24 +110,38 @@ net_udp_listen:
         rts
 
 ; =============================================================================
+; net_udp_close - close the UDP socket (no-op for ip65)
+;
+; ip65's UDP is connectionless: udp_add_listener/udp_remove_listener manage
+; a local port, and there is no firmware-side socket handle to abandon. The
+; UCI backend needs a real close (see its header and issue #58); this exists
+; so the two backends present the same surface.
+;
+; Output: C=0 always.
+; =============================================================================
+net_udp_close:
+        clc
+        rts
+
+; =============================================================================
 ; net_udp_send - send UDP packet
 ; Input: A/X = pointer to data buffer
-;        udp_send_len_local = 16-bit length
-;        wg_peer_ip, wg_peer_port, wg_local_port must be set
+;        net_udp_send_len = 16-bit length
+;        net_udp_dest_ip, net_udp_dest_port, wg_local_port must be set
 ; Output: C=0 success, C=1 failure
 ; =============================================================================
 net_udp_send:
-        sta net_send_ptr
-        stx net_send_ptr+1
+        sta net_udp_send_ptr
+        stx net_udp_send_ptr+1
         jsr net_save_zp
         ; set destination IP
-        lda #<wg_peer_ip
-        ldx #>wg_peer_ip
+        lda #<net_udp_dest_ip
+        ldx #>net_udp_dest_ip
         jsr ip65_set_udp_dest
         ; set dest port (big-endian in ip65)
-        lda wg_peer_port
+        lda net_udp_dest_port
         sta ip65_udp_snd_dport
-        lda wg_peer_port+1
+        lda net_udp_dest_port+1
         sta ip65_udp_snd_dport+1
         ; set source port
         lda wg_local_port
@@ -130,13 +149,13 @@ net_udp_send:
         lda wg_local_port+1
         sta ip65_udp_snd_sport+1
         ; set length
-        lda udp_send_len_local
+        lda net_udp_send_len
         sta ip65_udp_snd_len
-        lda udp_send_len_local+1
+        lda net_udp_send_len+1
         sta ip65_udp_snd_len+1
         ; send — AX = data pointer
-        lda net_send_ptr
-        ldx net_send_ptr+1
+        lda net_udp_send_ptr
+        ldx net_udp_send_ptr+1
         jsr ip65_udp_send
         php
         jsr net_restore_zp
@@ -342,5 +361,5 @@ net_restore_zp:
 ; =============================================================================
 .segment "BSS"
 
-net_send_ptr:       .res 2      ; pointer for udp_send wrapper
-udp_send_len_local: .res 2      ; length for udp_send wrapper
+net_udp_send_ptr:       .res 2      ; pointer for udp_send wrapper
+net_udp_send_len: .res 2      ; length for udp_send wrapper

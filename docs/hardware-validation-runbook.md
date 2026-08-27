@@ -92,16 +92,58 @@ of `$A000` BASIC ROM shadow with ~700 bytes headroom.
 - **`runner_health_check()` lies** — returns None even when UCI is
   wedged. Detect the wedge from the test's own progress log
   (`step $66 still running [send_len_lo=...]`).
-- **SOCKET_READ: always request 512 bytes, AND validate the length it
-  returns.** >512 truncates silently; 1500 returns `0xFFFF`. Worse, the
-  firmware can report a length larger than the request even for a 512
-  request: `net_poll` used to trust it and fed it to an unbounded copy,
-  which walked ~18 KB from `udp_recv_buf` through `$D000` I/O and left
-  WireGuard packet bytes in the VIC registers (red screen, garbage
-  charset, `wg_state` zeroed). Fixed by clamping against
-  `UCI_READ_CHUNK_MAX` and dropping the read; `net_last_error = $88`
-  (`UCI_ERR_LONG_READ`) fires routinely on this firmware during healthy
-  sessions, so seeing it is expected rather than alarming.
+- **SOCKET_READ: request 893 bytes — never 894 — AND validate the length it
+  returns.** The firmware's limit is 894 (`CMD_MAX_REPLY_LEN` 896 minus the
+  2-byte header); anything above it is rejected with
+  `82,PARAMETER(S) OUT OF RANGE` **on the status channel**, which this
+  adapter drains without reading, so a rejected read looks like an empty one.
+  A read of *exactly* 894 builds a 896-byte reply — the response-queue size —
+  and the FPGA then holds the pointer at the last byte while still asserting
+  `DATA_AV`, so the queue repeats forever. 893 both fits and drains.
+
+  **This was "always request 512" until 2026-08-26, and that was our own
+  number, not the firmware's.** Having only ever asked for 512 we only ever
+  received 512, and read that back as a hardware ceiling; the one larger
+  request tried (1024) was above the real cap and being rejected on a channel
+  we ignore. Re-measured on the U64E: 512/600/700/800/861/893-byte datagrams
+  all arrive whole in one poll with the header reporting the true length.
+  Upstream: GideonZ/1541ultimate#802.
+
+  A datagram larger than the request is still truncated with the remainder
+  **discarded**, and 1472 B is the largest that reaches the device at all
+  (`IP_REASSEMBLY = 0`, device-wide).
+
+  **The red-screen incident (PR #62) was the sentinel, not an over-claim.**
+  `net_poll` trusted the response header as a byte count and fed it to an
+  unbounded copy. On an empty read that header is `$FFFF`, so the copy ran
+  65535 bytes from `udp_recv_buf` — which reaches `$D000` after 17,964
+  bytes, i.e. the "~18 KB" walk through the VIC registers that zeroed
+  `wg_state`, repointed the screen via `$D018` and reddened the border via
+  `$D020`. The arithmetic matches the observed damage exactly, and **no
+  firmware over-claim is required to explain any of it**. Fixed by clamping
+  against `UCI_READ_CHUNK_MAX` and dropping the read; the sentinel is now
+  excluded first (below).
+
+  The wider lesson, and the reason this is worth the space: never let a
+  device-supplied count be the only bound on a store loop, and exclude the
+  sentinel before doing any arithmetic on a length.
+
+  **`$FFFF` is the no-data sentinel, not a length** (measured 2026-08-24):
+  with nothing pending, every `SOCKET_READ` on a UDP socket returns header
+  `$FFFF`. c64-https sees the same sentinel on TCP. It must be excluded
+  *before* the over-claim test, or it fires on every idle poll — which is
+  exactly what this adapter did until 2026-08-24, and why this note
+  previously claimed `UCI_ERR_LONG_READ` "fires routinely during healthy
+  sessions". That was never an over-claim; it was an empty read misfiled as
+  a framing violation, and the symptom got written up as a firmware quirk
+  instead of our own misclassification. Now `$FFFF` exits `C=0` with
+  `udp_recv_ready` clear per §13.2, and `$8A` means a genuine over-claim.
+
+  So on a current build, seeing `$8A` **is** worth investigating — the
+  opposite of the previous advice. The code also moved from `$88` to `$8A`
+  on 2026-08-24 so `$88`/`$89` can carry c64-https's `UCI_ERR_NO_SOCKET` /
+  `UCI_ERR_WAIT_TIMEOUT` unchanged — logs before that date show this
+  condition as `$88`, and logs before the sentinel fix show it constantly.
 - **SOCKET_WRITE status arrives in the STATUS register, not
   RESP_DATA**, and the written-count is garbage for UDP —
   `src/net/uci/net.s` already handles both (`uci_chunk_len` override);

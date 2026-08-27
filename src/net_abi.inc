@@ -18,26 +18,60 @@
 ; is already live.
 ; =============================================================================
 
-; --- Lifecycle ---
-.import net_init            ; initialise ethernet + ip65; C=0 ok
-.import net_dhcp            ; acquire IP via DHCP; C=0 ok
-.import net_poll            ; process one packet from driver; C=0 packet
+; --- Lifecycle (§13.1 CORE) ---
+.import net_init            ; initialise the backend. C=0 ok, C=1 sets
+                            ; net_last_error.
+.import net_dhcp_acquire    ; acquire an address via DHCP; populates
+                            ; net_local_ip. C=0 ok.
+.import net_poll            ; pump ONE unit of work. C=1 ONLY on a backend
+                            ; error (§13.2) — C=0 carries NO "data arrived"
+                            ; meaning. Inbound availability is observed via
+                            ; udp_recv_ready, never via the carry.
 
-; --- UDP socket surface ---
-.import net_udp_listen      ; bind local_port (A=lo,X=hi); register
-                            ; net_udp_recv_cb as the inbound callback
-.import net_udp_send        ; send UDP packet (net_send_ptr = buffer,
-                            ; udp_send_len_local = 2-byte length);
-                            ; uses wg_peer_ip/wg_peer_port as destination
-.import net_udp_recv_cb     ; invoked BY ip65 when a packet arrives;
-                            ; copies data into udp_recv_buf and sets
-                            ; udp_recv_ready
+; --- UDP socket surface (§13.1 NET_FAMILY_UDP) ---
+.import net_udp_listen      ; bind local port (A=lo, X=hi)
+.import net_udp_send        ; send one datagram. Caller stages all four
+                            ; operands below first.
+.import net_udp_close       ; release the backend's UDP socket, if any.
+                            ; No-op under ip65; under UCI it hands the
+                            ; firmware handle back. Abandoning a live one
+                            ; poisons the U64E lease path until a wall
+                            ; power cycle — issue #58. Safe when idle.
 
-; --- Helpers ---
-.import net_print_ip        ; print 4-byte IP to screen (for banner)
-.import net_save_zp         ; save crypto ZP $02-$1B into zp_save_buf
-.import net_restore_zp      ; restore crypto ZP $02-$1B from zp_save_buf
+; --- Caller-set send operands (§13.1) ---
+.import net_udp_send_ptr    ; 2 B — buffer address
+.import net_udp_send_len    ; 2 B — length
+.import net_udp_dest_ip     ; 4 B — destination address
+.import net_udp_dest_port   ; 2 B — destination port, big-endian
+                            ; The backend reads THESE. It must never reach
+                            ; into wg_peer_* — that is the §13.1 layering
+                            ; inversion this surface exists to prevent.
+                            ; session_stage_dest copies peer -> dest.
 
-; --- Caller-visible data ---
-.import net_send_ptr        ; 2 bytes — set by caller before net_udp_send
-.import udp_send_len_local  ; 2 bytes — set by caller before net_udp_send
+; DELIBERATELY NOT IN THIS CONTRACT (c64-lib-contract SPEC §13.1):
+;   net_udp_recv_cb    — adapter-internal; ip65 takes its address for
+;                        ip65_set_udp_cb, the UCI backend has no callback.
+;   net_print_ip       — a consumer convenience, not a backend operation.
+;   net_save_zp /      — §13.5: ZP save/restore around driver calls is
+;   net_restore_zp       adapter-internal and a backend MUST NOT export it.
+; A consumer that genuinely needs one of the first two imports it directly
+; (see src/boot.s) rather than through the shared ABI surface, so the
+; dependency is visible at the call site instead of implied by this header.
+
+; KNOWN §13.1 NON-CONFORMANCE — net_local_ip / net_last_error.
+; §13.1 puts both in NET_FAMILY_CORE and this header should declare them.
+; It does not, because the UCI backend exports both and the ip65 backend
+; exports NEITHER: ip65's driver reports only a carry, so there is no error
+; channel to expose. Declaring them here would break the ip65 link the
+; moment a consumer referenced them.
+;
+; This is the same gap c64-https closed as its P1 (their #70/#142) by giving
+; ip65 a real error channel with codes from the §13.2 ip65 family range
+; ($40-$7F). Ours wants the same treatment, and per the allocate-in-the-
+; table-first rule added in c64-lib-contract#139 the codes get filed against
+; §13.2 before they are used here.
+;
+; It is also why src/net/<backend>/net_manifest.s and net_abi_asserts.s are
+; NOT in this branch yet: a NET_FAMILY_CORE claim asserted over an absent
+; error channel would link green and mean nothing. Manifests come after the
+; channel exists, not before. Tracked in #48.

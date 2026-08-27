@@ -30,6 +30,7 @@
 .import aead_encrypt
 .import aead_decrypt
 .import net_udp_send
+.import session_stage_dest
 
 ; AEAD state
 .import aead_key
@@ -51,7 +52,7 @@
 ; UDP buffers
 .import udp_recv_buf
 .import udp_recv_len
-.import udp_send_len_local
+.import net_udp_send_len
 
 ; Transport state (data.asm)
 .import tp_send_counter
@@ -769,10 +770,11 @@ transport_send:
 
         ; Set up UDP send
         lda tp_packet_len
-        sta udp_send_len_local
+        sta net_udp_send_len
         lda tp_packet_len+1
-        sta udp_send_len_local+1
+        sta net_udp_send_len+1
 
+        jsr session_stage_dest  ; §13.1: backend reads net_udp_dest_*
         lda #<tp_packet
         ldx #>tp_packet
         jsr net_udp_send

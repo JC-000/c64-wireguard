@@ -127,6 +127,10 @@ def strip_tunnel_headers(plaintext: bytes) -> bytes:
 # tp_packet buffer: the Ultimate's SOCKET_READ truncates above 512 bytes
 # silently (issue #46). Stay well under it — 16 bytes of Type-4 header and
 # 16 of Poly1305 tag ride along with the plaintext.
+# Kept well under WG_MTU (480, src/constants.inc): the UCI firmware truncates
+# inbound datagrams larger than 512 B silently, and a WireGuard Type-4 frame is
+# payload + 32. 240 is the historical chat cap and is not the protocol limit —
+# do not raise it past WG_MTU without reading the "Tunnel MTU" README section.
 MAX_CHAT_PAYLOAD = 240
 
 

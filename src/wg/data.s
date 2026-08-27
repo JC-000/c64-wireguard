@@ -167,6 +167,8 @@
 .export udp_recv_src_ip
 .export udp_recv_src_port
 .export udp_recv_ready
+.export net_udp_dest_ip
+.export net_udp_dest_port
 .export wg_peer_ip
 .export wg_peer_port
 .export wg_local_port
@@ -619,6 +621,21 @@ udp_recv_src_port:
         .res 2                 ; source port of received packet (big-endian)
 udp_recv_ready:
         .res 1                 ; 0=no packet, 1=packet waiting
+; --- §13.1 ABI-owned UDP destination -----------------------------------
+; The backend reads THESE, not wg_peer_*. A network adapter reaching into
+; the WireGuard session layer's own state is a layering inversion (§13.1):
+; it makes the adapter unusable by any other consumer and ties the backend
+; to this application's variable names. session_stage_dest copies the peer
+; into these cells before each net_udp_send.
+;
+; Order is load-bearing: session_stage_dest copies ip+port as ONE 6-byte
+; loop, and session.s carries link-time asserts that each port directly
+; follows its ip. Do not insert anything between these four labels.
+net_udp_dest_ip:
+        .res 4, 0              ; destination IP, caller-set before net_udp_send
+net_udp_dest_port:
+        .res 2                 ; destination port, big-endian (as wg_peer_port)
+
 wg_peer_ip:
         .res 4, 0              ; WireGuard peer IP address
 wg_peer_port:

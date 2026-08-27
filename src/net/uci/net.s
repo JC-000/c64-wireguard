@@ -4,15 +4,15 @@
 ; host-visible command interface. Unlike the TCP-oriented UCI backend in
 ; c64-https, WireGuard uses exactly one peer at a time, so this backend
 ; uses UCI's connected-UDP socket model: UDP_CONNECT pins the socket to
-; (wg_peer_ip, wg_peer_port), and all reads/writes flow through that
+; (net_udp_dest_ip, net_udp_dest_port), and all reads/writes flow through that
 ; single socket id.
 ;
 ; Lifecycle:
 ;   net_init       -> uci_abort + probe UCI_ID
-;   net_dhcp       -> read firmware IP via GET_IPADDR
+;   net_dhcp_acquire       -> read firmware IP via GET_IPADDR
 ;   net_udp_listen -> latches wg_local_port only; the actual UDP_CONNECT
 ;                     is deferred until the first net_udp_send, at which
-;                     point wg_peer_ip/wg_peer_port are known.
+;                     point net_udp_dest_ip/net_udp_dest_port are known.
 ;   net_udp_send   -> on first call, issues UDP_CONNECT(peer_ip, peer_port)
 ;                     and stores uci_socket_id. Subsequent calls go straight
 ;                     to SOCKET_WRITE on the connected socket.
@@ -28,26 +28,44 @@
 .include "uci_errors.inc"
 .include "constants.inc"
 
+; The tunnel MTU must fit inside one SOCKET_READ. The firmware truncates
+; rather than splits, so exceeding this is silent data loss, not an error.
+; Both symbols are equates, so this is checked at assembly time.
+.assert (WG_MTU + WG_DATA_OVERHEAD) <= UCI_READ_CHUNK_MAX, error, "WG_MTU + overhead exceeds UCI_READ_CHUNK_MAX: inbound datagrams would be truncated silently"
+
+; SEND side — the mirror of the assert above, and it was missing. On a
+; connected UDP socket each SOCKET_WRITE emits its OWN datagram, so a frame
+; larger than one write does not chunk, it FRAGMENTS: measured on hardware
+; 2026-08-27, a 1452-byte send left the C64 as 800 + 652 bytes, two torn
+; datagrams, with carry=0 and net_last_error=$00. The peer drops both and
+; nothing reports it, because uci_write_resp is pre-stashed to the chunk
+; length so the bookkeeping reads as full success.
+.assert (WG_MTU + WG_DATA_OVERHEAD) <= UCI_DATA_QUEUE_MAX, error, "WG_MTU + overhead exceeds UCI_DATA_QUEUE_MAX: outbound datagrams would be silently fragmented into multiple UDP packets"
+
 ; --- net_abi.inc contract ---
 .export net_init
-.export net_dhcp
+.export net_dhcp_acquire
 .export net_poll
 .export net_udp_listen
 .export net_udp_send
+.export net_udp_close
 .export net_udp_recv_cb
 .export net_print_ip
-.export net_save_zp
-.export net_restore_zp
 
 ; --- public data labels (defined in this module) ---
-.export net_send_ptr
-.export udp_send_len_local
+.export net_udp_send_ptr
+.export net_udp_send_len
 
 ; --- UCI-owned state exported for debug / future phases ---
 .export net_local_ip
 .export net_last_error
 .export uci_socket_id
 .export uci_socket_open
+; Exported for diagnostics: the raw SOCKET_READ response header, before the
+; §13.3 length validation consumes it. c64-lib-contract#139 records the UDP
+; header on an oversized datagram as UNMEASURED — this makes it observable
+; from the host so the $8A row's mechanism note can be written from data.
+.export uci_read_hdr
 
 ; --- primitives from uci_cmd.s ---
 .import uci_abort
@@ -71,8 +89,8 @@
 .import udp_recv_ready
 .import udp_recv_src_ip
 .import udp_recv_src_port
-.import wg_peer_ip
-.import wg_peer_port
+.import net_udp_dest_ip
+.import net_udp_dest_port
 .import wg_local_port
 
 .segment "UCI_CODE"
@@ -114,6 +132,26 @@ net_init:
         ; UCI backend does the same: abort, then go.
         jsr uci_abort
 
+        ; Close any socket still open from a previous run BEFORE we throw
+        ; the handle away. Zeroing uci_socket_id/uci_socket_open without
+        ; telling the firmware is what orphaned a live socket on every
+        ; re-init, and resetting the C64 with a live firmware socket
+        ; poisons the U64E's UCI lease path until a wall power cycle
+        ; (GET_IPADDR then returns nothing while REST/menu stay healthy).
+        ; That is issue #58: reproduced 2026-08-24 in 3 echo runs on a
+        ; freshly power-cycled U64E, with no idle window anywhere.
+        ;
+        ; Guarded on the flag holding exactly $01: this is BSS, so on a
+        ; cold boot it is whatever the RAM happened to contain, and we
+        ; must not push a garbage socket id at the firmware. A close
+        ; failure is deliberately non-fatal — net_init must still
+        ; complete, and having tried to close beats never trying.
+        lda uci_socket_open
+        cmp #$01
+        bne @ni_no_socket
+        jsr net_udp_close
+@ni_no_socket:
+
         lda #$00
         sta net_local_ip+0
         sta net_local_ip+1
@@ -126,7 +164,7 @@ net_init:
         rts
 
 ; =============================================================================
-; net_dhcp — read the firmware-assigned IP via UCI GET_IPADDR
+; net_dhcp_acquire — read the firmware-assigned IP via UCI GET_IPADDR
 ;
 ; The U64E firmware runs DHCP autonomously before the PRG is launched, so
 ; this routine READS the result via GET_IPADDR rather than performing
@@ -135,8 +173,11 @@ net_init:
 ;
 ; Clobbers: A, X, Y
 ; =============================================================================
-net_dhcp:
+net_dhcp_acquire:
         jsr uci_wait_idle
+        bcc @dhcp_go            ; FPGA wedged — cannot issue the command
+        rts                     ; (net_last_error = UCI_ERR_WAIT_TIMEOUT, C=1)
+@dhcp_go:
 
         lda #UCI_TARGET_NETWORK
         jsr uci_begin_cmd
@@ -202,7 +243,7 @@ net_dhcp:
 ; Entry: A = port_lo, X = port_hi
 ;
 ; UDP in UCI is connection-oriented: UDP_CONNECT pins the socket to a
-; single peer (IP + port). Since wg_peer_ip / wg_peer_port aren't known
+; single peer (IP + port). Since net_udp_dest_ip / net_udp_dest_port aren't known
 ; until the first outbound send, we defer the actual UDP_CONNECT to
 ; net_udp_send. This routine only stores the local port for posterity
 ; (wg_local_port is also written by the caller, so this is belt-and-
@@ -217,10 +258,10 @@ net_udp_listen:
         rts
 
 ; =============================================================================
-; net_udp_send — send a UDP packet to wg_peer_ip:wg_peer_port.
+; net_udp_send — send a UDP packet to net_udp_dest_ip:net_udp_dest_port.
 ;
-; Entry: A = buffer_lo, X = buffer_hi; udp_send_len_local = 16-bit length.
-;        wg_peer_ip / wg_peer_port must already be populated.
+; Entry: A = buffer_lo, X = buffer_hi; net_udp_send_len = 16-bit length.
+;        net_udp_dest_ip / net_udp_dest_port must already be populated.
 ;
 ; UDP adaptation vs. c64-https TCP backend:
 ;   - If the UCI socket isn't open yet (uci_socket_open == 0), issue
@@ -239,8 +280,8 @@ net_udp_listen:
 ; Clobbers: A, X, Y
 ; =============================================================================
 net_udp_send:
-        sta net_send_ptr+0
-        stx net_send_ptr+1
+        sta net_udp_send_ptr+0
+        stx net_udp_send_ptr+1
 
         ; Open the UCI UDP socket on first send.
         lda uci_socket_open
@@ -255,23 +296,51 @@ net_udp_send:
 
 @socket_ready:
         ; Copy length into a decrementing 16-bit counter for the chunk loop.
-        lda udp_send_len_local+0
+        lda net_udp_send_len+0
         sta uci_send_rem+0
-        lda udp_send_len_local+1
+        lda net_udp_send_len+1
         sta uci_send_rem+1
 
         ; Zero-length: nothing to do.
         ora uci_send_rem+0
-        bne @chunk_loop
+        bne @check_fits
         clc
         rts
 
+@check_fits:
+        ; REFUSE anything that will not fit in ONE SOCKET_WRITE.
+        ;
+        ; This loop used to chunk, on the belief recorded here that "each
+        ; SOCKET_WRITE on a connected UDP socket queues bytes into the same
+        ; outgoing datagram boundary (firmware coalesces them)". THAT IS
+        ; FALSE. NetworkTarget::write_socket does one lwip_send per command
+        ; on a SOCK_DGRAM socket, so every chunk is its own DATAGRAM.
+        ; Measured 2026-08-27: a 1452-byte send left the C64 as 800 + 652 —
+        ; two torn datagrams the peer drops — with carry=0 and
+        ; net_last_error=$00, because uci_write_resp is pre-stashed to the
+        ; chunk length so the bookkeeping reads as success. The handshake
+        ; (148 B) hid it for months; only payloads over ~768 B fragment.
+        ;
+        ; For a datagram socket, splitting is never correct. Refuse loudly
+        ; instead: the §13.2 contract says C=1 with net_last_error set, and a
+        ; caller that respects WG_MTU can never reach this (the link-time
+        ; assert in this file guarantees WG_MTU + overhead <= the cap).
+        lda uci_send_rem+1
+        cmp #>UCI_DATA_QUEUE_MAX
+        bcc @chunk_loop             ; hi < cap_hi -> fits
+        bne @too_big                ; hi > cap_hi -> cannot fit
+        lda uci_send_rem+0
+        cmp #<UCI_DATA_QUEUE_MAX
+        beq @chunk_loop             ; exactly the cap -> fits
+        bcc @chunk_loop             ; below the cap -> fits
+@too_big:
+        lda #UCI_ERR_SEND_TOO_LONG
+        sta net_last_error
+        sec
+        rts
+
 @chunk_loop:
-        ; this_chunk = min(uci_send_rem, UCI_DATA_QUEUE_MAX). WireGuard
-        ; MTU packets are typically ~1420 bytes so the outer chunking
-        ; will generally fire twice per datagram. That's benign: each
-        ; SOCKET_WRITE on a connected UDP socket queues bytes into the
-        ; same outgoing datagram boundary (firmware coalesces them).
+        ; Single pass now — the guard above proves uci_send_rem <= the cap.
         lda uci_send_rem+1
         cmp #>UCI_DATA_QUEUE_MAX
         bcc @use_rem
@@ -297,6 +366,9 @@ net_udp_send:
 
 @begin_chunk:
         jsr uci_wait_idle
+        bcc @bc_go              ; wedged before the chunk went out — bail with
+        rts                     ; C=1 so the caller does not count it as sent
+@bc_go:
 
         lda #UCI_TARGET_NETWORK
         jsr uci_begin_cmd
@@ -308,9 +380,9 @@ net_udp_send:
         jsr uci_put_byte
 
         ; Patch the source base into the LDA abs,Y instruction.
-        lda net_send_ptr+0
+        lda net_udp_send_ptr+0
         sta @sb_load+1
-        lda net_send_ptr+1
+        lda net_udp_send_ptr+1
         sta @sb_load+2
 
         ldy #$00
@@ -363,20 +435,30 @@ net_udp_send:
         ; if uci_check_err didn't flag, the whole chunk went out.
         ;
         ; uci_write_resp was pre-stashed = uci_chunk_len at @use_cap/@use_rem,
-        ; so the bookkeeping below still advances net_send_ptr / decrements
+        ; so the bookkeeping below still advances net_udp_send_ptr / decrements
         ; uci_send_rem by the count we actually pushed.
         jsr uci_drain_status
-        jsr uci_wait_idle
+        bcs @sb_wedged
+        ; SOCKET_WRITE returns no response payload, so this path never calls
+        ; uci_drain_resp — which makes it the ONLY transaction in the adapter
+        ; whose accept is not otherwise issued. The accept is mandatory on
+        ; every transaction, sends included: it is what returns the state
+        ; machine to idle, and without it the next PUSH_CMD is silently
+        ; dropped (`else error_busy <= '1'`). Worse, command-byte writes are
+        ; not state-gated, so a dropped command still advances the command
+        ; pointer and every later command lands in a mis-positioned buffer —
+        ; one missing accept corrupts the interface from then on.
+        jsr uci_ack
 @sb_had_write:
 
         ; Advance source pointer by actual written count.
-        lda net_send_ptr+0
+        lda net_udp_send_ptr+0
         clc
         adc uci_write_resp+0
-        sta net_send_ptr+0
-        lda net_send_ptr+1
+        sta net_udp_send_ptr+0
+        lda net_udp_send_ptr+1
         adc uci_write_resp+1
-        sta net_send_ptr+1
+        sta net_udp_send_ptr+1
 
         ; Subtract written count from remaining.
         lda uci_send_rem+0
@@ -401,8 +483,16 @@ net_udp_send:
         clc
         rts
 
+@sb_wedged:
+        ; The FPGA stopped responding mid-send. net_last_error is already
+        ; UCI_ERR_WAIT_TIMEOUT. Report failure rather than letting the
+        ; caller believe the datagram went out — silent send success is
+        ; exactly the failure mode issue #58 cost days to diagnose.
+        sec
+        rts
+
 ; =============================================================================
-; uci_udp_connect — issue UDP_CONNECT(wg_peer_ip, wg_peer_port) to pin the
+; uci_udp_connect — issue UDP_CONNECT(net_udp_dest_ip, net_udp_dest_port) to pin the
 ; socket to the WireGuard peer. Stores the returned socket id in
 ; uci_socket_id. On error, sets net_last_error = UCI_ERR_CONNECT_FAIL
 ; and returns C=1.
@@ -414,15 +504,87 @@ net_udp_send:
 ;   <ASCII dotted-decimal host bytes>, 0x00
 ; Response: 1 byte = socket_id.
 ;
-; NOTE: wg_peer_port is stored big-endian (high byte at +0, low byte at +1)
+; NOTE: net_udp_dest_port is stored big-endian (high byte at +0, low byte at +1)
 ; because disk_config.s::parse_decimal_u16 stores network byte order and
 ; config.s copies it verbatim. The firmware's UDP_CONNECT expects port_lo
 ; then port_hi (little-endian), so we swap here: send +1 first, then +0.
 ;
 ; Clobbers: A, X, Y
 ; =============================================================================
+; net_udp_close — close the firmware UDP socket, if we hold one.
+;
+; The firmware hands back the same UDP handle every time (measured
+; 2026-08-24: 24 consecutive UDP_CONNECTs all returned socket_id 10), so
+; this is not about exhausting a pool. It is about not abandoning a LIVE
+; socket: the U64E poisons its own lease path when the C64 is reset while
+; one is still open, and only a wall power cycle clears that.
+;
+; Safe to call when nothing is open — returns C=0 having done nothing.
+; A firmware-side failure is reported via C=1 but the local bookkeeping is
+; cleared regardless: if we cannot close it we must at least not go on
+; believing we still own it.
+;
+; Output: C=0 on success or nothing-to-do, C=1 if the command failed.
+; Clobbers: A, X, Y
+; =============================================================================
+net_udp_close:
+        lda uci_socket_open
+        beq @uc_none                ; nothing open — nothing to do
+
+        jsr uci_wait_idle
+        bcc @uc_go
+        ; Wedged before we could issue the close. Drop our bookkeeping so a
+        ; later net_udp_send re-connects rather than writing to a handle we
+        ; can no longer manage, and report the timeout.
+        lda #$00
+        sta uci_socket_id
+        sta uci_socket_open
+        sec
+        rts
+@uc_go:
+        lda #UCI_TARGET_NETWORK
+        jsr uci_begin_cmd
+
+        lda #UCI_CMD_SOCKET_CLOSE
+        jsr uci_put_byte
+
+        lda uci_socket_id
+        jsr uci_put_byte
+
+        jsr uci_push_wait
+
+        jsr uci_check_err
+        php                         ; keep the command's verdict across the
+                                    ; drains, which have a carry of their own
+        jsr uci_drain_resp
+        jsr uci_drain_status
+        jsr uci_ack
+
+        ; Clear local state whatever the firmware said.
+        lda #$00
+        sta uci_socket_id
+        sta uci_socket_open
+
+        plp
+        bcc @uc_ok
+        lda #UCI_ERR_CMD_FAILED
+        sta net_last_error
+        sec
+        rts
+@uc_ok:
+        clc
+        rts
+
+@uc_none:
+        clc
+        rts
+
+; =============================================================================
 uci_udp_connect:
         jsr uci_wait_idle
+        bcc @uc_go              ; wedged — no socket was opened, so leave
+        rts                     ; uci_socket_open clear and report C=1
+@uc_go:
 
         lda #UCI_TARGET_NETWORK
         jsr uci_begin_cmd
@@ -430,29 +592,29 @@ uci_udp_connect:
         lda #UCI_CMD_UDP_CONNECT
         jsr uci_put_byte
 
-        ; Port (LE to firmware): wg_peer_port is BE so swap bytes on push.
-        lda wg_peer_port+1      ; low byte of port (BE byte 1)
+        ; Port (LE to firmware): net_udp_dest_port is BE so swap bytes on push.
+        lda net_udp_dest_port+1      ; low byte of port (BE byte 1)
         jsr uci_put_byte
-        lda wg_peer_port+0      ; high byte of port (BE byte 0)
+        lda net_udp_dest_port+0      ; high byte of port (BE byte 0)
         jsr uci_put_byte
 
         ; Peer IP as ASCII dotted-decimal. UCI firmware's CONNECT
         ; commands take a null-terminated hostname string; dotted-quad
         ; form is parsed directly (no DNS). Pushing raw IP bytes leaves
         ; the firmware waiting for a null byte forever.
-        lda wg_peer_ip+0
+        lda net_udp_dest_ip+0
         jsr push_byte_as_ascii
         lda #'.'
         jsr uci_put_byte
-        lda wg_peer_ip+1
+        lda net_udp_dest_ip+1
         jsr push_byte_as_ascii
         lda #'.'
         jsr uci_put_byte
-        lda wg_peer_ip+2
+        lda net_udp_dest_ip+2
         jsr push_byte_as_ascii
         lda #'.'
         jsr uci_put_byte
-        lda wg_peer_ip+3
+        lda net_udp_dest_ip+3
         jsr push_byte_as_ascii
         lda #$00
         jsr uci_put_byte              ; explicit null terminator
@@ -472,6 +634,13 @@ uci_udp_connect:
 
 @uc_no_err:
         ; 1-byte socket_id response.
+        ;
+        ; Pre-zero uci_socket_id so a short read leaves a known sentinel:
+        ; uci_read_resp_bytes only writes the bytes it actually receives,
+        ; so without this the "socket id" is whatever was there before.
+        lda #$00
+        sta uci_socket_id
+
         lda #<uci_socket_id
         sta uci_resp_dst
         lda #>uci_socket_id
@@ -484,7 +653,27 @@ uci_udp_connect:
         jsr uci_drain_status
         jsr uci_ack
 
+        ; PHANTOM-SOCKET GUARD (c64-https issue #36; our issue #58).
+        ; At least one U64E firmware path returns NO payload while clearing
+        ; the error bit. Unvalidated, that left uci_socket_id = 0, the
+        ; caller latched uci_socket_open = 1, and every subsequent
+        ; SOCKET_WRITE went to socket 0 — which the firmware discards.
+        ; The result is the #58 signature exactly: net_last_error = $00,
+        ; carry clear, wg_state advancing, and nothing on the wire.
+        ; Both halves are load-bearing: resp_count catches the short read,
+        ; socket_id catches a returned-but-bogus id.
+        lda uci_resp_count
+        beq @uc_no_socket
+        lda uci_socket_id
+        beq @uc_no_socket
+
         clc
+        rts
+
+@uc_no_socket:
+        lda #UCI_ERR_NO_SOCKET
+        sta net_last_error
+        sec
         rts
 
 ; =============================================================================
@@ -496,26 +685,33 @@ uci_udp_connect:
 ;
 ; Otherwise: SOCKET_READ(sock, 1500). Response = actual_len (2 B) +
 ; payload. Copy payload into udp_recv_buf, store length into udp_recv_len,
-; copy wg_peer_ip into udp_recv_src_ip (connected-UDP: the source is
+; copy net_udp_dest_ip into udp_recv_src_ip (connected-UDP: the source is
 ; always the peer we're pinned to), set udp_recv_ready = 1.
 ;
-; Output: C=0 when a packet was delivered, C=1 when nothing.
+; Output: C=1 ONLY on a backend error, with net_last_error set. C=0 carries
+; NO "data arrived" meaning — per c64-lib-contract SPEC §13.2, "no data" is
+; never an error, and availability is observed via udp_recv_ready. The main
+; loop already reads udp_recv_ready and ignores the carry, so this is a
+; producing-side change only.
 ; Clobbers: A, X, Y
 ; =============================================================================
 net_poll:
         lda uci_socket_open
         bne @sock_ok
-        sec
+        clc                     ; no socket yet — nothing to do, not an error
         rts
 @sock_ok:
         ; Don't clobber an un-consumed inbound packet.
         lda udp_recv_ready
         beq @do_poll
-        sec
+        clc                     ; caller has not drained the last one yet
         rts
 
 @do_poll:
         jsr uci_wait_not_busy
+        bcc @dp_go              ; wedged — surface as a poll error (§13.2:
+        rts                     ; C=1 is reserved for real backend errors)
+@dp_go:
 
         lda #UCI_TARGET_NETWORK
         jsr uci_begin_cmd
@@ -568,11 +764,12 @@ net_poll:
         jmp @hdr_done
 
 @hdr_none:
-        ; <2 bytes returned: nothing to deliver.
+        ; <2 bytes returned: nothing to deliver. §13.2 — no datagram is not
+        ; an error, so C=0 with udp_recv_ready left clear.
         jsr uci_drain_resp
         jsr uci_drain_status
         jsr uci_ack
-        sec
+        clc
         rts
 
 @hdr_done:
@@ -581,7 +778,7 @@ net_poll:
         ; The byte loop below stores through an SMC address that bumps its
         ; own high byte every time Y wraps, so this count is the ONLY thing
         ; bounding where it writes. udp_recv_buf holds 1500 bytes and
-        ; udp_recv_len / udp_recv_src_ip / wg_peer_ip / wg_state sit
+        ; udp_recv_len / udp_recv_src_ip / net_udp_dest_ip / wg_state sit
         ; immediately after it in data.s, so an over-long count does not
         ; merely overflow a buffer — it eats the network state that the
         ; receive path itself depends on, then keeps going into $D000 I/O.
@@ -599,14 +796,50 @@ net_poll:
         ; DROP rather than trim: a length we do not believe means the
         ; response framing is not what we think it is, so the payload bytes
         ; behind it cannot be trusted either.
+        ; $FFFF FIRST: it is the firmware's NO-DATA sentinel, not a length.
+        ; Measured 2026-08-24 — with nothing pending, every SOCKET_READ on a
+        ; UDP socket returns header $FFFF. Without this test that sentinel
+        ; falls through the over-claim check below (since $FFFF > 512) and
+        ; every idle poll reports UCI_ERR_LONG_READ, which is exactly why
+        ; docs/hardware-validation-runbook.md recorded $8A as "firing
+        ; routinely during healthy sessions". It was never an over-claim;
+        ; it was an empty read misfiled as a framing violation. c64-https
+        ; sees the same $FFFF sentinel on TCP (their #140).
+        ;
+        ; §13.2: no data is NEVER an error, so this exits C=0 with
+        ; udp_recv_ready left clear and net_last_error untouched.
+        lda uci_read_hdr+0
+        and uci_read_hdr+1
+        cmp #$FF
+        beq @hdr_none               ; $FFFF — nothing pending, not an error
+
+        ; Full 16-bit "header > cap" comparison. The previous form ended
+        ; `lda uci_read_hdr+0 / beq @len_ok`, i.e. it accepted the equal-high-
+        ; byte case ONLY when the low byte was zero. That is correct for a cap
+        ; of 512 ($0200) and silently wrong for any other shape: measured
+        ; 2026-08-26 with the cap at 893 ($037D), datagrams of 800/861/893 —
+        ; all legal, all delivered by the firmware — were DROPPED by this
+        ; check and reported as $8A, because their high byte was $03 and their
+        ; low byte was not zero. A guard whose correctness depends on the
+        ; low byte of an unrelated constant is a trap for the next person to
+        ; retune the cap, which is exactly what happened.
         lda uci_read_hdr+1
         cmp #>UCI_READ_CHUNK_MAX
-        bcc @len_ok                 ; hi < 2 → certainly under the cap
-        bne @len_bad                ; hi > 2 → certainly over it
-        lda uci_read_hdr+0          ; hi == 2 → only exactly 512 is legal
-        beq @len_ok
+        bcc @len_ok                 ; hi < cap_hi → certainly under
+        bne @len_bad                ; hi > cap_hi → certainly over
+        lda uci_read_hdr+0          ; hi == cap_hi → decide on the low byte
+        cmp #<UCI_READ_CHUNK_MAX
+        beq @len_ok                 ; exactly the cap → legal
+        bcc @len_ok                 ; below the cap → legal
 
 @len_bad:
+        ; A genuine over-claim: a length above what we requested that is NOT
+        ; the $FFFF sentinel. On a datagram socket the excess is discarded by
+        ; the firmware (GideonZ/1541ultimate#802), so the datagram is
+        ; unrecoverable and dropping it is the only correct action —
+        ; contrast c64-https, which caps on a stream because the remainder
+        ; stays queued.
+
         lda #UCI_ERR_LONG_READ
         sta net_last_error
         jsr uci_drain_resp
@@ -625,10 +858,11 @@ net_poll:
         sta udp_recv_len+1
         ora uci_poll_rem+0
         bne @have_data
+        ; Zero-length read: no datagram. §13.2 — not an error.
         jsr uci_drain_resp
         jsr uci_drain_status
         jsr uci_ack
-        sec
+        clc
         rts
 
 @have_data:
@@ -652,7 +886,7 @@ net_poll:
         uci_fence                   ; settle before testing DATA_AV
         and #UCI_STAT_DATA_AV
         bne @have_byte
-        jmp @done_data
+        jmp @block_end          ; block exhausted — may be Data More
 
 @have_byte:
         lda UCI_RESP_DATA
@@ -672,29 +906,58 @@ net_poll:
         sta uci_poll_rem+1
         jmp @byte_loop
 
+@block_end:
+        ; DATA_AV cleared. Under fw 3.15 a reply larger than one response
+        ; block is handed over in pieces via the command interface's Data
+        ; More mechanism (GideonZ/1541ultimate#806), so this is the end of a
+        ; BLOCK, not necessarily the end of the reply. The 2-byte header is
+        ; the TOTAL payload length, so uci_poll_rem still holds what is
+        ; outstanding; concatenating the blocks yields exactly the datagram a
+        ; single large queue would have delivered.
+        ;
+        ; STATE ($30) distinguishes them: $20 = Data Last, $30 = Data More.
+        lda uci_poll_rem+0
+        ora uci_poll_rem+1
+        beq @done_data          ; nothing outstanding — reply complete
+
+        lda UCI_STATUS
+        uci_fence               ; settle before testing STATE
+        and #UCI_STAT_STATE
+        cmp #(UCI_STAT_STATE)   ; $30 = Data More
+        bne @done_data          ; Data Last with bytes outstanding: short
+                                ; reply, take what we got rather than hang
+
+        ; Accept this block. Because state(0)=1 this signals the Ultimate to
+        ; produce the next one and moves the machine to Command Busy rather
+        ; than Idle, so we must wait for it to present the next block.
+        jsr uci_ack
+        jsr uci_wait_not_busy
+        bcs @done_data          ; wedged waiting for the continuation
+        jmp @byte_loop          ; resume into the SAME buffer, Y/SMC intact
+
 @done_data:
         jsr uci_drain_resp
         jsr uci_drain_status
         jsr uci_ack
 
-        ; Connected UDP: source IP == wg_peer_ip. Copy it directly.
-        lda wg_peer_ip+0
+        ; Connected UDP: source IP == net_udp_dest_ip. Copy it directly.
+        lda net_udp_dest_ip+0
         sta udp_recv_src_ip+0
-        lda wg_peer_ip+1
+        lda net_udp_dest_ip+1
         sta udp_recv_src_ip+1
-        lda wg_peer_ip+2
+        lda net_udp_dest_ip+2
         sta udp_recv_src_ip+2
-        lda wg_peer_ip+3
+        lda net_udp_dest_ip+3
         sta udp_recv_src_ip+3
 
-        ; Source port == wg_peer_port (big-endian in the ip65 adapter's
+        ; Source port == net_udp_dest_port (big-endian in the ip65 adapter's
         ; contract, but the WG upper layers only check for equality with
-        ; the peer's stored port, so we mirror wg_peer_port's LE form
+        ; the peer's stored port, so we mirror net_udp_dest_port's LE form
         ; straight across — udp_recv_src_port is not load-bearing under
         ; the connected-UDP model).
-        lda wg_peer_port+0
+        lda net_udp_dest_port+0
         sta udp_recv_src_port+0
-        lda wg_peer_port+1
+        lda net_udp_dest_port+1
         sta udp_recv_src_port+1
 
         lda #$01
@@ -848,10 +1111,10 @@ net_restore_zp:
 ; =============================================================================
 .segment "UCI_BSS"
 
-net_send_ptr:       .res 2          ; caller-visible: buffer pointer
-udp_send_len_local: .res 2          ; caller-visible: 16-bit length
+net_udp_send_ptr:       .res 2          ; caller-visible: buffer pointer
+net_udp_send_len: .res 2          ; caller-visible: 16-bit length
 
-net_local_ip:       .res 4          ; local IPv4 (filled by net_dhcp)
+net_local_ip:       .res 4          ; local IPv4 (filled by net_dhcp_acquire)
 net_last_error:     .res 1          ; 0 = OK, nonzero = UCI_ERR_*
 
 uci_ipaddr_resp:    .res 12         ; scratch for GET_IPADDR response

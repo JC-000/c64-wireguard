@@ -60,16 +60,27 @@ from test_uci_udp_echo_live import (  # type: ignore[import-not-found]
 from uci.udp_size_responder import UDPSizeResponder, make_pattern  # type: ignore[import-not-found]
 
 ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
-SIZES = [32, 100, 256, 400, 480, 512, 600, 768, 1024, 1280, 1500]
+# Sweep chosen to bracket every boundary this adapter cares about:
+#   860  = WG_MTU, the send-bound tunnel MTU
+#   892  = UCI_DATA_QUEUE_MAX, the largest single SOCKET_WRITE payload
+#   893  = one over it (a split, historically silent)
+#   1420 = a standard-MTU WireGuard datagram — exercises the fw 3.15
+#          multi-block Data More receive path
+#   1472 = UCI_READ_CHUNK_MAX, the largest datagram that reaches the device
+#          at all (lwIP IP_REASSEMBLY = 0)
+# Probe LARGE-FIRST on a freshly power-cycled unit: this device degrades after
+# roughly five program loads, and sizes measured late in a session report that
+# degradation as if it were firmware behaviour.
+SIZES = [1472, 1420, 1000, 893, 892, 860, 600, 512, 32]
 PER_SIZE_TIMEOUT = 3.0
 
 
 def _required_labels() -> list[str]:
     return [
-        "main_loop", "net_init", "net_dhcp", "net_udp_listen", "net_udp_send",
+        "main_loop", "net_init", "net_dhcp_acquire", "net_udp_listen", "net_udp_send",
         "net_poll", "net_local_ip", "net_last_error", "mul_dma_hi",
-        "wg_peer_ip", "wg_peer_port", "wg_local_port",
-        "udp_recv_ready", "udp_recv_len", "udp_recv_buf", "udp_send_len_local",
+        "wg_peer_ip", "wg_peer_port", "net_udp_dest_ip", "net_udp_dest_port", "wg_local_port",
+        "udp_recv_ready", "udp_recv_len", "uci_read_hdr", "uci_status_buf", "uci_status_len", "udp_recv_buf", "net_udp_send_len",
     ]
 
 
@@ -79,10 +90,16 @@ def _setup_peer(tr: Ultimate64Transport, L: dict, host_ip: str, port: int) -> No
     # wg_peer_port = BE (ip65 native + disk_config storage; uci/net.s swaps
     # on push). wg_local_port = LE (net_udp_listen stores A=lo,X=hi).
     write_bytes(tr, L["wg_peer_port"], bytes([port >> 8, port & 0xFF]))
+    # §13.1: the backend reads net_udp_dest_*, NOT wg_peer_*.
+    # In the app these are staged by session_stage_dest before each
+    # send; a host-side driver calling net_udp_send directly is the
+    # caller and must stage them itself.
+    write_bytes(tr, L["net_udp_dest_ip"], octets)
+    write_bytes(tr, L["net_udp_dest_port"], bytes([port >> 8, port & 0xFF]))
     write_bytes(tr, L["wg_local_port"], bytes([port & 0xFF, port >> 8]))
     write_bytes(tr, L["udp_recv_ready"], bytes([0]))
     write_bytes(tr, L["udp_recv_len"], bytes([0, 0]))
-    write_bytes(tr, L["udp_send_len_local"], bytes([len(TEST_PAYLOAD), 0]))
+    write_bytes(tr, L["net_udp_send_len"], bytes([len(TEST_PAYLOAD), 0]))
     log.info("peer set to %s:%d", host_ip, port)
 
 
@@ -112,8 +129,11 @@ def _probe_one_size(
 ) -> dict:
     responder.response_size = size
     _reset_recv_state(tr, L)
+    # Arm the sticky status capture: zero the length so this iteration's
+    # first status line is the one that sticks.
+    write_bytes(tr, L["uci_status_len"], bytes([0]))
     write_bytes(tr, SEND_BUF, TEST_PAYLOAD)
-    write_bytes(tr, L["udp_send_len_local"], bytes([len(TEST_PAYLOAD), 0]))
+    write_bytes(tr, L["net_udp_send_len"], bytes([len(TEST_PAYLOAD), 0]))
 
     # Kick the responder.
     requests_before = responder.responses_sent
@@ -136,12 +156,28 @@ def _probe_one_size(
     deadline = time.monotonic() + PER_SIZE_TIMEOUT
     ready = 0
     while time.monotonic() < deadline:
-        _run_step(tr, step_id=STEP_POLL, target=L["net_poll"])
+        _run_step(tr, step_id=STEP_POLL, target=L["net_poll"], timeout=45.0)  # TEMP: 893 B reads are fence-bound at 1 MHz
         polls += 1
         ready = tr.read_memory(L["udp_recv_ready"], 1)[0]
         if ready:
             break
         time.sleep(0.02)
+
+    # Raw SOCKET_READ response header, BEFORE the §13.3 validation consumes
+    # it. Read unconditionally: the interesting case is an oversized datagram
+    # where nothing was delivered, and gating on `ready` would miss exactly
+    # that row. c64-lib-contract#139 records this value as unmeasured.
+    hlo, hhi = tr.read_memory(L["uci_read_hdr"], 2)
+    rx_hdr = hlo | (hhi << 8)
+
+    # fw 3.15 reports "04,DATAGRAM TRUNCATED: <real length>" on the $DF1F
+    # status line. uci_drain_status now captures it instead of discarding it.
+    n = tr.read_memory(L["uci_status_len"], 1)[0]
+    # DIAGNOSTIC: read the whole buffer regardless of the length byte, so we
+    # can tell "only one byte captured" from "buffer full, length wrong".
+    raw = bytes(tr.read_memory(L["uci_status_buf"], 40))
+    printable = "".join(chr(b) if 32 <= b < 127 else "." for b in raw)
+    status = f"len={n} [{printable}]"
 
     rx_len = 0
     rx_first = b""
@@ -168,7 +204,7 @@ def _probe_one_size(
     if ready:
         write_bytes(tr, L["udp_recv_ready"], bytes([0]))
         write_bytes(tr, L["udp_recv_len"], bytes([0, 0]))
-        _run_step(tr, step_id=STEP_POLL, target=L["net_poll"])
+        _run_step(tr, step_id=STEP_POLL, target=L["net_poll"], timeout=45.0)  # TEMP: 893 B reads are fence-bound at 1 MHz
         second_ready = tr.read_memory(L["udp_recv_ready"], 1)[0]
         if second_ready:
             lo, hi = tr.read_memory(L["udp_recv_len"], 2)
@@ -177,6 +213,8 @@ def _probe_one_size(
     nle_final = tr.read_memory(L["net_last_error"], 1)[0]
     return {
         "size": size,
+        "rx_hdr": rx_hdr,
+        "status": status,
         "send_carry": send_carry,
         "nle_after_send": nle_after_send,
         "sent_back": sent_back,
@@ -194,17 +232,17 @@ def _probe_one_size(
 def _print_summary(results: list[dict]) -> None:
     print()
     print("=" * 90)
-    print(f"{'requested':>9} {'rx_len':>7} {'polls':>6} {'sent_back':>9} "
+    print(f"{'requested':>9} {'rx_len':>7} {'hdr':>7} {'polls':>6} {'sent_back':>9} "
           f"{'ready':>5} {'2nd?':>5} {'2nd_len':>8} "
-          f"{'nle':>4}  first16 / tail16")
+          f"{'nle':>4}  status")
     print("-" * 90)
     for r in results:
         first = r["rx_first16"]
         tail = r["rx_tail16"]
         print(
-            f"{r['size']:>9} {r['rx_len']:>7} {r['polls']:>6} {str(r['sent_back']):>9} "
+            f"{r['size']:>9} {r['rx_len']:>7} {('$%04X' % r['rx_hdr']):>7} {r['polls']:>6} {str(r['sent_back']):>9} "
             f"{r['ready']:>5} {r['second_ready']:>5} {r['second_len']:>8} "
-            f"{r['nle_final']:>4}  {first}{(' / ' + tail) if tail else ''}"
+            f"{r['nle_final']:>4}  {r.get('status','')}"
         )
     print("=" * 90)
 
@@ -293,7 +331,7 @@ def main() -> int:
         c = _run_step(tr, step_id=STEP_INIT, target=L["net_init"])
         if c != 0:
             log.error("net_init failed; aborting probe"); return 1
-        _run_step(tr, step_id=STEP_DHCP, target=L["net_dhcp"])
+        _run_step(tr, step_id=STEP_DHCP, target=L["net_dhcp_acquire"])
         _run_step(tr, step_id=STEP_LISTEN, target=L["net_udp_listen"],
                   reg_a=responder.port & 0xFF, reg_x=responder.port >> 8)
 

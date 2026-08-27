@@ -93,7 +93,7 @@ The full memory layout is defined in `cfg/c64-wireguard-ip65.cfg` and `cfg/c64-w
 | `src/exports.s` | Promotes ZP equates to linker-visible labels for the test harness |
 | `src/constants.inc` | Zero page variables, hardware equates (header, not assembled directly) |
 | `src/crypto_abi.inc` | Public crypto ABI contract (fe25519_*, x25519_*, chacha20_*, poly1305_*, aead_*, blake2s_*) matching the sibling libraries |
-| `src/net_abi.inc` | Public UDP networking ABI contract (net_init, net_dhcp, net_poll, net_udp_*) |
+| `src/net_abi.inc` | Public UDP networking ABI contract (net_init, net_dhcp_acquire, net_poll, net_udp_*) |
 | `src/contract_asserts.s` | Link-time c64-lib-contract checks: REU bank masks disjoint, §8.0 shared-primitive ownership, sibling ABI version |
 | `libs/x25519/` | c64-x25519 submodule (v0.11.2) — X25519 + fe25519, the shipped implementation; built via its own `make lib` |
 | `libs/chacha20poly1305/` | c64-ChaCha20-Poly1305 submodule (v0.9.0) — ChaCha20/Poly1305/AEAD/word32, the shipped implementation |
@@ -236,7 +236,7 @@ After enough back-to-back sessions on one power cycle, the U64E stops delivering
 
 This affects **both builds and both clock speeds**. It is device/firmware state, not a property of any configuration: an identical REU binary failed six consecutive runs and then passed immediately after a power cycle, with the hash verified on both sides of it.
 
-The consumer-visible defect is that `net_udp_send` reports success when the write did not happen. This firmware's UCI write status cannot distinguish the two ([#45](https://github.com/JC-000/c64-wireguard/issues/45), [#46](https://github.com/JC-000/c64-wireguard/issues/46) cover the adapter hardening), so a silent send is indistinguishable from a real one from the C64's side. If a session that previously worked stops delivering, power-cycle the Ultimate before suspecting the build.
+The consumer-visible defect is that `net_udp_send` reports success when the write did not happen. This firmware's UCI write status cannot distinguish the two, so a silent send is indistinguishable from a real one from the C64's side. If a session that previously worked stops delivering, power-cycle the Ultimate before suspecting the build.
 
 An earlier revision of this section attributed the same symptom to `REU=0` at 1 MHz and to a socket that could not survive a 25-minute computation. That diagnosis was wrong — it was device state — and is retracted. What remains genuinely untested is `REU=0` at 1 MHz on a *healthy* device: the only run of that combination happened on a degraded one, so its 25.1-minute Type-1 computation is a sound measurement while its delivery failure proves nothing.
 
@@ -358,11 +358,33 @@ Each packet is encrypted with ChaCha20-Poly1305 AEAD using the transport key der
 
 ### Networking
 
-Two interchangeable backends sit behind the `src/net_abi.inc` façade (`net_init`, `net_dhcp`, `net_poll`, `net_udp_listen`, `net_udp_send`, `net_udp_recv_cb`); higher-level modules (handshake, transport, session) only use these ABI names. Select with `make BACKEND=ip65|uci`.
+Two interchangeable backends sit behind the `src/net_abi.inc` façade (`net_init`, `net_dhcp_acquire`, `net_poll`, `net_udp_listen`, `net_udp_send`, `net_udp_recv_cb`); higher-level modules (handshake, transport, session) only use these ABI names. Select with `make BACKEND=ip65|uci`.
 
 **ip65 / RR-Net** (`BACKEND=ip65`, the default — VICE-testable): UDP via [ip65](https://github.com/cc65/ip65), driving the RR-Net CS8900a ethernet adapter. The ip65 library is built as a standalone binary blob (ca65/ld65) and linked into the final PRG at $2000 via ca65's `.incbin` directive in `src/net/ip65/ip65_blob.s`. A 10-entry jump table provides: init, process, DHCP, DNS, UDP add/remove listener, UDP send, and helper wrappers. The UDP receive callback fires during `ip65_process` while ip65 owns the zero page; it copies incoming data to `udp_recv_buf` and sets a flag for the main loop — no crypto ZP is touched.
 
-**UCI** (`BACKEND=uci` — the hardware-proven backend for the milestone and v1.0.0 runs): the same ABI implemented over the Ultimate 64 / C64 Ultimate Command Interface sockets ($DF1B-$DF1F, `src/net/uci/`), no ip65 dependency. Firmware caveats: inbound `SOCKET_READ` is capped at 512 bytes (larger datagrams are truncated — #46 tracks pinning the WG MTU accordingly), and the busy-wait loops are currently unbounded (#45). See `docs/hardware-validation-runbook.md`.
+**UCI** (`BACKEND=uci` — the hardware-proven backend for the milestone and v1.0.0 runs): the same ABI implemented over the Ultimate 64 / C64 Ultimate Command Interface sockets ($DF1B-$DF1F, `src/net/uci/`), no ip65 dependency. Firmware caveats: inbound `SOCKET_READ` is capped at 512 bytes and the firmware **truncates** larger datagrams rather than splitting them, which pins the tunnel MTU — see [Tunnel MTU](#tunnel-mtu) below ([#46](https://github.com/JC-000/c64-wireguard/issues/46)). The device busy-waits are now wall-clock bounded ([#45](https://github.com/JC-000/c64-wireguard/issues/45)). See `docs/hardware-validation-runbook.md`.
+
+### Tunnel MTU
+
+**Peers must be configured with `MTU = 861`.** WireGuard's default is 1420; leaving it there will appear to work and then fail on anything large.
+
+A WireGuard Type-4 datagram is `payload + 32` (16-byte header + 16-byte Poly1305 tag), and one `SOCKET_READ` on this firmware can deliver at most **893** bytes — so the largest inner payload is `893 − 32 = 861`.
+
+```ini
+[Interface]
+MTU = 861
+```
+
+**Why 893 and not 894:** the firmware's own limit is 894 (`CMD_MAX_REPLY_LEN` 896 minus the 2-byte length header), but a read of *exactly* 894 builds a 896-byte reply — precisely the response-queue size — and the FPGA then stops the response pointer while still asserting `DATA_AV`, so the queue repeats its last byte forever. 893 is the largest value that both fits and drains. Requests above 894 are rejected with `82,PARAMETER(S) OUT OF RANGE` on the status channel.
+
+**Correction (2026-08-26).** This section previously stated `MTU = 480` and called `512 − 32` a *measured hardware ceiling*. That was wrong, and the mistake is worth recording: 512 was **this project's own** `UCI_READ_CHUNK_MAX`, chosen as a Phase 3 MVP value. Having only ever asked for 512, we measured that we only ever received 512 and concluded the firmware could do no more. The one larger request we tried (1024) returned nothing, which looked like confirmation — but 1024 is above the real 894 cap and was being *rejected* on the status channel, which this adapter drains without reading. Every individual measurement was sound; the inference joining them was not. Root-caused upstream by chrisgleissner ([GideonZ/1541ultimate#802](https://github.com/GideonZ/1541ultimate/issues/802)) and re-measured here on our own U64E: datagrams of 512, 600, 700, 800, 861 and 893 bytes all arrive whole in a single `net_poll`, the header reporting the true length.
+
+**A standard 1420-byte MTU is still unreachable**, for two independent reasons:
+
+- One `READ_SOCKET` delivers at most 893 bytes, and a datagram larger than the request is truncated with the remainder **discarded, not queued** — so multi-read reassembly cannot recover it. Reading a 1420-byte packet whole needs Data More support on the network target, which the firmware does not implement.
+- **1472 bytes** is the largest datagram that reaches the device at all: lwIP is built with `IP_REASSEMBLY = 0`, so anything that fragments is dropped before a socket sees it. That applies to every network service on the device, not just UCI.
+
+**Cost at stock speed.** Every byte read carries a `uci_fence`, and the C64-Ultimate-conformant fence (`UCI_FENCE_INNER = 217`) is ~5.45 ms at 1 MHz — so an 893-byte read takes several seconds of wall clock at stock speed, against roughly a tenth of that at 48 MHz. Raising the MTU raises that cost proportionally. It is a genuine tension between §13.6 conformance and the no-REU/1 MHz configuration.
 
 ### Session State Machine
 

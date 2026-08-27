@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Live Ultimate 64 Elite test: UCI backend UDP echo end-to-end.
 
-Drives net_init -> net_dhcp -> net_udp_listen -> net_udp_send -> net_poll
+Drives net_init -> net_dhcp_acquire -> net_udp_listen -> net_udp_send -> net_poll
 on real hardware against a host-side UDP echo server, under a full
 debug-bus-cycle capture so any failure can be root-caused from the
 trace artifact.
@@ -251,10 +251,10 @@ def _ensure_gitignore_artifacts() -> None:
 
 
 REQUIRED_LABELS = (
-    "main_loop", "net_init", "net_dhcp", "net_udp_listen", "net_udp_send",
+    "main_loop", "net_init", "net_dhcp_acquire", "net_udp_listen", "net_udp_send",
     "net_poll", "net_local_ip", "net_last_error", "mul_dma_hi",
-    "wg_peer_ip", "wg_peer_port", "wg_local_port",
-    "udp_recv_ready", "udp_recv_len", "udp_recv_buf", "udp_send_len_local",
+    "wg_peer_ip", "wg_peer_port", "net_udp_dest_ip", "net_udp_dest_port", "wg_local_port",
+    "udp_recv_ready", "udp_recv_len", "udp_recv_buf", "net_udp_send_len",
 )
 
 
@@ -276,11 +276,17 @@ def _run_sequence(
              local_ip, listener.port, ip_bytes.hex(), port_be.hex(), port_le.hex())
     write_bytes(tr, L["wg_peer_ip"], ip_bytes)
     write_bytes(tr, L["wg_peer_port"], port_be)
+    # §13.1: the backend reads net_udp_dest_*, NOT wg_peer_*. In the app
+    # session_stage_dest copies peer -> dest before each send; a host-side
+    # driver that calls net_udp_send directly IS the caller and must stage
+    # them itself. Omitting this sends to 0.0.0.0 with carry clear.
+    write_bytes(tr, L["net_udp_dest_ip"], ip_bytes)
+    write_bytes(tr, L["net_udp_dest_port"], port_be)
     write_bytes(tr, L["wg_local_port"], port_le)
     write_bytes(tr, L["udp_recv_ready"], bytes([0]))
     write_bytes(tr, L["udp_recv_len"], bytes([0, 0]))
     write_bytes(tr, SEND_BUF, TEST_PAYLOAD)
-    write_bytes(tr, L["udp_send_len_local"], bytes([len(TEST_PAYLOAD), 0]))
+    write_bytes(tr, L["net_udp_send_len"], bytes([len(TEST_PAYLOAD), 0]))
     _install_trampoline(tr, L["main_loop"])
     time.sleep(0.05)
 
@@ -297,21 +303,21 @@ def _run_sequence(
                     "$81=NOT_PRESENT, $82=CMD_FAILED)" % nle)
     if nle != 0:
         fail.append(f"net_last_error=${nle:02X} after net_init")
-    # If net_init failed, STOP. net_dhcp and later calls read $DF1x
+    # If net_init failed, STOP. net_dhcp_acquire and later calls read $DF1x
     # registers without their own UCI_ID probe — on a non-UCI device
     # they hang. Respect the init contract: no further backend calls
     # unless init succeeded.
     if c != 0:
-        log.warning("skipping net_dhcp + later steps — net_init did not succeed")
+        log.warning("skipping net_dhcp_acquire + later steps — net_init did not succeed")
         return fail
-    # net_dhcp
-    c, nle = call("net_dhcp", STEP_DHCP)
+    # net_dhcp_acquire
+    c, nle = call("net_dhcp_acquire", STEP_DHCP)
     ip = tr.read_memory(L["net_local_ip"], 4)
     log.info("net_local_ip=%s", ".".join(str(b) for b in ip))
     if c != 0:
-        fail.append(f"net_dhcp C=1 (net_last_error=${nle:02X})")
+        fail.append(f"net_dhcp_acquire C=1 (net_last_error=${nle:02X})")
     if ip == bytes(4):
-        fail.append("net_local_ip == 0.0.0.0 after net_dhcp")
+        fail.append("net_local_ip == 0.0.0.0 after net_dhcp_acquire")
     # net_udp_listen
     c, _ = call("net_udp_listen", STEP_LISTEN,
                 reg_a=listener.port & 0xFF, reg_x=listener.port >> 8)

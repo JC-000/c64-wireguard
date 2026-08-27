@@ -15,6 +15,11 @@
 
         .include "constants.inc"
         .include "net_abi.inc"
+
+        ; Not part of the §13.1 contract surface — imported explicitly so the
+        ; dependency on an adapter extra is visible here, not implied by
+        ; net_abi.inc. See that header's closing note.
+        .import net_print_ip
         .include "crypto_abi.inc"
 
 ; --- Exports --------------------------------------------------------------
@@ -69,7 +74,7 @@
         .import config_read_file        ; src/wg/disk_config.s
         .import entropy_init            ; src/crypto/entropy.s
 
-; (net_init, net_dhcp, net_poll, net_udp_listen, net_print_ip come via
+; (net_init, net_dhcp_acquire, net_poll, net_udp_listen, net_print_ip come via
 ;  net_abi.inc; sqtab_init, reu_mul_init come via crypto_abi.inc.)
 
 ; =============================================================================
@@ -226,6 +231,11 @@ do_cfg:
         jmp     main_loop
 
 quit:
+        ; Hand the firmware socket back before we go. Abandoning a live one
+        ; poisons the U64E's UCI lease path until a wall power cycle — see
+        ; net_udp_close and issue #58. Safe when nothing is open.
+        jsr     net_udp_close
+
         ; restore BASIC ROM before returning
         lda     proc_port
         ora     #$01
@@ -258,7 +268,7 @@ do_net_init:
         jsr     print_string
 
         ; request DHCP
-        jsr     net_dhcp
+        jsr     net_dhcp_acquire
         bcc     @dhcp_ok
 
         ; DHCP failed
