@@ -93,4 +93,4 @@ REKEY_COUNTER_B7    = $0F
 ;
 ; PEERS MUST BE CONFIGURED WITH MTU = 861 (see README).
 WG_DATA_OVERHEAD    = 32        ; 16 B Type-4 header + 16 B Poly1305 tag
-WG_MTU              = 861       ; = 893 - WG_DATA_OVERHEAD
+WG_MTU              = 860       ; = 892 - WG_DATA_OVERHEAD (SEND-bound)

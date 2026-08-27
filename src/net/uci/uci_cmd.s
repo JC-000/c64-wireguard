@@ -43,6 +43,8 @@
 .export uci_read_resp_bytes
 .export uci_drain_resp
 .export uci_drain_status
+.export uci_status_buf
+.export uci_status_len
 .export uci_ack
 
 .export uci_resp_dst
@@ -387,9 +389,27 @@ uci_drain_resp:
 @drn_have:
         lda UCI_RESP_DATA
         uci_fence                   ; settle before NEXT_DATA write
-        lda #UCI_CTRL_NEXT_DATA
-        sta UCI_CONTROL
-        uci_fence
+        ; NO PER-BYTE ACK. Reading UCI_RESP_DATA / UCI_STATUS_DATA advances the
+        ; queue pointer by itself (command_protocol.vhd: io_read on the
+        ; response/status slots does `pointer <= pointer + 1`). Control bit 1
+        ; is DATA_ACC, and the Register API v1.1 §2.4.1 is explicit about what
+        ; it costs:
+        ;
+        ;   "Writing to this bit also causes the transfer of the data/status
+        ;    queues to be aborted and reset. Thus, the data response and status
+        ;    response queues will be empty after writing this bit."
+        ;
+        ; So a per-byte pulse FLUSHES both queues — it read one byte and threw
+        ; the rest away, which is why our status capture only ever saw the
+        ; first character of the status line.
+        ;
+        ; The canonical order (Gideon's own uci_wedge.s, and every wrapper in
+        ; the reference C lib) is: push command -> read response -> read status
+        ; -> ONE DATA_ACC. Nothing is written to $DF1C between the two reads.
+        ; That single accept is load-bearing, not optional: it releases the
+        ; state machine back to idle, and without it the next PUSH_CMD lands on
+        ; `else error_busy <= '1'` and is silently dropped. net_poll and the
+        ; other command paths issue it once per exit via uci_ack.
 
         ; Check TOD for elapsed tenths. Latch (HOUR) then read TENTHS.
         lda CIA_TOD_HOUR
@@ -417,6 +437,26 @@ uci_drain_resp:
 ; =============================================================================
 uci_drain_status:
         ; TOD-bounded; see uci_drain_resp for why the counted cap is gone.
+        ;
+        ; Now CAPTURES as well as drains. The status line at $DF1F is where
+        ; every UCI target reports its result — the transport ERROR bit in
+        ; $DF1C means only "a command was sent while not idle" and is not a
+        ; target result channel. Draining this without reading it is why a
+        ; SOCKET_READ rejected with `82,PARAMETER(S) OUT OF RANGE` looked
+        ; like an empty read for months, and it is what fw 3.15's new
+        ; `04,DATAGRAM TRUNCATED: <real length>` would otherwise be invisible
+        ; through. The first UCI_STATUS_MAX bytes land in uci_status_buf and
+        ; the total seen goes in uci_status_len; the rest still drains.
+        ;
+        ; The length is committed only if this drain actually saw bytes, so a
+        ; later EMPTY drain cannot erase an earlier meaningful status. net_poll
+        ; drains status several times per cycle and the last one runs after the
+        ; data has been copied — resetting unconditionally captured that final
+        ; empty drain and threw away the "04,DATAGRAM TRUNCATED: <len>" line
+        ; belonging to the read. uci_status_len therefore holds the most recent
+        ; NON-EMPTY status; the consumer clears it when it has acted on one.
+        lda #$00
+        sta @dst_idx
         lda CIA_TOD_HOUR
         lda CIA_TOD_TENTHS
         sta @dst_last_tenths
@@ -427,14 +467,22 @@ uci_drain_status:
         uci_fence                   ; settle before testing STAT_AV
         and #UCI_STAT_STAT_AV
         bne @dst_have
+        jsr @dst_commit
         clc
         rts
 @dst_have:
         lda UCI_STATUS_DATA
         uci_fence                   ; settle before NEXT_DATA write
-        lda #UCI_CTRL_NEXT_DATA
-        sta UCI_CONTROL
-        uci_fence
+        ; Stash it if there is room. X is free here (the TOD version clobbers
+        ; A only), so use it as the index and restore nothing.
+        ldx @dst_idx
+        cpx #UCI_STATUS_MAX
+        bcs @dst_no_room
+        sta uci_status_buf,x
+        inx
+        stx @dst_idx
+@dst_no_room:
+        ; NO PER-BYTE ACK — see uci_drain_resp.
 
         ; Check TOD for elapsed tenths. Latch (HOUR) then read TENTHS.
         lda CIA_TOD_HOUR
@@ -448,12 +496,40 @@ uci_drain_status:
         bcc @dst_loop_long          ; under budget — continue
         lda #UCI_ERR_WAIT_TIMEOUT
         sta net_last_error
+        jsr @dst_commit
         sec
+        rts
+@dst_commit:
+        ; STICKY-FIRST, and the direction matters. net_poll drains status
+        ; several times per cycle: the FIRST drain after a command consumes the
+        ; whole line, and later drains catch at most a stray byte. Publishing
+        ; the LAST non-empty capture therefore let a 1-byte remnant overwrite
+        ; the real "04,DATAGRAM TRUNCATED: <len>" — measured, and it looked
+        ; exactly like the firmware not emitting the status at all. So the
+        ; first capture wins and stays until the consumer zeroes
+        ; uci_status_len to arm the next one.
+        lda @dst_idx
+        beq @dst_commit_done        ; nothing captured this time
+        ldx uci_status_len
+        bne @dst_commit_done        ; one already held, do not clobber it
+        sta uci_status_len
+@dst_commit_done:
         rts
 @dst_loop_long:
         jmp @dst_loop               ; long branch: fence too wide for BEQ/BCC
 @dst_last_tenths: .byte 0
 @dst_elapsed:     .byte 0
+; MUST stay above uci_status_buf/uci_status_len: those are non-local
+; labels and they close this routine's ca65 cheap-local (@) scope, so an
+; @dst_idx declared after them is a DIFFERENT symbol from the one the
+; routine references. That mistake captured exactly one status byte and
+; looked for all the world like the firmware emitting nothing.
+@dst_idx:         .byte 0
+
+; Captured status line (ASCII, e.g. "04,DATAGRAM TRUNCATED: 1420").
+; Not NUL-terminated; uci_status_len says how many bytes are valid.
+uci_status_buf:  .res UCI_STATUS_MAX, 0
+uci_status_len:  .byte 0
 
 ; =============================================================================
 ; Control block for uci_read_resp_bytes — lives in UCI_BSS so no ZP is needed

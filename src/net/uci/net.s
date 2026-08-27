@@ -33,6 +33,15 @@
 ; Both symbols are equates, so this is checked at assembly time.
 .assert (WG_MTU + WG_DATA_OVERHEAD) <= UCI_READ_CHUNK_MAX, error, "WG_MTU + overhead exceeds UCI_READ_CHUNK_MAX: inbound datagrams would be truncated silently"
 
+; SEND side — the mirror of the assert above, and it was missing. On a
+; connected UDP socket each SOCKET_WRITE emits its OWN datagram, so a frame
+; larger than one write does not chunk, it FRAGMENTS: measured on hardware
+; 2026-08-27, a 1452-byte send left the C64 as 800 + 652 bytes, two torn
+; datagrams, with carry=0 and net_last_error=$00. The peer drops both and
+; nothing reports it, because uci_write_resp is pre-stashed to the chunk
+; length so the bookkeeping reads as full success.
+.assert (WG_MTU + WG_DATA_OVERHEAD) <= UCI_DATA_QUEUE_MAX, error, "WG_MTU + overhead exceeds UCI_DATA_QUEUE_MAX: outbound datagrams would be silently fragmented into multiple UDP packets"
+
 ; --- net_abi.inc contract ---
 .export net_init
 .export net_dhcp_acquire
@@ -294,16 +303,44 @@ net_udp_send:
 
         ; Zero-length: nothing to do.
         ora uci_send_rem+0
-        bne @chunk_loop
+        bne @check_fits
         clc
         rts
 
+@check_fits:
+        ; REFUSE anything that will not fit in ONE SOCKET_WRITE.
+        ;
+        ; This loop used to chunk, on the belief recorded here that "each
+        ; SOCKET_WRITE on a connected UDP socket queues bytes into the same
+        ; outgoing datagram boundary (firmware coalesces them)". THAT IS
+        ; FALSE. NetworkTarget::write_socket does one lwip_send per command
+        ; on a SOCK_DGRAM socket, so every chunk is its own DATAGRAM.
+        ; Measured 2026-08-27: a 1452-byte send left the C64 as 800 + 652 —
+        ; two torn datagrams the peer drops — with carry=0 and
+        ; net_last_error=$00, because uci_write_resp is pre-stashed to the
+        ; chunk length so the bookkeeping reads as success. The handshake
+        ; (148 B) hid it for months; only payloads over ~768 B fragment.
+        ;
+        ; For a datagram socket, splitting is never correct. Refuse loudly
+        ; instead: the §13.2 contract says C=1 with net_last_error set, and a
+        ; caller that respects WG_MTU can never reach this (the link-time
+        ; assert in this file guarantees WG_MTU + overhead <= the cap).
+        lda uci_send_rem+1
+        cmp #>UCI_DATA_QUEUE_MAX
+        bcc @chunk_loop             ; hi < cap_hi -> fits
+        bne @too_big                ; hi > cap_hi -> cannot fit
+        lda uci_send_rem+0
+        cmp #<UCI_DATA_QUEUE_MAX
+        beq @chunk_loop             ; exactly the cap -> fits
+        bcc @chunk_loop             ; below the cap -> fits
+@too_big:
+        lda #UCI_ERR_SEND_TOO_LONG
+        sta net_last_error
+        sec
+        rts
+
 @chunk_loop:
-        ; this_chunk = min(uci_send_rem, UCI_DATA_QUEUE_MAX). WireGuard
-        ; MTU packets are typically ~1420 bytes so the outer chunking
-        ; will generally fire twice per datagram. That's benign: each
-        ; SOCKET_WRITE on a connected UDP socket queues bytes into the
-        ; same outgoing datagram boundary (firmware coalesces them).
+        ; Single pass now — the guard above proves uci_send_rem <= the cap.
         lda uci_send_rem+1
         cmp #>UCI_DATA_QUEUE_MAX
         bcc @use_rem
@@ -402,8 +439,16 @@ net_udp_send:
         ; uci_send_rem by the count we actually pushed.
         jsr uci_drain_status
         bcs @sb_wedged
-        jsr uci_wait_idle
-        bcs @sb_wedged
+        ; SOCKET_WRITE returns no response payload, so this path never calls
+        ; uci_drain_resp — which makes it the ONLY transaction in the adapter
+        ; whose accept is not otherwise issued. The accept is mandatory on
+        ; every transaction, sends included: it is what returns the state
+        ; machine to idle, and without it the next PUSH_CMD is silently
+        ; dropped (`else error_busy <= '1'`). Worse, command-byte writes are
+        ; not state-gated, so a dropped command still advances the command
+        ; pointer and every later command lands in a mis-positioned buffer —
+        ; one missing accept corrupts the interface from then on.
+        jsr uci_ack
 @sb_had_write:
 
         ; Advance source pointer by actual written count.
@@ -841,7 +886,7 @@ net_poll:
         uci_fence                   ; settle before testing DATA_AV
         and #UCI_STAT_DATA_AV
         bne @have_byte
-        jmp @done_data
+        jmp @block_end          ; block exhausted — may be Data More
 
 @have_byte:
         lda UCI_RESP_DATA
@@ -860,6 +905,35 @@ net_poll:
         sbc #$00
         sta uci_poll_rem+1
         jmp @byte_loop
+
+@block_end:
+        ; DATA_AV cleared. Under fw 3.15 a reply larger than one response
+        ; block is handed over in pieces via the command interface's Data
+        ; More mechanism (GideonZ/1541ultimate#806), so this is the end of a
+        ; BLOCK, not necessarily the end of the reply. The 2-byte header is
+        ; the TOTAL payload length, so uci_poll_rem still holds what is
+        ; outstanding; concatenating the blocks yields exactly the datagram a
+        ; single large queue would have delivered.
+        ;
+        ; STATE ($30) distinguishes them: $20 = Data Last, $30 = Data More.
+        lda uci_poll_rem+0
+        ora uci_poll_rem+1
+        beq @done_data          ; nothing outstanding — reply complete
+
+        lda UCI_STATUS
+        uci_fence               ; settle before testing STATE
+        and #UCI_STAT_STATE
+        cmp #(UCI_STAT_STATE)   ; $30 = Data More
+        bne @done_data          ; Data Last with bytes outstanding: short
+                                ; reply, take what we got rather than hang
+
+        ; Accept this block. Because state(0)=1 this signals the Ultimate to
+        ; produce the next one and moves the machine to Command Busy rather
+        ; than Idle, so we must wait for it to present the next block.
+        jsr uci_ack
+        jsr uci_wait_not_busy
+        bcs @done_data          ; wedged waiting for the continuation
+        jmp @byte_loop          ; resume into the SAME buffer, Y/SMC intact
 
 @done_data:
         jsr uci_drain_resp

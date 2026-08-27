@@ -42,6 +42,11 @@ UCI_ERR_READ_FAIL      = $86    ; SOCKET_READ returned an error bit
 UCI_ERR_SHORT_WRITE    = $87    ; SOCKET_WRITE wrote fewer bytes than requested
 UCI_ERR_NO_SOCKET      = $88    ; socket-open response yielded no socket_id
 UCI_ERR_WAIT_TIMEOUT   = $89    ; a bounded wait exceeded its wall-clock budget
+UCI_ERR_SEND_TOO_LONG  = $8C    ; datagram exceeds UCI_DATA_QUEUE_MAX; a
+                                ; split would emit multiple UDP packets.
+                                ; $8B is c64-https's UCI_ERR_BAD_READ_HDR —
+                                ; allocated in SPEC §13.2 before use, per the
+                                ; rule added after the $88 collision.
 UCI_ERR_LONG_READ      = $8A    ; SOCKET_READ claimed more bytes than we asked for
 
 ; TCP state values stored in net_tcp_state
@@ -51,7 +56,27 @@ UCI_TCP_ERROR          = $02    ; saw an error on a read — stop polling
 UCI_TCP_CONNECT_FAIL   = $03    ; connect did not yield a usable socket
 
 ; UCI firmware data queue max per SOCKET_WRITE push (see uci_network.py)
-UCI_DATA_QUEUE_MAX     = 800
+; Largest payload in ONE SOCKET_WRITE — and therefore the largest datagram
+; this adapter can SEND, because a connected UDP socket emits one datagram
+; per write. This is NOT a chunk size: raising the tunnel MTU above it does
+; not split a frame across writes, it fragments one WireGuard packet into
+; several UDP datagrams that the peer drops. Measured 2026-08-27 at the old
+; value of 800: a 1452-byte send arrived as 800 + 652, carry=0, no error.
+;
+; 892, and the off-by-one is real. The command buffer is 896, but
+; command_protocol.vhd freezes command_pointer at c_cmd_if_command_buffer_end
+; (895) and derives command_length from it, so the length SATURATES at 895 and
+; the 896th slot is written but never read. Payload = 895 - 3 (target, command,
+; socket id) = 892. Push 893 and the last byte is dropped with a clean status —
+; c64-test-harness measured exactly that ("893 arrives as 892", uci_network.py
+; SOCKET_WRITE_MAX_BYTES) and attributed it to "likely a fencepost"; the VHDL
+; guard IS that fencepost. Same shape as the read side's 894 = 896 - 2.
+;
+; NOTE THE ASYMMETRY: reads can exceed this. fw 3.15 returns datagrams up to
+; 1472 B by splitting the REPLY across Data More blocks
+; (GideonZ/1541ultimate#806), and net_poll reassembles them. No equivalent
+; exists for the command direction, so the tunnel MTU is bounded by SEND.
+UCI_DATA_QUEUE_MAX     = 892
 
 ; SOCKET_READ max-length cap we ask for per net_poll cycle.
 ;
@@ -73,4 +98,8 @@ UCI_DATA_QUEUE_MAX     = 800
 ; project reasoned about it as one for months. Measured on our own U64E
 ; (fw 3.14d): datagrams of 512/600/700/800/861/893 all arrive WHOLE in a
 ; single poll with the header reporting their true length.
-UCI_READ_CHUNK_MAX     = 893
+UCI_READ_CHUNK_MAX     = 1472
+
+; Bytes of the $DF1F status line kept by uci_drain_status. Long enough for
+; fw 3.15's "04,DATAGRAM TRUNCATED: 1420" (27 chars) with room to spare.
+UCI_STATUS_MAX         = 48

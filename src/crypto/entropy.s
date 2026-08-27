@@ -10,7 +10,12 @@
 .export entropy_byte
 .export entropy_fill
 
-.segment "CRYPTO_CODE"
+; APP_EXTRA (MAIN_AREA_HI), not CRYPTO_CODE. MAIN_AREA_LO is effectively
+; full — the §6.7 image-overrun assert in contract_asserts.s fires on a few
+; dozen extra bytes there — while MAIN_AREA_HI has ~1.9 KB free and already
+; carries code (LIB_X25519_INIT_CODE). Nothing about this module needs to be
+; low: it touches only $D41B/$DC0x and its callers reach it by JSR.
+.segment "APP_EXTRA"
 
 ; =============================================================================
 ; entropy_init - Initialize entropy sources
@@ -39,12 +44,45 @@ entropy_init:
 ; =============================================================================
 ; entropy_byte - Get one random byte
 ;
-; Returns: A = random byte (XOR of SID osc3 + CIA1 timer low)
+; Returns: A = random byte
 ; Preserves: X, Y
+;
+; WHY THE PERSISTENT STATE. The two hardware reads alone are NOT independent:
+; $D41B (SID OSC3) and $DC04 (CIA1 timer A low) are both affine in the CPU
+; clock with OPPOSITE slopes — OSC3 counts up, TA counts down — so their sum
+; S = (osc + cia) & $FF is invariant in elapsed time; the clock cancels, and S
+; only steps when TA underflows. For a value derived as x EOR (S - x), there
+; are exactly two S at which the result is the same for every x:
+;
+;     S = $7F  ->  every byte is $7F
+;     S = $FF  ->  every byte is $FF
+;
+; i.e. 2 of 256 phases produce a CONSTANT stream. Measured 1.00% of sampled
+; phases under VICE, reproducing both signatures exactly, and it is what made
+; test_session/test_handshake fail intermittently on "all 17 bytes identical
+; (0x7f)" and "sender_idx ffffffff == ffffffff".
+;
+; Under VICE this is total degeneracy because OSC3 is a clock-derived ramp
+; rather than noise (VICE does not clock reSID with sound disabled). On real
+; hardware OSC3 IS noise, so the failure is not total — but two operands that
+; are affine in the same clock still carry far less entropy than they appear
+; to, which matters because this feeds WireGuard ephemeral keys.
+;
+; Stirring a persistent byte in breaks the cancellation: consecutive outputs
+; can no longer be a function of S alone. XOR-ing the hardware reads on top is
+; entropy-preserving, so this is strictly no worse anywhere; the rotate only
+; whitens. Costs ~8 cycles and one byte of RAM.
+;
+; NOTE the failure signature is deliberately still reachable by a genuinely
+; dead RNG (state stuck, both reads flat), so the assertions in
+; tools/test_session.py and tools/test_handshake.py keep their teeth.
 ; =============================================================================
 entropy_byte:
-        lda sid_osc3
+        lda entropy_state
+        rol                     ; whiten: carry-in from the previous step
+        eor sid_osc3
         eor cia1_ta_lo
+        sta entropy_state
         rts
 
 ; =============================================================================
@@ -57,9 +95,22 @@ entropy_byte:
 entropy_fill:
         dey
 @loop:
-        lda sid_osc3
+        lda entropy_state
+        rol
+        eor sid_osc3
         eor cia1_ta_lo
+        sta entropy_state
         sta (zp_ptr1),y
         dey
         bpl @loop               ; unsigned: 0 still processes, $FF exits
         rts
+
+; APP_EXTRA_BSS (MAIN_AREA_HI), not CRYPTO_BSS: MAIN_AREA_LO has almost no
+; slack and the §6.7 image-overrun assert in contract_asserts.s catches an
+; extra byte there. MAIN_AREA_HI has ~1.9 KB free.
+.segment "APP_EXTRA_BSS"
+
+; Persistent whitening state. Power-on value is whatever RAM held, which is
+; itself a weak entropy source and is never worse than starting from a
+; constant.
+entropy_state:  .res 1
