@@ -89,10 +89,26 @@ REKEY_COUNTER_B7    = $0F
 ; PEERS MUST BE CONFIGURED WITH MTU = WG_MTU (see README).
 .include "net_caps.inc"
 WG_DATA_OVERHEAD    = 32        ; 16 B Type-4 header + 16 B Poly1305 tag
+
+; WG_DATAGRAM_CAP is THIS CONSUMER's ceiling, independent of the backend: the
+; largest Type-4 datagram the RAM budget can hold. ip_packet_buf + msg_input_buf
+; + udp_recv_buf must fit MAIN_AREA_HI; at 892 they leave ~137 B (UCI map,
+; 2026-08-27). The ip65 backend advertises 1472/1472 and would otherwise derive
+; a 1440 MTU whose buffers overflow HI by ~1 KB. Raising this — e.g. once the
+; UCI send side reaches 1440 via WRITE_SOCKET_MORE (GideonZ/1541ultimate#802) —
+; means sharing msg_input_buf with ip_packet_buf (build in place), not just
+; editing the number: the §13.8 asserts and the linker will refuse otherwise.
+WG_DATAGRAM_CAP     = 892
+; WG_NET_UDP_MAX = min(NET_UDP_SEND_MAX, NET_UDP_RECV_MAX, WG_DATAGRAM_CAP)
 .if NET_UDP_SEND_MAX < NET_UDP_RECV_MAX
-WG_NET_UDP_MAX      = NET_UDP_SEND_MAX
+WG_NET_BACKEND_MAX  = NET_UDP_SEND_MAX
 .else
-WG_NET_UDP_MAX      = NET_UDP_RECV_MAX
+WG_NET_BACKEND_MAX  = NET_UDP_RECV_MAX
+.endif
+.if WG_DATAGRAM_CAP < WG_NET_BACKEND_MAX
+WG_NET_UDP_MAX      = WG_DATAGRAM_CAP
+.else
+WG_NET_UDP_MAX      = WG_NET_BACKEND_MAX
 .endif
 WG_MTU              = WG_NET_UDP_MAX - WG_DATA_OVERHEAD
 .assert WG_MTU + WG_DATA_OVERHEAD <= NET_UDP_SEND_MAX, error, "WG_MTU + overhead exceeds NET_UDP_SEND_MAX"

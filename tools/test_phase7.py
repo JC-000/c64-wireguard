@@ -519,7 +519,9 @@ def test_udp_build(transport, labels, rng):
         write_bytes(transport, msg_port_addr, port_be)
         write_bytes(transport, input_buf, text)
         write_bytes(transport, zp_ptr1, struct.pack('<H', input_buf))
-        write_bytes(transport, zp_tmp1, bytes([text_len]))
+        # udp_tunnel_build takes a 16-bit length in zp_tmp1/zp_tmp2 (§13.3);
+        # zero the high byte or stale checksum residue clamps it to MSG_TEXT_MAX.
+        write_bytes(transport, zp_tmp1, struct.pack('<H', text_len))
 
         jsr(transport, udp_build)
 

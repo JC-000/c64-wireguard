@@ -278,8 +278,8 @@ net_udp_listen:
 ;     string (the firmware accepts a dotted quad directly).
 ;   - Then SOCKET_WRITE the whole buffer in ONE command. Each write on a
 ;     connected UDP socket is one datagram on the wire, so there is no
-;     chunking: a length above UCI_DATA_QUEUE_MAX (892, the hardware-
-;     verified per-write ceiling) is refused up front with
+;     chunking: a length above NET_UDP_SEND_MAX (892, the ceiling this
+;     adapter guarantees in net_caps.inc, §13.3) is refused up front with
 ;     UCI_ERR_SEND_TOO_LONG before any register is touched.
 ;   - After the push, read the 2-byte written count the firmware returns
 ;     on RESP_DATA and compare it to the requested length; a mismatch is
@@ -336,11 +336,11 @@ net_udp_send:
         ; Ordering matters: nothing has been pushed yet, so the state machine
         ; is untouched and no drain/ack is owed on this exit.
         lda uci_send_rem+1
-        cmp #>UCI_DATA_QUEUE_MAX
+        cmp #>NET_UDP_SEND_MAX
         bcc @fits                   ; hi < cap_hi -> fits
         bne @too_big                ; hi > cap_hi -> cannot fit
         lda uci_send_rem+0
-        cmp #<UCI_DATA_QUEUE_MAX
+        cmp #<NET_UDP_SEND_MAX
         beq @fits                   ; exactly the cap -> fits
         bcc @fits                   ; below the cap -> fits
 @too_big:
