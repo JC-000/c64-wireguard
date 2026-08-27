@@ -45,7 +45,8 @@ UCI_ERR_SHORT_WRITE    = $87    ; SOCKET_WRITE's returned count != requested
                                 ; the torn datagram is already gone — no retry.
 UCI_ERR_NO_SOCKET      = $88    ; socket-open response yielded no socket_id
 UCI_ERR_WAIT_TIMEOUT   = $89    ; a bounded wait exceeded its wall-clock budget
-UCI_ERR_SEND_TOO_LONG  = $8C    ; datagram exceeds UCI_DATA_QUEUE_MAX (892);
+UCI_ERR_SEND_TOO_LONG  = $8C    ; datagram exceeds NET_UDP_SEND_MAX (892, the
+                                ; adapter's published net_caps.inc guarantee);
                                 ; refused BEFORE any register is touched
                                 ; (c64-lib-contract#141/#142) because a split
                                 ; would emit multiple UDP packets.

@@ -63,10 +63,10 @@ REKEY_COUNTER_B7    = $0F
 ;
 ;     WG_MTU = min(NET_UDP_SEND_MAX, NET_UDP_RECV_MAX) - WG_DATA_OVERHEAD
 ;
-; Today (UCI, U64E fw 3.14d): min(892, 1472) - 32 = 860, SEND-bound. The
+; Today (UCI, U64E fw 3.15): min(892, 1472) - 32 = 860, SEND-bound. The
 ; receive side already takes 1472, so the only thing that moves this number
 ; is the send ceiling: a firmware WRITE_SOCKET_MORE (chunked push, filed as
-; GideonZ/1541ultimate#806) would lift NET_UDP_SEND_MAX to ~1440 and this
+; GideonZ/1541ultimate#802) would lift NET_UDP_SEND_MAX to ~1440 and this
 ; equate follows it with no edit here. Under ip65 both caps are 1472 and
 ; WG_MTU is 1440. Every length on the path is 16-bit (contract §13.3), so
 ; nothing else in the tree needs to change when the caps do.
@@ -90,7 +90,9 @@ REKEY_COUNTER_B7    = $0F
 .include "net_caps.inc"
 WG_DATA_OVERHEAD    = 32        ; 16 B Type-4 header + 16 B Poly1305 tag
 
-; WG_DATAGRAM_CAP is THIS CONSUMER's ceiling, independent of the backend: the
+; WG_DATAGRAM_CAP is THIS CONSUMER's ceiling, independent of the backend
+; (a consumer MAY clamp below the backend's caps — c64-lib-contract PR #143,
+; v0.12.1; udp_recv_buf must still hold NET_UDP_RECV_MAX, see §13.8 assert): the
 ; largest Type-4 datagram the RAM budget can hold. ip_packet_buf + msg_input_buf
 ; + udp_recv_buf must fit MAIN_AREA_HI; at 892 they leave ~137 B (UCI map,
 ; 2026-08-27). The ip65 backend advertises 1472/1472 and would otherwise derive

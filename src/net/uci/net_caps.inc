@@ -21,7 +21,7 @@ NET_CAPS_INC = 1
 ;                   takes 892 bytes per write, so anything larger leaves as
 ;                   two torn datagrams (measured 2026-08-27: 1452 -> 800 +
 ;                   652). Unchanged by 3.15. A firmware WRITE_SOCKET_MORE
-;                   (chunked push) would lift this to ~1440, and WG_MTU
+;                   (chunked push, GideonZ/1541ultimate#802) would lift this to ~1440, and WG_MTU
 ;                   follows it — this is the binding side of the tunnel MTU.
 ; NET_UDP_RECV_MAX  Largest datagram net_poll guarantees to deliver whole.
 ;                   1472 assumes fw >= 3.15 (GideonZ/1541ultimate#806
