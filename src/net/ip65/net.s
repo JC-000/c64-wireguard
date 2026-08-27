@@ -205,43 +205,50 @@ net_udp_recv_cb:
         ora udp_recv_len+1
         beq @done
 
-        ; 16-bit copy using self-modifying code (ip65 owns ZP pointers)
-        ; Set up source/dest high bytes for self-mod
+        ; 16-bit copy using self-modifying code (ip65 owns ZP pointers).
+        ;
+        ; §13.3 (c64-lib-contract): the count is a two-byte quantity and is
+        ; handled as one. The previous form split it into a page loop driven
+        ; by `ldx udp_recv_len+1` and a remainder loop driven by
+        ; `ldx udp_recv_len` — arithmetically sound, but it is the exact
+        ; "one-byte register holding a piece of a two-byte length" habit
+        ; that produced the c64-https 255-byte rx clamp (their PR #27), and
+        ; the two loops had to be kept consistent by hand. Now: one loop,
+        ; one 16-bit countdown in udp_copy_rem, Y is only the page offset
+        ; and the SMC bases advance when it wraps. Same shape as the UCI
+        ; adapter's receive loop.
+        lda udp_recv_len
+        sta udp_copy_rem
+        lda udp_recv_len+1
+        sta udp_copy_rem+1
+
+        lda #<(ip65_udp_inp + 8)
+        sta @cp_ld+1
         lda #>(ip65_udp_inp + 8)
-        sta @pg_ld+2
+        sta @cp_ld+2
+        lda #<udp_recv_buf
+        sta @cp_st+1
         lda #>udp_recv_buf
-        sta @pg_st+2
+        sta @cp_st+2
 
-        ; Copy full pages
-        ldx udp_recv_len+1
         ldy #0
-        cpx #0
-        beq @setup_rem
-
-@pg_ld: lda ip65_udp_inp + 8,y
-@pg_st: sta udp_recv_buf,y
-        iny
-        bne @pg_ld
-        inc @pg_ld+2
-        inc @pg_st+2
-        dex
-        bne @pg_ld
-
-@setup_rem:
-        ; Copy final high bytes to remainder instructions
-        lda @pg_ld+2
-        sta @rm_ld+2
-        lda @pg_st+2
-        sta @rm_st+2
-
-        ldx udp_recv_len        ; low byte = remaining count
+@cp_loop:
+        lda udp_copy_rem
+        ora udp_copy_rem+1
         beq @copy_done
-        ldy #0
-@rm_ld: lda ip65_udp_inp + 8,y
-@rm_st: sta udp_recv_buf,y
+@cp_ld: lda ip65_udp_inp + 8,y     ; SMC: base patched above
+@cp_st: sta udp_recv_buf,y         ; SMC: base patched above
         iny
-        dex
-        bne @rm_ld
+        bne @cp_nohi
+        inc @cp_ld+2
+        inc @cp_st+2
+@cp_nohi:
+        lda udp_copy_rem
+        bne @cp_noborrow
+        dec udp_copy_rem+1
+@cp_noborrow:
+        dec udp_copy_rem
+        jmp @cp_loop
 @copy_done:
         ; copy source IP (ip_inp + 12 = source IP in IP header)
         ; ip65_udp_inp is ip_inp + ip_data(20), so ip_inp = udp_inp - 20
@@ -363,3 +370,4 @@ net_restore_zp:
 
 net_udp_send_ptr:       .res 2      ; pointer for udp_send wrapper
 net_udp_send_len: .res 2      ; length for udp_send wrapper
+udp_copy_rem:       .res 2      ; 16-bit countdown for the rx copy (§13.3)

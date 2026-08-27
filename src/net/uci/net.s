@@ -269,37 +269,36 @@ net_udp_listen:
 ;     The UDP_CONNECT parameter layout mirrors TCP_CONNECT but with the
 ;     UDP_CONNECT command ID and an IP-bytes payload instead of a host
 ;     string (the firmware accepts a dotted quad directly).
-;   - Then SOCKET_WRITE the buffer on the connected socket. Because UDP
-;     is datagram-oriented, we push the entire buffer in one command —
-;     WireGuard packets are at most ~1420 bytes, well under UCI's
-;     DATA_QUEUE_MAX of 800 per push... wait, under it we go in chunks
-;     exactly as the TCP path does. WireGuard payloads up to MTU are
-;     fine with a chunked inner loop.
+;   - Then SOCKET_WRITE the whole buffer in ONE command. Each write on a
+;     connected UDP socket is one datagram on the wire, so there is no
+;     chunking: a length above UCI_DATA_QUEUE_MAX (892, the hardware-
+;     verified per-write ceiling) is refused up front with
+;     UCI_ERR_SEND_TOO_LONG before any register is touched.
+;   - After the push, read the 2-byte written count the firmware returns
+;     on RESP_DATA and compare it to the requested length; a mismatch is
+;     UCI_ERR_SHORT_WRITE, a $FFFF (lwip -1) is UCI_ERR_SEND_FAIL.
 ;
 ; Output: C=0 on success, C=1 on failure (net_last_error populated).
+;   $8C SEND_TOO_LONG  — refused pre-push (nothing on the wire)
+;   $89 WAIT_TIMEOUT   — a bounded wait expired (state unknown)
+;   $85 SEND_FAIL      — error bit set, or written count $FFFF
+;   $87 SHORT_WRITE    — no count / count != length (datagram not whole)
 ; Clobbers: A, X, Y
 ; =============================================================================
 net_udp_send:
         sta net_udp_send_ptr+0
         stx net_udp_send_ptr+1
 
-        ; Open the UCI UDP socket on first send.
-        lda uci_socket_open
-        bne @socket_ready
-        jsr uci_udp_connect
-        bcc @connected
-        ; Connect failed — net_last_error already set by uci_udp_connect.
-        rts
-@connected:
-        lda #$01
-        sta uci_socket_open
-
-@socket_ready:
-        ; Copy length into a decrementing 16-bit counter for the chunk loop.
+        ; Latch the 16-bit length. It is both the push count for the loop
+        ; below and the value the firmware's returned count is checked
+        ; against afterwards, so keep two copies: uci_chunk_len is consumed
+        ; by the loop, uci_send_rem survives it.
         lda net_udp_send_len+0
         sta uci_send_rem+0
+        sta uci_chunk_len+0
         lda net_udp_send_len+1
         sta uci_send_rem+1
+        sta uci_chunk_len+1
 
         ; Zero-length: nothing to do.
         ora uci_send_rem+0
@@ -308,7 +307,8 @@ net_udp_send:
         rts
 
 @check_fits:
-        ; REFUSE anything that will not fit in ONE SOCKET_WRITE.
+        ; PRE-CHECK (c64-lib-contract#142): REFUSE anything that will not fit
+        ; in ONE SOCKET_WRITE, BEFORE any UCI register is touched.
         ;
         ; This loop used to chunk, on the belief recorded here that "each
         ; SOCKET_WRITE on a connected UDP socket queues bytes into the same
@@ -317,57 +317,49 @@ net_udp_send:
         ; on a SOCK_DGRAM socket, so every chunk is its own DATAGRAM.
         ; Measured 2026-08-27: a 1452-byte send left the C64 as 800 + 652 —
         ; two torn datagrams the peer drops — with carry=0 and
-        ; net_last_error=$00, because uci_write_resp is pre-stashed to the
-        ; chunk length so the bookkeeping reads as success. The handshake
-        ; (148 B) hid it for months; only payloads over ~768 B fragment.
+        ; net_last_error=$00, because the old code pre-stashed the chunk
+        ; length as the "written" count so the bookkeeping read as success.
+        ; The handshake (148 B) hid it for months; only payloads over ~768 B
+        ; fragmented.
         ;
         ; For a datagram socket, splitting is never correct. Refuse loudly
         ; instead: the §13.2 contract says C=1 with net_last_error set, and a
         ; caller that respects WG_MTU can never reach this (the link-time
         ; assert in this file guarantees WG_MTU + overhead <= the cap).
+        ; Ordering matters: nothing has been pushed yet, so the state machine
+        ; is untouched and no drain/ack is owed on this exit.
         lda uci_send_rem+1
         cmp #>UCI_DATA_QUEUE_MAX
-        bcc @chunk_loop             ; hi < cap_hi -> fits
+        bcc @fits                   ; hi < cap_hi -> fits
         bne @too_big                ; hi > cap_hi -> cannot fit
         lda uci_send_rem+0
         cmp #<UCI_DATA_QUEUE_MAX
-        beq @chunk_loop             ; exactly the cap -> fits
-        bcc @chunk_loop             ; below the cap -> fits
+        beq @fits                   ; exactly the cap -> fits
+        bcc @fits                   ; below the cap -> fits
 @too_big:
         lda #UCI_ERR_SEND_TOO_LONG
         sta net_last_error
         sec
         rts
 
-@chunk_loop:
-        ; Single pass now — the guard above proves uci_send_rem <= the cap.
-        lda uci_send_rem+1
-        cmp #>UCI_DATA_QUEUE_MAX
-        bcc @use_rem
-        bne @use_cap
-        lda uci_send_rem+0
-        cmp #<UCI_DATA_QUEUE_MAX
-        bcc @use_rem
-@use_cap:
-        lda #<UCI_DATA_QUEUE_MAX
-        sta uci_chunk_len+0
-        sta uci_write_resp+0    ; pre-stash: SOCKET_WRITE returns no count,
-        lda #>UCI_DATA_QUEUE_MAX ; so we treat the chunk we're about to push
-        sta uci_chunk_len+1     ; as authoritatively "written" (UDP is atomic).
-        sta uci_write_resp+1
-        jmp @begin_chunk
-@use_rem:
-        lda uci_send_rem+0
-        sta uci_chunk_len+0
-        sta uci_write_resp+0    ; pre-stash (see @use_cap)
-        lda uci_send_rem+1
-        sta uci_chunk_len+1
-        sta uci_write_resp+1
+@fits:
+        ; Open the UCI UDP socket on first send. Deliberately AFTER the length
+        ; pre-check above: UDP_CONNECT is itself a UCI transaction, and #142
+        ; requires an over-long send to fail before any register is touched.
+        lda uci_socket_open
+        bne @fits_len
+        jsr uci_udp_connect
+        bcc @connected
+        ; Connect failed — net_last_error already set by uci_udp_connect.
+        rts
+@connected:
+        lda #$01
+        sta uci_socket_open
 
-@begin_chunk:
+@fits_len:
         jsr uci_wait_idle
-        bcc @bc_go              ; wedged before the chunk went out — bail with
-        rts                     ; C=1 so the caller does not count it as sent
+        bcc @bc_go              ; wedged before the datagram went out — bail
+        rts                     ; with C=1 so the caller does not count it as sent
 @bc_go:
 
         lda #UCI_TARGET_NETWORK
@@ -385,6 +377,8 @@ net_udp_send:
         lda net_udp_send_ptr+1
         sta @sb_load+2
 
+        ; Push uci_chunk_len bytes. 16-bit countdown (§13.3) — Y is only the
+        ; page offset, and the SMC base advances when it wraps.
         ldy #$00
 @sb_loop:
         lda uci_chunk_len+0
@@ -411,6 +405,7 @@ net_udp_send:
 
 @sb_push:
         jsr uci_push_wait
+        bcs @sb_wedged          ; PUSH never went CMD_BUSY=0 — timeout is set
 
         jsr uci_check_err
         bcc @sb_no_err
@@ -418,69 +413,107 @@ net_udp_send:
         lda #UCI_ERR_SEND_FAIL
         sta net_last_error
         jsr uci_drain_resp
+        bcs @sb_wedged
         jsr uci_drain_status
+        bcs @sb_wedged
         jsr uci_ack
         sec
         rts
 
 @sb_no_err:
-        ; SOCKET_WRITE on U64E fw 3.14d does NOT put a written-count into
-        ; RESP_DATA ($DF1E); only a status string into STATUS_DATA ($DF1F).
-        ; The previous design spin-waited on RESP_DATA's DATA_AV bit, which
-        ; never asserts for SOCKET_WRITE — by the time the spin-wait timed
-        ; out, the firmware's TX window for the queued datagram had closed
-        ; and the packet was silently discarded (C64 saw no error but no
-        ; bytes reached the wire). Canonical pattern per c64-test-harness
-        ; build_socket_write: drain STATUS then wait_idle. UDP is atomic —
-        ; if uci_check_err didn't flag, the whole chunk went out.
+        ; READ THE WRITTEN COUNT. An earlier revision of this comment claimed
+        ; that SOCKET_WRITE "does NOT put a written-count into RESP_DATA;
+        ; only a status string into STATUS_DATA". That is FALSE. The
+        ; firmware's NetworkTarget::write_socket (GideonZ/1541ultimate,
+        ; software/io/network/network_target.cc) ends with
         ;
-        ; uci_write_resp was pre-stashed = uci_chunk_len at @use_cap/@use_rem,
-        ; so the bookkeeping below still advances net_udp_send_ptr / decrements
-        ; uci_send_rem by the count we actually pushed.
+        ;     data_message.message[0] = (ret & 0xFF);
+        ;     data_message.message[1] = (ret & 0xFF00) >> 8;
+        ;     data_message.length = 2;
+        ;
+        ; where ret is the lwip_send return: the byte count actually handed
+        ; to the stack, or -1 ($FFFF) on a socket error. It is on the
+        ; RESP_DATA channel ($DF1E), exactly like the 2-byte SOCKET_READ
+        ; header, and c64-https's net_tcp_send has read it there all along.
+        ; What the earlier revision observed was an UNBOUNDED spin on
+        ; DATA_AV at the wrong moment; the bounded read below is the
+        ; correct shape.
+        ;
+        ; Register sequence (each access fenced, §13.6; wait TOD-bounded,
+        ; §13.4 — uci_read_resp_bytes gives up after
+        ; UCI_RESP_WAIT_BUDGET_TENTHS and reports what it got in
+        ; uci_resp_count rather than wedging):
+        ;   [STATUS $DF1C] poll DATA_AV -> [RESP_DATA $DF1E] read lo
+        ;   [STATUS $DF1C] poll DATA_AV -> [RESP_DATA $DF1E] read hi
+        ;   uci_drain_resp   : any further RESP_DATA bytes, NEXT_DATA each
+        ;   uci_drain_status : STATUS_DATA $DF1F line, NEXT_DATA each
+        ;   uci_ack          : final NEXT_DATA — the accept that returns
+        ;                      the state machine to idle
+        ;
+        ; The accept is mandatory on every transaction, sends included:
+        ; without it the next PUSH_CMD is silently dropped (`else
+        ; error_busy <= '1'`), and because command-byte writes are not
+        ; state-gated a dropped command still advances the command pointer,
+        ; so every later command lands in a mis-positioned buffer — one
+        ; missing accept corrupts the interface from then on. Hence the
+        ; drains complete BEFORE the count is judged, whatever it says.
+        lda #$00                ; pre-clear so a short read is detectable
+        sta uci_write_resp+0
+        sta uci_write_resp+1
+        lda #<uci_write_resp
+        sta uci_resp_dst
+        lda #>uci_write_resp
+        sta uci_resp_dst+1
+        lda #$02
+        sta uci_resp_max
+        jsr uci_read_resp_bytes
+
+        jsr uci_drain_resp
+        bcs @sb_wedged
         jsr uci_drain_status
         bcs @sb_wedged
-        ; SOCKET_WRITE returns no response payload, so this path never calls
-        ; uci_drain_resp — which makes it the ONLY transaction in the adapter
-        ; whose accept is not otherwise issued. The accept is mandatory on
-        ; every transaction, sends included: it is what returns the state
-        ; machine to idle, and without it the next PUSH_CMD is silently
-        ; dropped (`else error_busy <= '1'`). Worse, command-byte writes are
-        ; not state-gated, so a dropped command still advances the command
-        ; pointer and every later command lands in a mis-positioned buffer —
-        ; one missing accept corrupts the interface from then on.
         jsr uci_ack
-@sb_had_write:
 
-        ; Advance source pointer by actual written count.
-        lda net_udp_send_ptr+0
-        clc
-        adc uci_write_resp+0
-        sta net_udp_send_ptr+0
-        lda net_udp_send_ptr+1
-        adc uci_write_resp+1
-        sta net_udp_send_ptr+1
+        ; No 2-byte count arrived within the budget: the reply framing is not
+        ; what we think it is, so we cannot claim the datagram went out whole.
+        lda uci_resp_count
+        cmp #$02
+        bcc @sb_short
 
-        ; Subtract written count from remaining.
-        lda uci_send_rem+0
-        sec
-        sbc uci_write_resp+0
-        sta uci_send_rem+0
-        lda uci_send_rem+1
-        sbc uci_write_resp+1
-        sta uci_send_rem+1
-
-        ; Bail on zero-written to avoid infinite loop.
+        ; $FFFF = ret of -1: lwip_send failed on the firmware side (the
+        ; status line carries the errno; we drained it). Not a short write —
+        ; nothing was sent.
         lda uci_write_resp+0
-        ora uci_write_resp+1
-        beq @sb_done
+        and uci_write_resp+1
+        cmp #$FF
+        beq @sb_send_fail
 
-        lda uci_send_rem+0
-        ora uci_send_rem+1
-        beq @sb_done
-        jmp @chunk_loop
+        ; written == requested? Full 16-bit compare (§13.3). Anything else —
+        ; fewer (the firmware's 893-byte truncation lands here: it drops the
+        ; last byte with a clean status and reports 892) or an impossible
+        ; more — means the datagram on the wire is not the one the caller
+        ; built, and for UDP that datagram is already gone; no retry
+        ; bookkeeping applies.
+        lda uci_write_resp+0
+        cmp uci_send_rem+0
+        bne @sb_short
+        lda uci_write_resp+1
+        cmp uci_send_rem+1
+        bne @sb_short
 
-@sb_done:
         clc
+        rts
+
+@sb_short:
+        lda #UCI_ERR_SHORT_WRITE
+        sta net_last_error
+        sec
+        rts
+
+@sb_send_fail:
+        lda #UCI_ERR_SEND_FAIL
+        sta net_last_error
+        sec
         rts
 
 @sb_wedged:
@@ -683,7 +716,7 @@ uci_udp_connect:
 ; handshake packet yet). If udp_recv_ready is already set, the main loop
 ; hasn't consumed the previous packet — skip so we don't overwrite it.
 ;
-; Otherwise: SOCKET_READ(sock, 1500). Response = actual_len (2 B) +
+; Otherwise: SOCKET_READ(sock, UCI_READ_CHUNK_MAX). Response = actual_len (2 B) +
 ; payload. Copy payload into udp_recv_buf, store length into udp_recv_len,
 ; copy net_udp_dest_ip into udp_recv_src_ip (connected-UDP: the source is
 ; always the peer we're pinned to), set udp_recv_ready = 1.
@@ -1124,9 +1157,9 @@ uci_socket_id:      .res 1          ; socket_id returned by UDP_CONNECT
 uci_socket_open:    .res 1          ; 0 = not yet opened, 1 = connected
 
 ; --- send state ---
-uci_send_rem:       .res 2          ; 16-bit bytes remaining to send
-uci_chunk_len:      .res 2          ; 16-bit bytes remaining in current chunk
-uci_write_resp:     .res 2          ; written_lo/hi from SOCKET_WRITE
+uci_send_rem:       .res 2          ; 16-bit requested length (kept for the count check)
+uci_chunk_len:      .res 2          ; 16-bit push countdown (consumed by the loop)
+uci_write_resp:     .res 2          ; written_lo/hi from SOCKET_WRITE (RESP_DATA)
 
 ; --- receive state ---
 uci_read_hdr:       .res 2          ; actual_len_lo/hi from SOCKET_READ
