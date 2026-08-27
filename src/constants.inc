@@ -54,43 +54,62 @@ REKEY_COUNTER_B7    = $0F
 ; The largest inner payload this implementation can carry in one WireGuard
 ; Type-4 datagram. A datagram on the wire is payload + WG_DATA_OVERHEAD.
 ;
-; 861 = UCI_READ_CHUNK_MAX (893) - WG_DATA_OVERHEAD (32). See that constant
-; for why 893 and not 894 (894 is a firmware hang on 3.14d).
+; DERIVED, NOT PINNED (c64-lib-contract SPEC v0.12.0 §13.3, consumer
+; obligation). The number comes from the selected backend's net_caps.inc
+; (src/net/$(BACKEND)/net_caps.inc, picked by the Makefile's -I path — §13.3
+; requires backend selection to select the include path too): a Type-4
+; datagram has to fit both the largest datagram the backend can SEND whole
+; and the largest it can RECEIVE whole, so
 ;
-; CORRECTED 2026-08-26. This was 480, documented here and in the README as a
-; measured "hardware ceiling" of 512 - 32. That was WRONG, and the error was
-; ours in an instructive way: the 512 came from this project's own Phase 3
-; MVP choice of UCI_READ_CHUNK_MAX, and having only ever ASKED for 512 we
-; measured that we only ever RECEIVED 512, then concluded the firmware could
-; not do more. The one larger request tested (1024) failed, which looked like
-; confirmation — but 1024 is above the real 894 cap and was being rejected
-; with `82,PARAMETER(S) OUT OF RANGE` on the STATUS channel, which this
-; adapter drains without reading. Both the measurement and the rejection were
-; correct; the inference joining them was not. Root-caused upstream by
-; chrisgleissner on GideonZ/1541ultimate#802.
+;     WG_MTU = min(NET_UDP_SEND_MAX, NET_UDP_RECV_MAX) - WG_DATA_OVERHEAD
 ;
-; Re-measured on our own U64E (fw 3.14d, 2026-08-26): datagrams of 512, 600,
-; 700, 800, 861 and 893 bytes all arrive WHOLE in a single net_poll, header
-; reporting the true length, net_last_error $00.
+; Today (UCI, U64E fw 3.14d): min(892, 1472) - 32 = 860, SEND-bound. The
+; receive side already takes 1472, so the only thing that moves this number
+; is the send ceiling: a firmware WRITE_SOCKET_MORE (chunked push, filed as
+; GideonZ/1541ultimate#806) would lift NET_UDP_SEND_MAX to ~1440 and this
+; equate follows it with no edit here. Under ip65 both caps are 1472 and
+; WG_MTU is 1440. Every length on the path is 16-bit (contract §13.3), so
+; nothing else in the tree needs to change when the caps do.
 ;
-; WHAT REMAINS TRUE. A standard 1420-byte MTU is still unreachable:
-;   * one READ_SOCKET can deliver at most 893 B, and a datagram larger than
-;     the request is truncated with the remainder DISCARDED, not queued —
-;     so multi-read reassembly cannot recover it;
-;   * 1472 B is the largest datagram that reaches the device at all, because
-;     lwIP is built with IP_REASSEMBLY = 0 (device-wide, not a UCI matter).
-; Reading a 1420 B packet whole needs Data More support on the network
-; target, which the firmware does not implement.
+; HISTORY. This was 480, documented as a measured "hardware ceiling" of
+; 512 - 32. The 512 was this project's own Phase 3 MVP read size; having
+; only ever ASKED for 512 we only ever received 512 and called it a limit
+; (the one larger request tried, 1024, was above the then-real 894 cap and
+; was rejected on the STATUS channel this adapter drains unread). Root-caused
+; upstream by chrisgleissner on GideonZ/1541ultimate#802. Then 861 = 893 - 32
+; (read-bound), until the send side was measured on 2026-08-27: a 1452-byte
+; SOCKET_WRITE leaves the C64 as 800 + 652 bytes, two torn datagrams. The
+; send ceiling is 892 and it is the binding one.
 ;
-; COST AT STOCK SPEED, worth knowing before raising this further. Every byte
-; of a read carries a uci_fence, and the C64-Ultimate-conformant fence
-; (UCI_FENCE_INNER = 217, §13.6) is ~5.45 ms at 1 MHz. An 893-byte read is
-; therefore several seconds of wall clock at stock speed — measured: the
-; 10 s per-step budget in tools/test_uci_udp_size_probe.py had to be raised
-; to 45 s for the large sizes to complete at 1 MHz. At 48 MHz it is
-; negligible. This is a real tension between §13.6 conformance and the
-; no-REU/1 MHz story, and it scales with WG_MTU.
+; COST AT STOCK SPEED. Every byte of a read carries a uci_fence, and the
+; C64-Ultimate-conformant fence (UCI_FENCE_INNER = 217, §13.6) is ~5.45 ms
+; at 1 MHz, so a full-size read is seconds of wall clock at 1 MHz and
+; negligible at 48 MHz. It scales with WG_MTU.
 ;
-; PEERS MUST BE CONFIGURED WITH MTU = 861 (see README).
+; PEERS MUST BE CONFIGURED WITH MTU = WG_MTU (see README).
+.include "net_caps.inc"
 WG_DATA_OVERHEAD    = 32        ; 16 B Type-4 header + 16 B Poly1305 tag
-WG_MTU              = 860       ; = 892 - WG_DATA_OVERHEAD (SEND-bound)
+.if NET_UDP_SEND_MAX < NET_UDP_RECV_MAX
+WG_NET_UDP_MAX      = NET_UDP_SEND_MAX
+.else
+WG_NET_UDP_MAX      = NET_UDP_RECV_MAX
+.endif
+WG_MTU              = WG_NET_UDP_MAX - WG_DATA_OVERHEAD
+.assert WG_MTU + WG_DATA_OVERHEAD <= NET_UDP_SEND_MAX, error, "WG_MTU + overhead exceeds NET_UDP_SEND_MAX"
+.assert WG_MTU + WG_DATA_OVERHEAD <= NET_UDP_RECV_MAX, error, "WG_MTU + overhead exceeds NET_UDP_RECV_MAX"
+.assert WG_MTU >= 576 - 28, error, "WG_MTU below the IPv4 minimum-reassembly datagram; peers cannot be configured this low"
+
+; §13.8: the consumer's receive buffer must hold the backend's published
+; receive guarantee; src/contract_asserts.s fails the build if it does not,
+; instead of overrunning at runtime. Held at the classic 1500 rather than
+; exactly NET_UDP_RECV_MAX: the 28 bytes buy nothing, and tools/test_mtu.py
+; drives full 1500-byte Type-4 datagrams (1468-byte payloads) straight into
+; udp_recv_buf to exercise the 16-bit transport path above the tunnel MTU.
+UDP_RECV_BUF_SIZE   = 1500
+
+; Inner IP/UDP framing carried inside a Type-4 payload (udp_tunnel_build).
+; The tunnel text payload is what is left of WG_MTU after these headers.
+IP_HDR_LEN          = 20
+UDP_HDR_LEN         = 8
+IP_UDP_HDR_LEN      = IP_HDR_LEN + UDP_HDR_LEN
+MSG_TEXT_MAX        = WG_MTU - IP_UDP_HDR_LEN

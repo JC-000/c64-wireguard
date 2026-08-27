@@ -762,10 +762,25 @@ transport_decrypt:
 ;   tp_payload_len  — payload length
 ;   Network must be initialized, peer IP/port set
 ;
-; Output: C=0 success, C=1 failure
+; Output: C=0 success, C=1 failure (including payload > WG_MTU: the
+;         datagram would exceed NET_UDP_SEND_MAX and the backend would tear
+;         it into two packets — refused here, before anything is encrypted)
 ; Clobbers: A, X, Y
 ; =============================================================================
 transport_send:
+        ; --- payload must fit the tunnel MTU (16-bit compare) ---
+        lda tp_payload_len+1
+        cmp #>WG_MTU
+        bcc @len_ok
+        bne @too_long
+        lda tp_payload_len
+        cmp #<WG_MTU
+        bcc @len_ok
+        beq @len_ok
+@too_long:
+        sec
+        rts
+@len_ok:
         jsr transport_encrypt
 
         ; Set up UDP send

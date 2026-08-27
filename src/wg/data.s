@@ -612,7 +612,7 @@ hs_preshared_key:
 zp_save_buf:
         .res 26, 0             ; ZP save area ($02-$1B)
 udp_recv_buf:
-        .res 1500, 0           ; incoming UDP packet buffer (MTU-sized)
+        .res UDP_RECV_BUF_SIZE, 0   ; incoming UDP packet buffer (§13.8: >= NET_UDP_RECV_MAX)
 udp_recv_len:
         .res 2                 ; length of received packet
 udp_recv_src_ip:
@@ -662,6 +662,8 @@ tp_payload_len:
         .res 2                 ; 16-bit payload length (up to 1500)
 tp_packet:
         .res 1500, 0           ; Type 4 packet buffer (MTU-sized)
+.assert WG_MTU + WG_DATA_OVERHEAD <= 1500, error, "tp_packet smaller than a full Type-4 datagram"
+.assert NET_UDP_RECV_MAX <= 1500, error, "tp_packet smaller than the backend's NET_UDP_RECV_MAX"
 tp_packet_len:
         .res 2                 ; total packet length
 tp_encrypt_error:
@@ -712,20 +714,25 @@ ip_cksum_result:
         .res 2                 ; IP checksum scratch
 
 ; --- Messaging (msg_port is in APP_DATA; remaining msg_* state is mutable) ---
+; Sized from the tunnel MTU (constants.inc), never from literals: a message
+; is text + 28 bytes of IP/UDP framing and the whole thing must fit in one
+; Type-4 payload, so the text buffer is MSG_TEXT_MAX = WG_MTU - 28 and the
+; packet buffer is exactly WG_MTU. All lengths are 16-bit (contract §13.3).
 msg_input_buf:
-        .res 40, 0             ; keyboard input buffer
+        .res MSG_TEXT_MAX, 0   ; keyboard input buffer (fills one tunnel packet)
 msg_input_len:
-        .res 1                 ; input length
+        .res 2                 ; input length (16-bit)
 msg_recv_ptr:
         .res 2                 ; pointer to received message text
 msg_recv_len:
-        .res 1                 ; received message length
+        .res 2                 ; received message length (16-bit)
 
 ; --- IP packet buffer ---
 ip_packet_buf:
-        .res 80, 0             ; outgoing IP packet
+        .res WG_MTU, 0         ; outgoing IP packet (28 B headers + MSG_TEXT_MAX)
 ip_pkt_len:
-        .res 1                 ; IP packet length
+        .res 2                 ; IP packet length (16-bit)
+.assert WG_MTU = IP_UDP_HDR_LEN + MSG_TEXT_MAX, error, "ip_packet_buf and msg_input_buf sizes disagree"
 
 ; --- Cookie state ---
 cookie_buf:

@@ -30,17 +30,24 @@
 
 ; The tunnel MTU must fit inside one SOCKET_READ. The firmware truncates
 ; rather than splits, so exceeding this is silent data loss, not an error.
-; Both symbols are equates, so this is checked at assembly time.
-.assert (WG_MTU + WG_DATA_OVERHEAD) <= UCI_READ_CHUNK_MAX, error, "WG_MTU + overhead exceeds UCI_READ_CHUNK_MAX: inbound datagrams would be truncated silently"
+; Compared against the §13 capability this backend publishes in
+; net_caps.inc (NET_UDP_RECV_MAX). That guarantee can never exceed what the
+; adapter actually requests per read (UCI_READ_CHUNK_MAX); both are
+; equates, so this is checked at assembly time.
+.assert NET_UDP_RECV_MAX <= UCI_READ_CHUNK_MAX, error, "net_caps.inc NET_UDP_RECV_MAX exceeds UCI_READ_CHUNK_MAX: the adapter never reads that much"
+.assert (WG_MTU + WG_DATA_OVERHEAD) <= NET_UDP_RECV_MAX, error, "WG_MTU + overhead exceeds NET_UDP_RECV_MAX: inbound datagrams would be truncated silently"
 
 ; SEND side — the mirror of the assert above, and it was missing. On a
 ; connected UDP socket each SOCKET_WRITE emits its OWN datagram, so a frame
 ; larger than one write does not chunk, it FRAGMENTS: measured on hardware
 ; 2026-08-27, a 1452-byte send left the C64 as 800 + 652 bytes, two torn
 ; datagrams, with carry=0 and net_last_error=$00. The peer drops both and
-; nothing reports it, because uci_write_resp is pre-stashed to the chunk
-; length so the bookkeeping reads as full success.
-.assert (WG_MTU + WG_DATA_OVERHEAD) <= UCI_DATA_QUEUE_MAX, error, "WG_MTU + overhead exceeds UCI_DATA_QUEUE_MAX: outbound datagrams would be silently fragmented into multiple UDP packets"
+; nothing reports it: the written count the firmware returns after the write
+; is the full chunk length — the queue really did accept every byte; it is
+; the datagram framing that was torn — so the bookkeeping reads as full
+; success.
+.assert NET_UDP_SEND_MAX <= UCI_DATA_QUEUE_MAX, error, "net_caps.inc NET_UDP_SEND_MAX exceeds UCI_DATA_QUEUE_MAX: the adapter would fragment a datagram it promised to send whole"
+.assert (WG_MTU + WG_DATA_OVERHEAD) <= NET_UDP_SEND_MAX, error, "WG_MTU + overhead exceeds NET_UDP_SEND_MAX: outbound datagrams would be silently fragmented into multiple UDP packets"
 
 ; --- net_abi.inc contract ---
 .export net_init

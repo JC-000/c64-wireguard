@@ -384,7 +384,7 @@ do_ping:
         sta     tp_payload_ptr+1
         lda     ip_pkt_len
         sta     tp_payload_len
-        lda     #0
+        lda     ip_pkt_len+1
         sta     tp_payload_len+1
         jsr     transport_send
         jsr     timer_mark_send
@@ -415,7 +415,9 @@ do_message_input:
         lda     #>msg_input_buf
         sta     zp_ptr1+1
         lda     msg_input_len
-        sta     zp_tmp1
+        sta     zp_tmp1                 ; text length, 16-bit
+        lda     msg_input_len+1
+        sta     zp_tmp2
         jsr     udp_tunnel_build
         ; send through transport
         lda     #<ip_packet_buf
@@ -424,7 +426,7 @@ do_message_input:
         sta     tp_payload_ptr+1
         lda     ip_pkt_len
         sta     tp_payload_len
-        lda     #0
+        lda     ip_pkt_len+1
         sta     tp_payload_len+1
         jsr     transport_send
         jsr     timer_mark_send
@@ -478,11 +480,17 @@ do_load_config:
 ;
 ; So the position lives in msg_input_len, which is where the count has to end
 ; up anyway. Registers are then free to be clobbered by any KERNAL call.
-; Output: msg_input_buf filled, msg_input_len set
+;
+; The position is 16-bit (contract §13.3): the buffer is MSG_TEXT_MAX bytes,
+; one full tunnel packet's worth of text, which is past what an 8-bit index
+; reaches. Each character is stored through a pointer rebuilt from the
+; position, so no register carries state across getin/chrout.
+; Output: msg_input_buf filled, msg_input_len set (16-bit)
 ; =============================================================================
 read_input_line:
         lda     #0
         sta     msg_input_len           ; buffer position AND final count
+        sta     msg_input_len+1
 @ril_loop:
         jsr     getin                   ; clobbers X and Y; A = character
         beq     @ril_loop               ; no key pressed
@@ -490,16 +498,39 @@ read_input_line:
         beq     @ril_done
         cmp     #$14                    ; DELETE (PETSCII)
         beq     @ril_del
-        ldy     msg_input_len           ; reload index AFTER getin, not before
-        cpy     #40                     ; max length
-        beq     @ril_loop               ; buffer full, ignore
-        sta     msg_input_buf,y         ; A still holds the character
+        sta     zp_tmp1                 ; park the character
+        ; buffer full? (msg_input_len >= MSG_TEXT_MAX, 16-bit compare)
+        lda     msg_input_len+1
+        cmp     #>MSG_TEXT_MAX
+        bcc     @ril_store
+        bne     @ril_loop               ; high byte above: full, ignore
+        lda     msg_input_len
+        cmp     #<MSG_TEXT_MAX
+        bcs     @ril_loop               ; low byte at/above: full, ignore
+@ril_store:
+        lda     #<msg_input_buf         ; zp_ptr1 = msg_input_buf + position
+        clc
+        adc     msg_input_len
+        sta     zp_ptr1
+        lda     #>msg_input_buf
+        adc     msg_input_len+1
+        sta     zp_ptr1+1
+        ldy     #0
+        lda     zp_tmp1
+        sta     (zp_ptr1),y
         jsr     chrout                  ; echo (preserves A)
         inc     msg_input_len
+        bne     @ril_loop
+        inc     msg_input_len+1
         jmp     @ril_loop
 @ril_del:
         lda     msg_input_len
+        ora     msg_input_len+1
         beq     @ril_loop               ; nothing to delete
+        lda     msg_input_len
+        bne     @ril_dec_lo
+        dec     msg_input_len+1         ; borrow into the high byte
+@ril_dec_lo:
         dec     msg_input_len
         lda     #$14                    ; PETSCII delete
         jsr     chrout

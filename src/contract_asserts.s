@@ -240,3 +240,22 @@ WG_REU_BANKS_USED = $00
 .assert __MAIN_AREA_LO_LAST__ <= WG_SQTAB_BASE, lderror, "image overruns the sqtab window — MAIN_AREA_LO now extends past WG_SQTAB_BASE"
 
 .endif
+
+; --- §13.8 network-backend capability fit (SPEC v0.12.0 §13.3 / §13.8) -------
+;
+; The selected backend publishes what it guarantees to move in one datagram
+; (src/net/$(BACKEND)/net_caps.inc, via the Makefile -I path; §13.3). The
+; consumer must size its receive buffer to the receive guarantee and keep
+; its tunnel MTU inside the send guarantee; both are equates, so a backend
+; swap or a capability bump that no longer fits fails here at assembly
+; time. These are the §13.8 UDP-consumer asserts verbatim in shape, against
+; WG's own size equates (a .res in another TU has no size ca65 can see).
+; The send leg is also asserted inside the UCI adapter (src/net/uci/net.s)
+; against its private queue constant — this is the backend-agnostic mirror.
+.include "constants.inc"
+.include "net_caps.inc"
+.assert NET_UDP_SEND_MAX >= 1, error, "backend must publish NET_UDP_SEND_MAX (SPEC 13.3) — header defines but never sets it"
+.assert NET_UDP_RECV_MAX >= 1, error, "backend must publish NET_UDP_RECV_MAX (SPEC 13.3) — header defines but never sets it"
+.assert UDP_RECV_BUF_SIZE >= NET_UDP_RECV_MAX, error, "udp_recv_buf is smaller than the backend's NET_UDP_RECV_MAX — a full-size inbound datagram would overrun it"
+.assert WG_MTU + WG_DATA_OVERHEAD <= NET_UDP_SEND_MAX, error, "WG_MTU + WG_DATA_OVERHEAD exceeds the backend's NET_UDP_SEND_MAX — outbound datagrams would be torn"
+.assert WG_MTU + WG_DATA_OVERHEAD <= NET_UDP_RECV_MAX, error, "WG_MTU + WG_DATA_OVERHEAD exceeds the backend's NET_UDP_RECV_MAX — inbound datagrams would be truncated"

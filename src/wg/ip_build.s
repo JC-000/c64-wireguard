@@ -219,22 +219,36 @@ icmp_parse_reply:
 ; udp_tunnel_build - Build an IP/UDP packet for text messaging in the tunnel
 ;
 ; Input:  zp_ptr1 ($FB/$FC) = pointer to text data
-;         zp_tmp1 ($02)     = text length
+;         zp_tmp1 ($02)     = text length, low byte
+;         zp_tmp2 ($03)     = text length, high byte
 ;         tunnel_ip (src), ping_target_ip (dst), msg_port (port)
 ; Output: ip_packet_buf filled (20B IPv4 + 8B UDP + payload), ip_pkt_len set
+;         (16-bit). A length above MSG_TEXT_MAX is clamped to it: the packet
+;         must fit one Type-4 payload and ip_packet_buf is exactly WG_MTU.
 ; Clobbers: A, X, Y, zp_ptr1, zp_ptr2, zp_tmp1, zp_tmp2
+;
+; Every length here is 16-bit (contract §13.3): the IP total-length and UDP
+; length header fields, the payload copy, and ip_pkt_len.
 ; =============================================================================
 udp_tunnel_build:
-        ; save text pointer and length before we clobber zp_ptr1/zp_tmp1
-        lda zp_ptr1
-        sta zp_ptr2
-        lda zp_ptr1+1
-        sta zp_ptr2+1
+        ; --- clamp text length to MSG_TEXT_MAX (16-bit compare) ---
+        lda zp_tmp2
+        cmp #>MSG_TEXT_MAX
+        bcc @len_ok
+        bne @clamp
         lda zp_tmp1
-        sta zp_tmp2             ; text length saved in zp_tmp2
+        cmp #<MSG_TEXT_MAX
+        bcc @len_ok
+        beq @len_ok
+@clamp:
+        lda #<MSG_TEXT_MAX
+        sta zp_tmp1
+        lda #>MSG_TEXT_MAX
+        sta zp_tmp2
+@len_ok:
 
         ; --- copy IP header template (20 bytes) ---
-        ldx #19
+        ldx #IP_HDR_LEN-1
 @copy_hdr:
         lda ip_hdr_template,x
         sta ip_packet_buf,x
@@ -242,13 +256,14 @@ udp_tunnel_build:
         bpl @copy_hdr
 
         ; --- fill IP header fields ---
-        ; total length = 28 + text_len (big-endian)
-        lda #0
-        sta ip_packet_buf+2
-        lda #28
+        ; total length = 28 + text_len (big-endian, 16-bit)
+        lda zp_tmp1
         clc
-        adc zp_tmp2
-        sta ip_packet_buf+3     ; assumes total < 256
+        adc #IP_UDP_HDR_LEN
+        sta ip_packet_buf+3
+        lda zp_tmp2
+        adc #0
+        sta ip_packet_buf+2
 
         ; protocol = UDP (17)
         lda #IP_PROTO_UDP
@@ -288,31 +303,50 @@ udp_tunnel_build:
         lda msg_port+1
         sta ip_packet_buf+23
 
-        ; UDP length = 8 + text_len (big-endian)
-        lda #0
-        sta ip_packet_buf+24
-        lda #8
+        ; UDP length = 8 + text_len (big-endian, 16-bit)
+        lda zp_tmp1
         clc
-        adc zp_tmp2
+        adc #UDP_HDR_LEN
         sta ip_packet_buf+25
+        lda zp_tmp2
+        adc #0
+        sta ip_packet_buf+24
 
         ; UDP checksum = 0 (optional per RFC 768)
         lda #0
         sta ip_packet_buf+26
         sta ip_packet_buf+27
 
-        ; --- copy text payload (from zp_ptr2, length in zp_tmp2) ---
+        ; --- copy text payload (16-bit: full pages, then remainder) ---
+        lda #<(ip_packet_buf+IP_UDP_HDR_LEN)
+        sta zp_ptr2
+        lda #>(ip_packet_buf+IP_UDP_HDR_LEN)
+        sta zp_ptr2+1
         ldy #0
-@copy_text:
-        cpy zp_tmp2
-        beq @text_done
-        lda (zp_ptr2),y
-        sta ip_packet_buf+28,y
+        ldx zp_tmp2             ; full pages
+        beq @copy_rem
+@copy_pg:
+        lda (zp_ptr1),y
+        sta (zp_ptr2),y
         iny
-        bne @copy_text          ; max 255 bytes
+        bne @copy_pg
+        inc zp_ptr1+1
+        inc zp_ptr2+1
+        dex
+        bne @copy_pg
+@copy_rem:
+        ldx zp_tmp1             ; remaining bytes
+        beq @text_done
+        ldy #0
+@copy_lo:
+        lda (zp_ptr1),y
+        sta (zp_ptr2),y
+        iny
+        dex
+        bne @copy_lo
 @text_done:
 
-        ; --- set packet length = 28 + text_len ---
+        ; --- set packet length = 28 + text_len (16-bit) ---
         ;
         ; BEFORE the checksum, not after: ip_checksum documents "Clobbers:
         ; A, Y, zp_tmp2" and uses zp_tmp2 as its own sum-high accumulator,
@@ -327,17 +361,20 @@ udp_tunnel_build:
         ; bytes of whatever the previous packet left in ip_packet_buf were
         ; encrypted and transmitted after the text. That is stale memory
         ; going out over the wire, not merely a display artefact.
-        lda #28
+        lda zp_tmp1
         clc
-        adc zp_tmp2
+        adc #IP_UDP_HDR_LEN
         sta ip_pkt_len
+        lda zp_tmp2
+        adc #0
+        sta ip_pkt_len+1
 
         ; --- compute IP header checksum over 20 bytes ---
         lda #<ip_packet_buf
         sta zp_ptr1
         lda #>ip_packet_buf
         sta zp_ptr1+1
-        lda #20
+        lda #IP_HDR_LEN
         sta zp_tmp1
         jsr ip_checksum
         lda ip_cksum_result
@@ -347,11 +384,16 @@ udp_tunnel_build:
 
         rts
 
+; In APP_EXTRA (MAIN_AREA_HI): MAIN_AREA_LO has no headroom left for the
+; 16-bit length checks added here. See the note above print_buf16 in
+; session.s.
+        .segment "APP_EXTRA"
+
 ; =============================================================================
 ; udp_tunnel_parse - Parse a decrypted IP/UDP packet from the tunnel
 ;
 ; Input:  tp_packet+16 = decrypted IP packet
-; Output: A = 0 success (msg_recv_ptr/msg_recv_len set), A = $FF fail
+; Output: A = 0 success (msg_recv_ptr/msg_recv_len set, 16-bit), A = $FF fail
 ; Clobbers: A
 ; =============================================================================
 udp_tunnel_parse:
@@ -374,12 +416,29 @@ udp_tunnel_parse:
         lda #>(tp_packet+16+28)
         sta msg_recv_ptr+1
 
-        ; msg_recv_len = UDP length (byte 25) - 8
-        ; UDP length field is big-endian at offset 24-25; high byte assumed 0
+        ; msg_recv_len = UDP length (bytes 24-25, big-endian) - 8, 16-bit.
+        ; A UDP length below 8 is malformed (borrow out of the high byte).
         lda tp_packet+16+25
         sec
-        sbc #8
+        sbc #UDP_HDR_LEN
         sta msg_recv_len
+        lda tp_packet+16+24
+        sbc #0
+        sta msg_recv_len+1
+        bcc @fail
+
+        ; Bound the text to what one tunnel packet can carry. The header
+        ; field is peer-supplied; without this a forged length would have the
+        ; display walk past tp_packet. MSG_TEXT_MAX < sizeof tp_packet - 44.
+        lda msg_recv_len+1
+        cmp #>MSG_TEXT_MAX
+        bcc @len_ok
+        bne @fail
+        lda msg_recv_len
+        cmp #<MSG_TEXT_MAX
+        bcc @len_ok
+        bne @fail
+@len_ok:
 
         lda #0
         rts
