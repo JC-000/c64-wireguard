@@ -32,6 +32,7 @@
 .importzp SESSION_IDLE
 ; wg_state, rekey_pending, session_start_jiffy, last_send_jiffy,
 ; tp_payload_len : mutable globals (src/data.asm)
+.import session_reset
 .import wg_state
 .import rekey_pending
 .import session_start_jiffy
@@ -102,9 +103,10 @@ timer_check:
         jsr timer_elapsed_cmp
         bcc @check_rekey        ; C=0: not expired yet
 
-        ; Expired — reset to IDLE
-        lda #<SESSION_IDLE
-        sta wg_state
+        ; Expired — tear the session down. Route through session_reset so the
+        ; UDP socket is handed back (issue #71 / GideonZ/1541ultimate#808), not
+        ; just wg_state cleared inline — session_reset now closes the socket.
+        jsr session_reset
         lda #<session_expired_msg
         ldy #>session_expired_msg
         jsr print_string
