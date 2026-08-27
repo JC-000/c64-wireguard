@@ -13,4 +13,8 @@ NET_CAPS_INC = 1
 ; =============================================================================
 NET_UDP_SEND_MAX = 1472
 NET_UDP_RECV_MAX = 1472
+; Source-side backing for 1472: ip65 stages every inbound frame in
+; `eth_inp: .res 1518` (ip65/eth_buffer.s:10, prelinked blob, ip65 25a9c5a);
+; 1518 - 14 (Ethernet) - 20 (IPv4) - 8 (UDP) = 1476 >= 1472, so the driver
+; can hold a full 1472-byte UDP payload before net_udp_recv_cb copies it.
 .endif ; NET_CAPS_INC
