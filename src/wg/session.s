@@ -408,7 +408,23 @@ session_reset:
 ; If different, updates the stored values (roaming support).
 ; Only called after successful AEAD decrypt (spoof protection).
 ;
-; Clobbers: A, X
+; A roam moves the endpoint under a live socket, which under UCI is pinned to
+; the OLD address by UDP_CONNECT — so the socket is handed back on the update
+; path for the same reason config_load does it (issue #65). Reconnection is
+; automatic on the next net_udp_send. Nothing is lost by closing: a socket
+; pinned to the address the peer just left cannot receive from the new one
+; either, so keeping it open only guarantees we talk to nobody.
+;
+; Note this update path is currently unreachable under the UCI backend: its
+; net_poll synthesises udp_recv_src_ip from net_udp_dest_ip ("connected UDP:
+; source IP == net_udp_dest_ip"), which session_stage_dest staged from
+; wg_peer_ip, so the comparison below can never differ. Detecting a roam at
+; all under UCI needs the backend to report a real source address. The close
+; is here so the invariant — the endpoint never moves under a socket pinned to
+; where it was — holds at every site that writes wg_peer_ip, rather than
+; holding by accident at this one.
+;
+; Clobbers: A, X, Y (net_udp_close uses all three)
 ; =============================================================================
 endpoint_update:
         ; Compare source IP (4 bytes)
@@ -446,6 +462,8 @@ endpoint_update:
         lda udp_recv_src_port+1
         sta wg_peer_port+1
 
+        ; The endpoint moved — drop the socket pinned to where it was (#65).
+        jsr net_udp_close
         rts
 
 ; =============================================================================

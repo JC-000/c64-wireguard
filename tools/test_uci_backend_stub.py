@@ -8,6 +8,11 @@ detection + error-reporting path of src/net/uci/net.s is wired
 correctly: the probe returns a "not present" verdict rather than
 hanging, and the error code is surfaced to the caller.
 
+Tests 4-5 cover issue #65: config_load must hand the connection-oriented
+UCI socket back when the peer endpoint moves, and must leave it alone when
+it does not. Both verdicts are reachable without UCI hardware -- see the
+comment above those tests.
+
 Usage:
     python3 tools/test_uci_backend_stub.py
 
@@ -140,6 +145,78 @@ def run_tests(transport, labels):
               f"(want {UCI_ERR_NOT_PRESENT:02x})")
         failed += 1
 
+    # --- Tests 4-5: config_load drops a socket pinned to the OLD peer (#65)
+    #
+    # Under UCI the socket is connection-oriented: UDP_CONNECT pins it to
+    # wg_peer_ip/wg_peer_port at connect time, and net_udp_send short-circuits
+    # on uci_socket_open without revisiting that. So loading a config naming a
+    # new peer used to keep sending to the old one, with nothing reporting it.
+    # config_load now hands the socket back when -- and only when -- the
+    # endpoint actually moves.
+    #
+    # Observable without UCI hardware: every $DF1x reads $FF on VICE, so
+    # net_udp_close's wait times out, and its timeout leg clears the local
+    # bookkeeping regardless (documented behaviour: if we cannot close it we
+    # must at least not go on believing we own it). uci_socket_open going
+    # 1 -> 0 therefore means "close was attempted"; staying at 1 means
+    # "config_load left the socket alone". That is exactly the distinction
+    # the fix turns on, so the absence of a UCI does not weaken the test.
+    #
+    # The wait is TOD-bounded (~1.5 s, PR #68). Start the clock explicitly
+    # rather than trusting VICE's power-on TOD state: net_init returns
+    # UCI_ERR_NOT_PRESENT before it ever reaches uci_tod_start, so nothing
+    # above has started it, and an unstarted TOD is precisely how these waits
+    # went unbounded on hardware.
+    jsr(transport, labels["uci_tod_start"], timeout=5.0)
+
+    config_load = labels["config_load"]
+    wg_peer_ip = labels["wg_peer_ip"]
+    cfg_peer_endpoint_ip = labels["cfg_peer_endpoint_ip"]
+
+    # IP(4) + port(2, big-endian) written as one 6-byte run on both sides.
+    # Contiguity is guaranteed by the .assert pair in src/wg/config.s, which
+    # fails the link if either pair is ever split.
+    PEER_A = bytes([10, 0, 0, 5, 0xCA, 0x6C])   # 10.0.0.5:51820
+    PEER_B = bytes([10, 0, 0, 6, 0xCA, 0x6D])   # 10.0.0.6:51821
+
+    def config_load_with(cfg_endpoint, live_endpoint):
+        """Point cfg_* at one endpoint, wg_peer_* at another, call config_load.
+
+        Returns (uci_socket_open, live endpoint after the call).
+        """
+        write_bytes(transport, wg_peer_ip, live_endpoint)
+        write_bytes(transport, cfg_peer_endpoint_ip, cfg_endpoint)
+        write_bytes(transport, uci_socket_id, bytes([10]))
+        write_bytes(transport, uci_socket_open, bytes([1]))
+        jsr(transport, config_load, timeout=30.0)
+        return (read_bytes(transport, uci_socket_open, 1)[0],
+                read_bytes(transport, wg_peer_ip, 6))
+
+    # Test 4: endpoint unchanged -> socket untouched. This is the rekey path;
+    # session_initiate calls config_load every time, and churning the socket
+    # there would return a slot the rekey is about to ask for again.
+    sopen, live = config_load_with(PEER_A, PEER_A)
+    if sopen == 1 and live == PEER_A:
+        print(f"PASS Test 4: unchanged endpoint leaves socket_open={sopen}, "
+              f"wg_peer={live.hex()}")
+        passed += 1
+    else:
+        print(f"FAIL Test 4: socket_open={sopen} (want 1), "
+              f"wg_peer={live.hex()} (want {PEER_A.hex()})")
+        failed += 1
+
+    # Test 5: endpoint moved -> socket handed back AND the new endpoint stored.
+    # Both halves matter: storing without closing is the #65 bug itself.
+    sopen, live = config_load_with(PEER_B, PEER_A)
+    if sopen == 0 and live == PEER_B:
+        print(f"PASS Test 5: moved endpoint closes the socket "
+              f"(socket_open={sopen}), wg_peer={live.hex()}")
+        passed += 1
+    else:
+        print(f"FAIL Test 5: socket_open={sopen} (want 0), "
+              f"wg_peer={live.hex()} (want {PEER_B.hex()})")
+        failed += 1
+
     return passed, failed
 
 
@@ -148,7 +225,9 @@ def main():
     build()
 
     labels = Labels.from_file(LABELS_PATH)
-    required = ["net_init", "net_last_error", "uci_socket_id"]
+    required = ["net_init", "net_last_error", "uci_socket_id",
+                "uci_tod_start", "config_load", "wg_peer_ip",
+                "cfg_peer_endpoint_ip"]
     missing = [n for n in required if labels.address(n) is None]
     if missing:
         print(f"FATAL: missing exported label(s): {', '.join(missing)}")
