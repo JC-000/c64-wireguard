@@ -76,9 +76,15 @@ $8000-$83FF  SQTAB_HOLE:   quarter-square table window, runtime-built by
                             here would load everything above it $400 low
 $8400-$9FFF  MAIN_AREA_HI: LIB_X25519_INIT_CODE (cold init, reclaimable
                             after boot) + APP_BSS overflow
-$A000-$BFFF  ip65 BSS:     private to ip65 (BASIC ROM banked out); unused
-                            under BACKEND=uci
+$A000-$BFFF  unallocated:  no ld65 MEMORY region covers it under either cfg
 ```
+
+The ip65 blob's private BSS is **not** at `$A000-$BFFF`, as this table said
+before its §13.7 footprint was measured. `ip65-build/ip65.cfg` links it at
+`$4000` (occupied to `$4F3F`), which lands inside `MAIN_AREA_LO`. Under
+`BACKEND=uci` nothing claims that RAM and the point is moot; under
+`BACKEND=ip65` the blob and the cfg disagree about ~3.8 KB. The measured
+equates and the details are in `src/net/ip65/ip65_blob.s`.
 
 ip65 uses zero page $02-$1B (cc65 standard). These overlap our crypto ZP variables. The `src/net/ip65/net.s` wrapper saves and restores $02-$1B around every ip65 call (~60 cycles overhead, negligible vs network latency).
 
