@@ -84,8 +84,11 @@ ip65_blob_end:
 ; ($32F0-$7FFF), on top of APP_CODE, APP_DATA and the chacha archive. ip65's
 ; eth_inp/eth_outp frame buffers sit in that span, so driving this backend on
 ; real RR-Net hardware would have the driver write over app code. It has gone
-; unnoticed because the ip65 path is never exercised — VICE has no RR-Net and
-; all device work runs BACKEND=uci. The repo's memory maps claimed the BSS
+; unnoticed because nothing has ever driven this backend's ethernet — not
+; because nothing could. VICE emulates RR-Net and c64-test-harness drives an
+; ethernet-capable build (VICE_ETHERNET_BIN; vice_ethernet_mode "rrnet", base
+; $DE00); it is only that no suite in tools/ requests it and every device run
+; is BACKEND=uci. So this IS reproducible in emulation. The repo's memory maps claimed the BSS
 ; was at $A000-$BFFF, which is what these measured equates now contradict;
 ; making the footprint declarable is exactly what §13.7 is for. The fix is a
 ; blob relink at a base the cfg actually reserves, which is a change to
