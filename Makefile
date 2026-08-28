@@ -167,6 +167,20 @@ endif
 CA65_SRCS = $(COMMON_SRCS) $(NET_SRCS)
 CA65_OBJS = $(patsubst $(SRC_DIR)/%.s,$(BUILD_DIR)/%.o,$(CA65_SRCS))
 
+# --- Header dependency tracking (issue #66) ---
+# Objects must depend on the .inc headers they include, or editing a header
+# leaves a stale .o in place and the link silently mixes old and new
+# definitions of a shared constant. That failure mode produces a wrong
+# artifact rather than a build error, and it also disarms every .assert-based
+# conformance guard in the tree: a translation unit that is not reassembled
+# cannot fire its asserts.
+#
+# ca65 emits the dependencies itself (--create-full-dep on the object rule
+# below), so nothing here hand-maintains a header list. Each fragment also
+# carries an empty rule per prerequisite, which is what keeps a *deleted*
+# header from wedging make with "No rule to make target".
+CA65_DEPS = $(CA65_OBJS:.o=.d)
+
 # Under BACKEND=ip65 the ip65 blob is a link-time dependency.  Under
 # BACKEND=uci the blob is not needed and the ip65 submodule/symlink is
 # not required.
@@ -246,9 +260,14 @@ clean:
 	rm -f $(PRG) $(LABELS) $(MAP) $(DBG)
 	rm -rf $(BUILD_DIR)/net $(BUILD_DIR)/crypto $(BUILD_DIR)/wg
 	rm -rf $(LIB_DIR)
-	rm -f $(BUILD_DIR)/*.o
+	rm -f $(BUILD_DIR)/*.o $(BUILD_DIR)/*.d
 	rm -f $(IP65_BUILD)/ip65_stub.o $(IP65_BUILD)/ip65-c64.bin $(IP65_BUILD)/ip65-c64.map
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.s $(OBJ_EXTRADEP) | $(BUILD_DIR)
 	mkdir -p $(dir $@)
-	$(CA65) $(CA65FLAGS) -o $@ $<
+	$(CA65) $(CA65FLAGS) --create-full-dep $(@:.o=.d) -o $@ $<
+
+# Pull in the generated header dependencies (issue #66). Leading `-` so a
+# first build, or one after `make clean`, does not complain about the
+# fragments not existing yet — the objects are rebuilt from scratch anyway.
+-include $(CA65_DEPS)
