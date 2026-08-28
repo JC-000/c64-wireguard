@@ -179,16 +179,30 @@ CA65_OBJS = $(patsubst $(SRC_DIR)/%.s,$(BUILD_DIR)/%.o,$(CA65_SRCS))
 # below), so nothing here hand-maintains a header list. Each fragment also
 # carries an empty rule per prerequisite, which is what keeps a *deleted*
 # header from wedging make with "No rule to make target".
+#
+# The flag-side sibling of this — an object is equally stale when the ca65
+# FLAGS change, which no .d fragment can record — is handled further down by
+# the CA65_FLAGSTAMP reconciliation (issue #76).
 CA65_DEPS = $(CA65_OBJS:.o=.d)
 
 # Under BACKEND=ip65 the ip65 blob is a link-time dependency.  Under
 # BACKEND=uci the blob is not needed and the ip65 submodule/symlink is
 # not required.
+#
+# $(CFG_FILE) is listed too (issue #76, ld65 half). It is the only part of
+# LD65FLAGS that varies — the other three are fixed output paths — and it was
+# NOT a prerequisite before: it appeared solely inside LD65FLAGS, so editing
+# cfg/c64-wireguard-*.cfg left the PRG untouched, and the ld65 side needed the
+# same treatment as ca65 after all. Naming the file is enough here, though; no
+# ld65 flag stamp is required, because unlike CA65FLAGS every value LD65FLAGS
+# can take is either a constant or this file, and a BACKEND flip now changes
+# both the recorded configuration (whose reconciliation drops every object)
+# and which .cfg is named.
 ifeq ($(BACKEND),ip65)
-PRG_DEPS     := $(CA65_OBJS) $(IP65_BIN) $(SIBLING_ARCHIVES)
+PRG_DEPS     := $(CA65_OBJS) $(CFG_FILE) $(IP65_BIN) $(SIBLING_ARCHIVES)
 OBJ_EXTRADEP := $(IP65_BIN)
 else
-PRG_DEPS     := $(CA65_OBJS) $(SIBLING_ARCHIVES)
+PRG_DEPS     := $(CA65_OBJS) $(CFG_FILE) $(SIBLING_ARCHIVES)
 OBJ_EXTRADEP :=
 endif
 
@@ -241,6 +255,81 @@ $(X25519_ARCHIVE): FORCE | $(LIB_DIR)
 $(CHACHA_ARCHIVE): FORCE | $(LIB_DIR)
 	bash tools/integration/build_chacha20poly1305.sh
 
+# --- Assembler-flag dependency tracking (issue #76) ---
+# The .d fragments record which FILES an object read, not which FLAGS it was
+# assembled with, and every knob this Makefile exposes moves CA65FLAGS without
+# touching a single file on disk:
+#
+#   BACKEND         changes -I $(SRC_DIR)/net/$(BACKEND), which is how
+#                   net_caps.inc (§13.3) is resolved — and the two backends
+#                   publish different capabilities (uci 892/1472, ip65
+#                   1472/1472), from which WG_MTU, MSG_TEXT_MAX and the buffer
+#                   sizes in src/wg/data.s derive.
+#   REU=0           adds -D WG_NO_REU=1.
+#   USE_*_SIBLING   add their own -D and change which sources are linked at all.
+#
+# With nothing carrying those, every .o looks up to date after a flip and make
+# relinks a binary assembled under the PREVIOUS configuration. Same
+# silent-wrong-artifact class as #66 — a wrong PRG rather than a build error —
+# and it also disarms the .assert conformance guards in src/contract_asserts.s,
+# which can only fire in a translation unit that is actually reassembled.
+# Measured against the pre-fix Makefile: `make BACKEND=uci REU=0` straight
+# after a REU=1 build reassembled ZERO objects and re-emitted the REU=1 PRG
+# byte for byte. With #69 making REU=0 the hardware-correct build, that is a
+# live way to ship a PRG that is neither profile.
+#
+# WHY THIS IS A DELETION AND NOT A STAMP PREREQUISITE. The obvious fix — write
+# the flags to a stamp file, only when they change, and hang every object off
+# it — DOES NOT WORK ON THIS TOOLCHAIN, and fails silently in the same
+# direction as the bug it is meant to fix. Apple ships GNU Make 3.81, which
+# compares mtimes at ONE-SECOND resolution, and a full assemble+link of this
+# tree takes about half a second: the rewritten stamp and the objects it is
+# supposed to invalidate land in the same second, make calls it a tie, and the
+# stale objects are relinked anyway. Measured, back-to-back, with exactly that
+# rule in place: a uci -> ip65 -> uci sequence reassembled 21, then 2, then 0
+# of 21 objects. A stamp is only ever as good as the clock's resolution.
+#
+# So the reconciliation is expressed as what it actually means — the artifacts
+# on disk were built under a different configuration, therefore they are not
+# artifacts of this one — and simply removes them. No timestamps involved, so
+# nothing depends on how fast the build is or how coarse the clock is.
+#
+# It runs at PARSE TIME, before make stats anything, because that is the only
+# point at which a deletion still changes make's mind: a recipe that deletes an
+# object mid-build is too late (make 3.81 has already made its decision, and
+# only notices on the NEXT invocation — also measured).
+#
+# Incremental builds are untouched: an unchanged configuration takes the fast
+# path of the `[ ... ] ||` below, deletes nothing, and make proceeds normally.
+CA65_FLAGSTAMP = $(BUILD_DIR)/.ca65flags
+CA65_FLAGTEXT  = $(BACKEND) $(CA65FLAGS)
+
+# Everything under build/ whose content is a function of CA65FLAGS: the objects
+# and their .d fragments, plus the four link outputs derived from them (the
+# link outputs are in the list because dropping only the objects leaves the
+# same one-second tie between a freshly assembled .o and the PRG beside it).
+#
+# The sibling archives are deliberately NOT here: they are FORCE-rebuilt on
+# every make by their own scripts, which read X25519_PROFILE themselves. Nor is
+# the ip65 blob, which ca65 never sees CA65FLAGS for. `clean` reuses this list
+# and then adds those two.
+FLAGGED_ARTIFACTS = $(PRG) $(LABELS) $(MAP) $(DBG) \
+                    $(BUILD_DIR)/*.o $(BUILD_DIR)/*.d \
+                    $(BUILD_DIR)/net $(BUILD_DIR)/crypto $(BUILD_DIR)/wg
+
+# Skipped under -n/--dry-run (both set the `n` letter in MAKEFLAGS): a dry run
+# must not mutate the tree. The cost is that `make -n` right after a flag flip
+# under-reports what a real build would do; predicting the rebuild is not worth
+# performing part of it.
+ifeq (,$(findstring n,$(firstword -$(MAKEFLAGS))))
+CA65_FLAGS_RECONCILE := $(shell \
+    [ "`cat $(CA65_FLAGSTAMP) 2>/dev/null`" = '$(CA65_FLAGTEXT)' ] || { \
+        rm -rf $(FLAGGED_ARTIFACTS); \
+        mkdir -p $(BUILD_DIR) && \
+        printf '%s\n' '$(CA65_FLAGTEXT)' > $(CA65_FLAGSTAMP); \
+    })
+endif
+
 # Build ip65 libraries (only if not already built)
 ip65-libs:
 	cd $(IP65_DIR) && $(MAKE) -C ip65 && $(MAKE) -C drivers
@@ -255,12 +344,20 @@ $(IP65_BIN): $(IP65_BUILD)/ip65_stub.s $(IP65_BUILD)/ip65.cfg ip65-libs
 run: $(PRG)
 	$(VICE) -autostart $(PRG)
 
-# Clean both backends' artifacts so switching BACKEND values is safe.
+# Clean both backends' artifacts so switching BACKEND values is safe. (Since
+# #76 a switch no longer needs this, but a clean is still a clean.)
+#
+# The flag stamp needs naming separately: it is a dotfile, so the globs inside
+# FLAGGED_ARTIFACTS do not match it. Removing it is what makes a cleaned tree
+# indistinguishable from a never-built one — leaving behind the record of a
+# configuration whose artifacts are all gone would make the next build's
+# reconciliation a no-op that deletes nothing (harmless, but only by accident)
+# and would mislead anyone reading build/ to see what the tree was last built
+# as.
 clean:
-	rm -f $(PRG) $(LABELS) $(MAP) $(DBG)
-	rm -rf $(BUILD_DIR)/net $(BUILD_DIR)/crypto $(BUILD_DIR)/wg
+	rm -rf $(FLAGGED_ARTIFACTS)
 	rm -rf $(LIB_DIR)
-	rm -f $(BUILD_DIR)/*.o $(BUILD_DIR)/*.d
+	rm -f $(CA65_FLAGSTAMP)
 	rm -f $(IP65_BUILD)/ip65_stub.o $(IP65_BUILD)/ip65-c64.bin $(IP65_BUILD)/ip65-c64.map
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.s $(OBJ_EXTRADEP) | $(BUILD_DIR)
