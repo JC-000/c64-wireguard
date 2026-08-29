@@ -76,15 +76,30 @@ $8000-$83FF  SQTAB_HOLE:   quarter-square table window, runtime-built by
                             here would load everything above it $400 low
 $8400-$9FFF  MAIN_AREA_HI: LIB_X25519_INIT_CODE (cold init, reclaimable
                             after boot) + APP_BSS overflow
-$A000-$BFFF  unallocated:  no ld65 MEMORY region covers it under either cfg
+$A000-$BFFF  IP65_BSS:     the ip65 blob's private BSS, occupied to $AF3F
+                            (BACKEND=ip65 only; reserved but empty at link
+                            time — the driver claims it at runtime). Free
+                            under BACKEND=uci, which has no blob
 ```
 
-The ip65 blob's private BSS is **not** at `$A000-$BFFF`, as this table said
-before its §13.7 footprint was measured. `ip65-build/ip65.cfg` links it at
-`$4000` (occupied to `$4F3F`), which lands inside `MAIN_AREA_LO`. Under
-`BACKEND=uci` nothing claims that RAM and the point is moot; under
-`BACKEND=ip65` the blob and the cfg disagree about ~3.8 KB. The measured
-equates and the details are in `src/net/ip65/ip65_blob.s`.
+`$A000-$BFFF` is the RAM under BASIC ROM. `src/boot.s` banks BASIC out
+(`lda proc_port` / `and #$fe`) as its first instruction and only restores it
+on quit, so the span reads back as RAM for the whole time ip65 can run;
+KERNAL lives at `$E000+` and is unaffected. `IP65_BSS` is declared
+`file = ""` — a file-backed region there would append 8 KB of zeros to every
+ip65 PRG, and it is safe as a non-file region only because it sits above
+every file-backed area (see the load-shift note under `SQTAB_HOLE`).
+
+This is issue **#80**, fixed by relinking the blob. Until then
+`ip65-build/ip65.cfg` linked the BSS at `$4000` — inside `MAIN_AREA_LO`,
+directly on top of `APP_CODE`, `APP_DATA` and the chacha archive — while
+this table claimed `$A000-$BFFF` and nothing checked either number. One DHCP
+exchange on the ethernet VICE rig overwrote 733 bytes of `APP_CODE`
+(`transport_encrypt`, `transport_decrypt`, the replay window) and 284 bytes
+of `LIB_CHACHA20_POLY1305_CODE`. The §13.7 equates in
+`src/net/ip65/ip65_blob.s` now declare the footprint and assert it at link
+time against `IP65_BSS` and against every other region in the cfg, so the
+two sides can no longer drift apart silently.
 
 ip65 uses zero page $02-$1B (cc65 standard). These overlap our crypto ZP variables. The `src/net/ip65/net.s` wrapper saves and restores $02-$1B around every ip65 call (~60 cycles overhead, negligible vs network latency).
 
