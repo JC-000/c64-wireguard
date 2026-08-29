@@ -8,7 +8,9 @@
 ;   EXEHDR  -> LOADER region at $0801, holds the 12-byte BASIC stub so
 ;              `start:` lands at $080D (= SYS 2061).
 ;   CODE    -> LOADER region, holds `start` and every boot subroutine.
-;   APP_BSS -> SHADOW_BSS region at $A000, not currently used by boot.
+;   APP_BSS -> MAIN_AREA_HI, not currently used by boot. (This line used
+;              to name a SHADOW_BSS region at $A000; no such region has
+;              existed since the ca65 port — see issue #80.)
 ;
 ; No logic changes from boot.asm — this is a mechanical syntax port.
 ; =============================================================================
@@ -109,9 +111,18 @@ start:
 
         ; BSS is now below $8000 and emitted as zero bytes in the PRG
         ; file, so LOAD stamps zeros into RAM for us. Additionally zero
-        ; $A000-$BFFF (where ip65's own BSS lives) as a defensive
-        ; measure — some WG tests rely on these pages being clean even
-        ; though WG doesn't own them directly.
+        ; $A000-$BFFF, which under BACKEND=ip65 is the blob's private BSS
+        ; (IP65_BSS in the cfg; $A000-$AF3F occupied). It is file = "" —
+        ; no PRG bytes are emitted for it — so LOAD leaves whatever was
+        ; there, and this loop is what actually clears it. Runs under
+        ; BACKEND=uci too, where the span is simply unused; the cost is a
+        ; few ms once at boot and it keeps the two builds' RAM identical.
+        ;
+        ; The bank-out above is a PRECONDITION for the loop being visible:
+        ; with LORAM set, the writes would still land in RAM (writes always
+        ; go under ROM) but every read-back would return BASIC ROM, so
+        ; nothing that later reads this span — ip65's frame buffers most of
+        ; all — would work. Do not move either half.
         ldy     #$00
         ldx     #$20                    ; 32 pages = $2000 bytes
         lda     #$A0
