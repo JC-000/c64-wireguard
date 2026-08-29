@@ -42,7 +42,10 @@ Map-file deltas vs baseline (measured, decimal bytes):
 | CHACHA_BSS | — | — | 295 @ `$9544` | 295 @ `$9C00` |
 
 Highest used address is `$9D26` (both-siblings CHACHA_BSS end) — clear
-of `$A000` BASIC ROM shadow with ~700 bytes headroom.
+of `$A000` BASIC ROM shadow with ~700 bytes headroom. That headroom is
+`BACKEND=uci` slack only: under `BACKEND=ip65` the same span from `$A000`
+is `IP65_BSS`, the ip65 blob's private BSS (issue #80), so growth past
+`$9FFF` is not free there.
 
 ## 2. Preflight checklist (do this before the first run)
 
