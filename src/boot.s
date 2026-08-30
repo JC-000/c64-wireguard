@@ -191,12 +191,14 @@ main_loop:
         beq     no_poll
         jsr     session_handle_packet
 no_poll:
-        ; check timers when active
-        lda     wg_state
-        cmp     #<SESSION_ACTIVE
-        bne     no_timer
+        ; Timers, in every state. This used to be gated on
+        ; wg_state == SESSION_ACTIVE — a second copy of the gate timer_check
+        ; already applies internally, and the outer copy was the binding one:
+        ; it meant nothing could ever time an unanswered handshake, because
+        ; timer_check was not called at all in HS_SENT (issue #84). One gate,
+        ; inside the routine that owns it. In IDLE this costs a compare and
+        ; an rts per loop iteration.
         jsr     timer_check
-no_timer:
         jsr     getin
         beq     main_loop               ; wait for keypress
 

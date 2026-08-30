@@ -102,9 +102,14 @@ config_load:
         ; Handing the socket back here is the whole fix: net_udp_close clears
         ; uci_socket_open, so the next net_udp_send re-issues UDP_CONNECT
         ; against the address we just stored. It is safe when nothing is open
-        ; (returns having done nothing) and the ip65 backend's is a no-op —
-        ; ip65's UDP is connectionless and reads the destination per send, so
-        ; that backend never had the bug.
+        ; (returns having done nothing).
+        ;
+        ; ip65 never had THIS bug — its UDP is connectionless and reads the
+        ; destination per send — but as of #84 its net_udp_close is no longer
+        ; a no-op either: it releases the listener slot, which that backend's
+        ; net_udp_send then re-registers on the next send. So on ip65 this
+        ; close is a remove/re-add of the same port rather than nothing at
+        ; all. Harmless, and it keeps one meaning of "close" across both.
         ;
         ; ONLY when it moved. config_load runs at the top of every
         ; session_initiate, rekey included, and rekey re-handshakes with the

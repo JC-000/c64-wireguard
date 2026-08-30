@@ -32,6 +32,10 @@
 .export net_udp_send_ptr
 .export net_udp_send_len
 
+; ---- Adapter-internal state, exported for observability (issue #84) ---------
+.export ip65_listening
+.export ip65_listen_port
+
 ; ---- External data symbols (defined in wg/data.s) ----------------------------
 .import udp_recv_buf
 .import udp_recv_len
@@ -53,6 +57,15 @@
 ; Output: C=0 success, C=1 failure
 ; =============================================================================
 net_init:
+        ; ip65_init -> ip_init -> udp_init zeroes udp_cbcount, so any listener
+        ; we held is gone from the blob's table by the time this returns.
+        ; Forget it here, or a later net_udp_close would ask the blob to
+        ; remove a port it no longer knows about and report a bogus C=1
+        ; (issue #84). Cleared BEFORE the call so a failed init cannot leave
+        ; a stale claim behind either.
+        lda #$00
+        sta ip65_listening
+
         jsr net_save_zp
         lda #0                  ; eth_init_default
         jsr ip65_init
@@ -107,19 +120,92 @@ net_udp_listen:
         php
         jsr net_restore_zp
         plp
+        bcs @nl_fail
+
+        ; Record the port we actually claimed rather than promising to
+        ; re-read wg_local_port at close time. wg_local_port is consumer
+        ; state — boot.s stages it before every listen — so a close that
+        ; re-read it could ask the blob to remove a port it never registered
+        ; and silently leak the one it did (issue #84).
+        lda wg_local_port
+        sta ip65_listen_port
+        lda wg_local_port+1
+        sta ip65_listen_port+1
+        lda #$01
+        sta ip65_listening
+        clc
+        rts
+
+@nl_fail:
+        ; Table full, or this port is already handled. We took nothing here,
+        ; so leave ip65_listening alone: an earlier successful listen still
+        ; owns its slot and must still be released.
+        sec
         rts
 
 ; =============================================================================
-; net_udp_close - close the UDP socket (no-op for ip65)
+; net_udp_close - release the UDP listener slot we claimed
 ;
-; ip65's UDP is connectionless: udp_add_listener/udp_remove_listener manage
-; a local port, and there is no firmware-side socket handle to abandon. The
-; UCI backend needs a real close (see its header and issue #58); this exists
-; so the two backends present the same surface.
+; What this used to say: "ip65's UDP is connectionless: udp_add_listener /
+; udp_remove_listener manage a local port, and there is no firmware-side
+; socket handle to abandon" — and then `clc / rts`.
 ;
-; Output: C=0 always.
+; The first clause is true and the conclusion does not follow: the same
+; sentence names the thing that leaks. udp_add_listener claims one entry in a
+; FOUR-entry table (`udp_cbmax = 4`, ip65/ip65/udp.s), keyed by port, and
+; udp_remove_listener is the call that gives it back. It is reachable — the
+; blob exports it through the jump table at ip65_base + 15
+; (ip65-build/ip65_stub.s) — and nothing in this tree had ever called it. So
+; every listen consumed a slot permanently and this routine reported success
+; having done nothing (issue #84).
+;
+; Two consequences, both real on the shipped wireguard-rrnet-*.prg:
+;   * Four listens on distinct ports exhaust the table; the fifth fails.
+;   * A re-listen on the SAME port does not even get that far.
+;     udp_add_listener refuses a port already in the table (its @busy leg),
+;     so a single listen/close/listen cycle on our one port failed at the
+;     second listen. Closing had to actually close for that to work.
+;
+; There is no firmware-side reaper here as there is under UCI: the table is
+; in the blob's own BSS, and only ip65_init clears it (ip65_init -> ip_init
+; -> udp_init zeroes udp_cbcount). That is why net_init above drops our
+; bookkeeping: after a re-init the blob has forgotten our slot, so we must.
+;
+; Output: C=0 on success or when we hold no listener; C=1 if the blob had no
+; such listener to remove. Unlike the UCI backend there is no net_last_error
+; to set — the §13.2 codes are UCI-allocated and the contract is silent on
+; close (c64-lib-contract#163) — so the carry is the whole report.
+;
+; Clobbers: A, X
 ; =============================================================================
 net_udp_close:
+        lda ip65_listening
+        beq @nc_none                ; we hold no slot — nothing to release
+
+        jsr net_save_zp
+        lda ip65_listen_port
+        ldx ip65_listen_port+1
+        jsr ip65_udp_remove
+        php                         ; the blob's verdict, kept across the
+                                    ; restore and the bookkeeping below
+        jsr net_restore_zp
+
+        ; Drop our claim either way. C=1 means the blob has no listener on
+        ; that port, in which case we do not own one either; going on
+        ; believing we do would make the NEXT close remove a slot some later
+        ; listen had legitimately claimed.
+        lda #$00
+        sta ip65_listening
+        plp
+        bcs @nc_fail
+        clc
+        rts
+
+@nc_fail:
+        sec
+        rts
+
+@nc_none:
         clc
         rts
 
@@ -133,6 +219,39 @@ net_udp_close:
 net_udp_send:
         sta net_udp_send_ptr
         stx net_udp_send_ptr+1
+
+        ; Reclaim the listener slot if a teardown released it.
+        ;
+        ; This is what makes net_udp_close safe to call from the consumer's
+        ; abandonment paths, which is the whole of issue #84. It mirrors the
+        ; UCI backend exactly: there net_udp_close clears uci_socket_open and
+        ; the next net_udp_send re-issues UDP_CONNECT, so a consumer that
+        ; tears a session down carries on without re-running net_init. Before
+        ; this, an ip65 close that actually released would have left the app
+        ; permanently deaf — sends would keep succeeding and nothing would
+        ; ever be received again, because only do_net_init ('I') listens.
+        ;
+        ; A send whose reply can never arrive is not a successful send, so a
+        ; failed re-listen fails the send rather than going silently deaf.
+        ;
+        ; Guarded on ip65_listen_port being non-zero, i.e. on net_udp_listen
+        ; having ALREADY succeeded once this run. Without that guard this
+        ; becomes the first call site that can reach udp_add_listener before
+        ; ip65_init has run — boot.s dispatches 'H' whether or not 'I' was
+        ; pressed — and udp_add_listener indexes its table with udp_cbcount,
+        ; which lives in the blob's BSS at $A000 and is uninitialised until
+        ; ip65_init zeroes it. A garbage count writes four bytes at a garbage
+        ; offset into the blob's own state. This is BSS in MAIN_AREA_LO
+        ; (file = %O, fill = yes, fillval = $00), so LOAD really does stamp
+        ; it zero and the guard really does hold on a cold boot.
+        lda ip65_listening
+        bne @snd_go
+        lda ip65_listen_port
+        ora ip65_listen_port+1
+        beq @snd_go                 ; never listened — nothing of ours to reclaim
+        jsr net_udp_listen
+        bcs @snd_no_listener
+@snd_go:
         jsr net_save_zp
         ; set destination IP
         lda #<net_udp_dest_ip
@@ -160,6 +279,10 @@ net_udp_send:
         php
         jsr net_restore_zp
         plp
+        rts
+
+@snd_no_listener:
+        sec
         rts
 
 ; =============================================================================
@@ -371,3 +494,10 @@ net_restore_zp:
 net_udp_send_ptr:       .res 2      ; pointer for udp_send wrapper
 net_udp_send_len: .res 2      ; length for udp_send wrapper
 udp_copy_rem:       .res 2      ; 16-bit countdown for the rx copy (§13.3)
+
+; --- listener ownership (issue #84) ------------------------------------------
+; The one slot we hold in ip65's 4-entry udp_cb* table, so net_udp_close can
+; hand back exactly what net_udp_listen took. Adapter-internal — not part of
+; the §13.1 surface — exported only so a test can observe the claim.
+ip65_listening:     .res 1      ; 1 = we hold a listener slot
+ip65_listen_port:   .res 2      ; the port it was registered on (LE, as passed)
