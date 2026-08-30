@@ -642,10 +642,22 @@ transport_decrypt:
         lda rw_shift_hi
         bne @clear_all
 
-        ; shift < 256: clear newly exposed bytes in bitmap
-        ; We need to clear bytes for positions (old_max+1) to (new_max)
-        ; byte_start = ((old_max + 1) & $7FF) >> 3
-        ; num_bytes_to_clear = (shift + 7) >> 3
+        ; shift < 256: clear the bits for counters (old_max+1) .. new_max.
+        ;
+        ; Those are `shift` consecutive bit positions starting at bit
+        ; (old_max+1) & $7FF.  Until #86 this cleared whole BYTES from the
+        ; byte CONTAINING that position, which also wiped the bits of
+        ; counters (old_max+1) & ~7 .. old_max — counters already received
+        ; and still inside the 2048 window, so they could be replayed and
+        ; accepted.  Clearing walks bit by bit instead: exactly the newly
+        ; exposed positions, never a neighbour.
+        ;
+        ; Clearing exactly (old_max, new_max] is sufficient as well as
+        ; necessary.  Every position is cleared as the window front passes
+        ; it, and a counter above rw_counter_max can never have had its bit
+        ; set (@just_set_bit only runs for accepted counters, and an
+        ; accepted counter is <= the new max), so positions ahead of
+        ; new_max are already zero and need no over-clear.
 
         ; Compute start byte offset from (rw_counter_max + 1) low 11 bits
         ; Increment rw_counter_max[0..1] temporarily to get old_max+1
@@ -657,36 +669,42 @@ transport_decrypt:
         adc #0
         sta zp_tmp2              ; byte 1 of (old_max+1)
 
-        ; start_byte = ((zp_tmp2 & $07) << 5) | (zp_tmp1 >> 3)
-        lda zp_tmp2
-        and #$07
-        asl
-        asl
-        asl
-        asl
-        asl
-        sta zp_ptr2              ; use zp_ptr2 as temp
+        ; zp_ptr2 = walking bit mask for the start position: 1 << (start & 7).
+        ; Taken before the byte index, which consumes zp_tmp1 in place.
         lda zp_tmp1
-        lsr
-        lsr
-        lsr
-        ora zp_ptr2
-        tay                      ; Y = start byte offset
+        and #$07
+        tax
+        lda rw_bit_mask,x
+        sta zp_ptr2              ; use zp_ptr2 as temp
 
-        ; num_bytes = (shift + 7) >> 3
-        lda rw_shift_lo
-        clc
-        adc #7
-        lsr
-        lsr
-        lsr                      ; A = number of bytes to clear
-        tax                      ; X = count
-        beq @advance_done        ; shift was 0? shouldn't happen but guard
+        ; Y = start byte = ((old_max+1) & $7FF) >> 3, which is just the low
+        ; byte of (old_max+1) >> 3 — $7FF >> 3 is $FF, so masking first
+        ; changes nothing. Shift the 16-bit value right three times in place.
+        lsr zp_tmp2
+        ror zp_tmp1
+        lsr zp_tmp2
+        ror zp_tmp1
+        lsr zp_tmp2
+        ror zp_tmp1
+        ldy zp_tmp1              ; Y = start byte offset
 
-        lda #0
+        ; X = bits to clear = shift.  received > rw_counter_max and
+        ; rw_shift_hi = 0 here, so shift is 1..255 and the loop always runs
+        ; at least once — no zero guard needed.  (The old count was
+        ; (shift + 7) >> 3 with the carry out of the ADC discarded, so
+        ; shift 249..255 wrapped to a count of 0 and cleared nothing at all
+        ; while rw_counter_max advanced anyway.)
+        ldx rw_shift_lo
 @clear_loop:
+        lda zp_ptr2
+        eor #$ff
+        and rw_bitmap,y
         sta rw_bitmap,y
-        iny                      ; wraps at 256 naturally (8-bit Y)
+        asl zp_ptr2              ; next bit; $80 -> $00 marks a byte boundary
+        bne @same_byte
+        inc zp_ptr2              ; mask wraps back to bit 0
+        iny                      ; and step the byte (wraps at 256 naturally)
+@same_byte:
         dex
         bne @clear_loop
         jmp @advance_done

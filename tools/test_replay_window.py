@@ -63,6 +63,29 @@ def send_and_check(transport, labels, key, counter_val, plaintext,
                    expect_accept, desc):
     """Send a packet and check whether it was accepted or rejected.
 
+    Accept/reject is read from ``transport_decrypt``'s own return value
+    (A = 0 success, A = $FF failure), not inferred from side effects, and
+    cross-checked against what the packet actually did:
+
+      * an accepted counter must be recorded in the bitmap, or the next
+        copy of it would be accepted too;
+      * the plaintext must appear at ``tp_packet+16`` if and only if the
+        packet was accepted.  ``tp_packet+16`` is pre-stamped with a
+        sentinel before every call, so "the payload was delivered a second
+        time" -- the actual harm in #86 -- is observed rather than argued.
+
+    The plaintext half is decisive only for rejections that happen before
+    the AEAD runs, which is every rejection this suite produces: all its
+    packets carry valid tags, so the only rejections are replay-window
+    rejections, and those return before the ciphertext is ever copied.
+
+    Inference cannot see the bug in #86.  The old check treated "counter
+    was <= old max and rw_counter_max did not move" as proof of a
+    rejection -- but rw_counter_max never moves for a counter below the
+    max whether it was accepted or rejected, so every replay of an old
+    counter passed unconditionally.  Test 10 below was written to catch
+    exactly this defect and could not fail.
+
     Returns (passed, failed) tuple.
     """
     packet = build_type4_packet(b'\x01\x00\x00\x00', counter_val, key,
@@ -73,14 +96,20 @@ def send_and_check(transport, labels, key, counter_val, plaintext,
 
     # Read rw_counter_max before decrypt to detect changes
     old_max = read_bytes(transport, labels["rw_counter_max"], 8)
-    old_bitmap_byte = None
+
+    # Stamp the in-place decrypt buffer so payload delivery is observable.
+    sentinel = bytes((0xA5 ^ i) & 0xFF for i in range(len(plaintext)))
+    write_bytes(transport, labels["tp_packet"] + 16, sentinel)
 
     # For within-window packets, check the specific bitmap bit
     counter_low11 = counter_val & 0x7FF
     byte_offset = counter_low11 >> 3
     bit_index = counter_low11 & 7
 
-    jsr(transport, labels["transport_decrypt"], timeout=60.0)
+    regs = jsr(transport, labels["transport_decrypt"], timeout=60.0)
+    accepted = (regs["A"] == 0)
+    delivered = (read_bytes(transport, labels["tp_packet"] + 16,
+                            len(plaintext)) == plaintext)
 
     # Check result: read rw_counter_max and the bitmap bit
     new_max = read_bytes(transport, labels["rw_counter_max"], 8)
@@ -92,43 +121,32 @@ def send_and_check(transport, labels, key, counter_val, plaintext,
     new_max_val = int.from_bytes(new_max, 'little')
     old_max_val = int.from_bytes(old_max, 'little')
 
-    if expect_accept:
-        # On accept: bitmap bit should be set for this counter
-        if bit_set:
-            if VERBOSE:
-                print(f"  PASS {desc}")
-            return 1, 0
-        else:
-            print(f"  FAIL {desc}: expected accept but bit not set")
-            print(f"    counter={counter_val}, old_max={old_max_val}, "
-                  f"new_max={new_max_val}")
+    if accepted == expect_accept:
+        # Side-effect cross-check: an accepted counter must be recorded
+        # in the bitmap, or the next copy of it would be accepted too.
+        if accepted and not bit_set:
+            print(f"  FAIL {desc}: accepted but bitmap bit not set "
+                  f"(counter={counter_val}, byte={byte_offset}, "
+                  f"bit={bit_index})")
             return 0, 1
-    else:
-        # On reject: bitmap bit should NOT have been newly set
-        # (could be set from a prior accept of same counter)
-        # Better check: rw_counter_max should not have changed if
-        # counter > old max, or tp_recv_counter shouldn't advance
-        recv_ctr = read_bytes(transport, labels["tp_recv_counter"], 8)
-        recv_ctr_val = int.from_bytes(recv_ctr, 'little')
-
-        # For rejection, the tp_recv_counter should remain at old_max + 1
-        expected_recv = old_max_val + 1 if old_max_val > 0 else (
-            1 if old_max == bytes(8) and bit_set else 0)
-
-        # Simple check: max should not have advanced beyond what it was
-        if new_max_val == old_max_val:
-            if VERBOSE:
-                print(f"  PASS {desc}")
-            return 1, 0
-        elif counter_val <= old_max_val:
-            # counter was within/below window, so max shouldn't change
-            if VERBOSE:
-                print(f"  PASS {desc}")
-            return 1, 0
-        else:
-            print(f"  FAIL {desc}: expected reject but max advanced "
-                  f"from {old_max_val} to {new_max_val}")
+        if delivered != accepted:
+            print(f"  FAIL {desc}: transport_decrypt returned "
+                  f"${regs['A']:02X} but the plaintext was "
+                  f"{'delivered' if delivered else 'not delivered'} to "
+                  f"tp_packet+16 (counter={counter_val})")
             return 0, 1
+        if VERBOSE:
+            print(f"  PASS {desc}")
+        return 1, 0
+
+    print(f"  FAIL {desc}: expected "
+          f"{'accept' if expect_accept else 'reject'} but transport_decrypt "
+          f"returned ${regs['A']:02X} ({'accept' if accepted else 'reject'})")
+    print(f"    counter={counter_val}, old_max={old_max_val}, "
+          f"new_max={new_max_val}, bitmap byte {byte_offset} bit "
+          f"{bit_index} = {int(bit_set)}, plaintext "
+          f"{'DELIVERED' if delivered else 'not delivered'}")
+    return 0, 1
 
 
 # ============================================================================
@@ -373,6 +391,278 @@ def test_window_advance_preserves_old_bits(transport, labels, key, plaintext):
     return passed, failed
 
 
+def bitmap_bit(bitmap, position):
+    """Return the bitmap bit (0/1) recording counter *position*."""
+    position &= 0x7FF
+    return (bitmap[position >> 3] >> (position & 7)) & 1
+
+
+def test_sequential_traffic_replays_rejected(transport, labels, key,
+                                             plaintext):
+    """Test 11 (#86): ordinary sequential traffic must stay protected.
+
+    Receive counters 0..7 in order, then replay every one of them.  All
+    eight replays must be rejected.
+
+    This is the case that shows the severity without reading the
+    algorithm.  Each advance of a single counter cleared the whole byte
+    the previous counter lived in, so only the current rw_counter_max
+    stayed protected -- a 2048-counter window behaving as a window of
+    one.  On master 0..6 are each accepted a second time and their
+    payloads delivered again; only counter 7, the newest, is rejected.
+    """
+    passed = failed = 0
+
+    reset_recv_state(transport, labels)
+    write_bytes(transport, labels["hs_transport_recv"], key)
+
+    for counter in range(8):
+        p, f = send_and_check(transport, labels, key, counter, plaintext,
+                              True, f"sequential-8: counter={counter} "
+                                    f"accepted")
+        passed += p
+        failed += f
+
+    for counter in range(8):
+        p, f = send_and_check(transport, labels, key, counter, plaintext,
+                              False, f"sequential-8: counter={counter} "
+                                     f"replay rejected (window is 2048, "
+                                     f"max is 7)")
+        passed += p
+        failed += f
+
+    return passed, failed
+
+
+def test_advance_across_bitmap_wraparound(transport, labels, key, plaintext):
+    """Test 13 (#86): the bit walk must wrap byte 255 -> byte 0 correctly.
+
+    The bitmap is 256 bytes covering 2048 counters, so position 2047 is the
+    last bit of byte 255 and position 2048 is bit 0 of byte 0. The clearing
+    walk relies on Y wrapping naturally at 256 to follow that.
+
+    Reached through the packet path only -- no direct write to
+    rw_counter_max. A fresh window cannot get here in one step, because any
+    counter high enough to put the cursor near 2047 is also more than 256
+    away from 0, so the shift takes @clear_all. But the FIRST packet moves
+    the cursor, and the ones after it can then take small shifts:
+
+        2040  shift 2040 -> @clear_all, max = 2040, bit 2040 set
+        2041  shift 1    -> first bit walk;  byte 255 = $03
+        2050  shift 9    -> clears 2042..2050, crossing byte 255 -> byte 0
+
+    That matters beyond tidiness: it demonstrates a real peer can produce
+    this state, rather than asserting on one the protocol might never reach.
+
+    Expected end state, derived from the sequence above and confirmed on
+    both trees: byte 255 = $03 (2040 and 2041 preserved -- both at or below
+    old_max and inside the window), byte 0 = $04 (the stale bits cleared
+    through the wrap, 2050's own bit set).
+    """
+    passed = failed = 0
+
+    reset_recv_state(transport, labels)
+    write_bytes(transport, labels["hs_transport_recv"], key)
+
+    for counter, note in ((2040, "shift 2040 -> @clear_all"),
+                          (2041, "shift 1 -> first bit walk")):
+        p, f = send_and_check(transport, labels, key, counter, plaintext,
+                              True, f"wrap: counter={counter} accepted "
+                                    f"({note})")
+        passed += p
+        failed += f
+
+    # SYNTHETIC, and deliberately so. Bits 2048/2049 belong to the previous
+    # lap of the window; reaching one genuinely needs 2048+ counters, which
+    # no test here can afford. Without them set, "the advance cleared
+    # forward across the wrap" would pass on an implementation that clears
+    # nothing forward at all -- the same vacuity that let #86 survive a
+    # green suite. Bit 2050 is included so the whole 9-bit range must be
+    # cleared before 2050's own bit is re-set.
+    #
+    # The asymmetry is real and worth naming: the packet route buys
+    # reachability for the PRESERVATION half (byte 255) and cannot buy it
+    # for the FORWARD half (byte 0). A labelled synthetic preload is the
+    # only way to give that assertion teeth.
+    write_bytes(transport, labels["rw_bitmap"], bytes([0x07]))
+
+    p, f = send_and_check(transport, labels, key, 2050, plaintext, True,
+                          "wrap: counter=2050 accepted (shift 9, crosses "
+                          "byte 255 -> byte 0)")
+    passed += p
+    failed += f
+
+    if f == 0:
+        bitmap = read_bytes(transport, labels["rw_bitmap"], 256)
+
+        # Both expected values are derived from THE SPECIFIC three-packet
+        # sequence above -- 2040, 2041, then 2050 at shift 9. They are not
+        # general properties of the wrap, and changing any counter in that
+        # sequence means re-deriving both:
+        #
+        #   byte 255  the bits at or below old_max that must survive, i.e.
+        #             every counter received before the final advance that
+        #             lands in positions 2040..2047
+        #   byte 0    the synthetic preload, minus everything the advance
+        #             clears, plus the final counter's own bit
+        #
+        # Getting this wrong fails against CORRECT code rather than broken
+        # code, which is a confusing way to lose an afternoon. The two-packet
+        # route (2040 -> 2050, shift 10) gives byte 255 = $01, not $03,
+        # because 2041 is then never received.
+        #
+        # Byte-level rather than per-bit on purpose: asserting the whole byte
+        # also catches a walk that clears the right named positions and
+        # corrupts a neighbour, which is the failure mode #86 came from.
+        if bitmap[255] == 0x03:
+            passed += 1
+            if VERBOSE:
+                print("  PASS wrap: byte 255 = $03, counters 2040 and 2041 "
+                      "preserved")
+        else:
+            failed += 1
+            print(f"  FAIL wrap: byte 255 = ${bitmap[255]:02X}, expected $03 "
+                  f"-- counters 2040 and 2041 are at/below old_max and still "
+                  f"inside the window, so whichever bit was dropped is now "
+                  f"replayable")
+
+        if bitmap[0] == 0x04:
+            passed += 1
+            if VERBOSE:
+                print("  PASS wrap: byte 0 = $04, stale bits cleared through "
+                      "the wrap and 2050 recorded")
+        else:
+            failed += 1
+            print(f"  FAIL wrap: byte 0 = ${bitmap[0]:02X}, expected $04 -- "
+                  f"the walk did not clear the preloaded stale bits across "
+                  f"the byte 255 -> 0 boundary, or did not record 2050")
+
+    # --- functional: both preserved counters must refuse a replay ---
+    for counter in (2040, 2041):
+        p, f = send_and_check(transport, labels, key, counter, plaintext,
+                              False, f"wrap-replay: counter={counter} replay "
+                                     f"rejected (max is 2050)")
+        passed += p
+        failed += f
+
+    return passed, failed
+
+
+def test_replay_after_advance_all_residues(transport, labels, key, plaintext):
+    """Test 11 (#86): advancing the window must not erase what it has seen.
+
+    Receive n, receive a later counter, replay n -- the replay must be
+    rejected.  The advance used to clear whole BYTES starting at the byte
+    holding (old_max+1); that byte also holds the bits of
+    (old_max+1) & ~7 .. old_max, counters already received and still
+    inside the 2048 window.
+
+    All eight residues of n mod 8 are covered rather than a sample:
+    residue 7 is the single case the byte-clearing code got right (n and
+    n+1 fall in different bytes), so a sampled test can miss the defect
+    entirely.
+    """
+    passed = failed = 0
+
+    for residue in range(8):
+        n = 16 + residue          # inside the window, off the origin
+        reset_recv_state(transport, labels)
+        write_bytes(transport, labels["hs_transport_recv"], key)
+
+        p, f = send_and_check(transport, labels, key, n, plaintext, True,
+                              f"residue {residue}: counter={n} accepted")
+        passed += p
+        failed += f
+
+        p, f = send_and_check(transport, labels, key, n + 1, plaintext, True,
+                              f"residue {residue}: counter={n + 1} accepted "
+                              f"(advances the window past {n})")
+        passed += p
+        failed += f
+
+        p, f = send_and_check(transport, labels, key, n, plaintext, False,
+                              f"residue {residue}: counter={n} replay "
+                              f"rejected")
+        passed += p
+        failed += f
+
+    return passed, failed
+
+
+def test_advance_clears_exact_range(transport, labels, key, plaintext):
+    """Test 12 (#86): the advance must clear exactly (old_max, new_max].
+
+    The bitmap is preloaded with all-ones -- "every counter in the window
+    has been seen" -- and the window is then advanced by `shift` from
+    max = 0.  Reading the bitmap back separates the two defects:
+
+      * bit 0 records counter 0, which is at old_max and still inside the
+        window.  Clearing the whole start byte erases it.
+      * bits 1..shift-1 are the newly exposed range and must be cleared.
+        The old count was (shift + 7) >> 3 with the carry out of the ADC
+        discarded, so shift 249..255 wrapped to a count of 0 and cleared
+        nothing at all while rw_counter_max advanced anyway -- leaving
+        ~2048-old bits to reject legitimate packets later.
+
+    Bits above `shift` are deliberately not asserted: clearing forward of
+    new_max is harmless (those counters cannot have been received), so
+    requiring them to survive would pin an implementation detail rather
+    than the property.
+    """
+    passed = failed = 0
+
+    for shift in (1, 2, 3, 7, 8, 9, 128,
+                  248, 249, 250, 251, 252, 253, 254, 255):
+        reset_recv_state(transport, labels)
+        write_bytes(transport, labels["hs_transport_recv"], key)
+        write_bytes(transport, labels["rw_bitmap"], b"\xff" * 256)
+
+        p, f = send_and_check(transport, labels, key, shift, plaintext, True,
+                              f"exact-range shift={shift}: accepted")
+        passed += p
+        failed += f
+        if f:
+            continue
+
+        bitmap = read_bytes(transport, labels["rw_bitmap"], 256)
+
+        if bitmap_bit(bitmap, 0):
+            passed += 1
+            if VERBOSE:
+                print(f"  PASS exact-range shift={shift}: counter 0 still "
+                      f"recorded")
+        else:
+            failed += 1
+            print(f"  FAIL exact-range shift={shift}: the advance erased "
+                  f"counter 0's bit -- it is at old_max and still inside "
+                  f"the window, so counter 0 is now replayable")
+
+        stale = [pos for pos in range(1, shift) if bitmap_bit(bitmap, pos)]
+        if not stale:
+            passed += 1
+            if VERBOSE:
+                print(f"  PASS exact-range shift={shift}: newly exposed "
+                      f"range cleared")
+        else:
+            failed += 1
+            print(f"  FAIL exact-range shift={shift}: {len(stale)} of "
+                  f"{shift - 1} newly exposed positions still set "
+                  f"(first {stale[:8]}) -- stale bits will reject "
+                  f"legitimate packets")
+
+        if bitmap_bit(bitmap, shift):
+            passed += 1
+            if VERBOSE:
+                print(f"  PASS exact-range shift={shift}: new counter "
+                      f"recorded")
+        else:
+            failed += 1
+            print(f"  FAIL exact-range shift={shift}: the accepted counter "
+                  f"was not recorded in the bitmap")
+
+    return passed, failed
+
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -413,6 +703,18 @@ def run_tests(transport, labels, seed):
         ("window advance preserves old bits",
          lambda: test_window_advance_preserves_old_bits(transport, labels, key,
                                                          plaintext)),
+        ("#86: sequential traffic 0..7, every replay rejected",
+         lambda: test_sequential_traffic_replays_rejected(transport, labels,
+                                                          key, plaintext)),
+        ("#86: replay after advance rejected (all 8 residues)",
+         lambda: test_replay_after_advance_all_residues(transport, labels, key,
+                                                        plaintext)),
+        ("#86: advance across the bitmap wraparound (byte 255 -> 0)",
+         lambda: test_advance_across_bitmap_wraparound(transport, labels, key,
+                                                       plaintext)),
+        ("#86: advance clears exactly (old_max, new_max]",
+         lambda: test_advance_clears_exact_range(transport, labels, key,
+                                                 plaintext)),
     ]
 
     for name, test_fn in groups:
@@ -471,9 +773,12 @@ def main():
     labels = Labels.from_file(LABELS_PATH)
 
     # Verify required labels exist
+    # All of these are exported on master too, so this file runs unchanged
+    # against the unfixed tree — nothing here is gated on a branch-only symbol.
     required = ["rw_bitmap", "rw_counter_max", "rw_bit_mask",
                 "transport_decrypt", "tp_recv_counter", "tp_recv_counter_tmp",
-                "hs_transport_recv", "udp_recv_buf", "udp_recv_len"]
+                "hs_transport_recv", "udp_recv_buf", "udp_recv_len",
+                "tp_packet"]
     for name in required:
         addr = labels.address(name)
         if addr is None:
