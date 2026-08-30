@@ -64,7 +64,20 @@ def send_and_check(transport, labels, key, counter_val, plaintext,
     """Send a packet and check whether it was accepted or rejected.
 
     Accept/reject is read from ``transport_decrypt``'s own return value
-    (A = 0 success, A = $FF failure), not inferred from side effects.
+    (A = 0 success, A = $FF failure), not inferred from side effects, and
+    cross-checked against what the packet actually did:
+
+      * an accepted counter must be recorded in the bitmap, or the next
+        copy of it would be accepted too;
+      * the plaintext must appear at ``tp_packet+16`` if and only if the
+        packet was accepted.  ``tp_packet+16`` is pre-stamped with a
+        sentinel before every call, so "the payload was delivered a second
+        time" -- the actual harm in #86 -- is observed rather than argued.
+
+    The plaintext half is decisive only for rejections that happen before
+    the AEAD runs, which is every rejection this suite produces: all its
+    packets carry valid tags, so the only rejections are replay-window
+    rejections, and those return before the ciphertext is ever copied.
 
     Inference cannot see the bug in #86.  The old check treated "counter
     was <= old max and rw_counter_max did not move" as proof of a
@@ -83,7 +96,10 @@ def send_and_check(transport, labels, key, counter_val, plaintext,
 
     # Read rw_counter_max before decrypt to detect changes
     old_max = read_bytes(transport, labels["rw_counter_max"], 8)
-    old_bitmap_byte = None
+
+    # Stamp the in-place decrypt buffer so payload delivery is observable.
+    sentinel = bytes((0xA5 ^ i) & 0xFF for i in range(len(plaintext)))
+    write_bytes(transport, labels["tp_packet"] + 16, sentinel)
 
     # For within-window packets, check the specific bitmap bit
     counter_low11 = counter_val & 0x7FF
@@ -92,6 +108,8 @@ def send_and_check(transport, labels, key, counter_val, plaintext,
 
     regs = jsr(transport, labels["transport_decrypt"], timeout=60.0)
     accepted = (regs["A"] == 0)
+    delivered = (read_bytes(transport, labels["tp_packet"] + 16,
+                            len(plaintext)) == plaintext)
 
     # Check result: read rw_counter_max and the bitmap bit
     new_max = read_bytes(transport, labels["rw_counter_max"], 8)
@@ -111,6 +129,12 @@ def send_and_check(transport, labels, key, counter_val, plaintext,
                   f"(counter={counter_val}, byte={byte_offset}, "
                   f"bit={bit_index})")
             return 0, 1
+        if delivered != accepted:
+            print(f"  FAIL {desc}: transport_decrypt returned "
+                  f"${regs['A']:02X} but the plaintext was "
+                  f"{'delivered' if delivered else 'not delivered'} to "
+                  f"tp_packet+16 (counter={counter_val})")
+            return 0, 1
         if VERBOSE:
             print(f"  PASS {desc}")
         return 1, 0
@@ -120,7 +144,8 @@ def send_and_check(transport, labels, key, counter_val, plaintext,
           f"returned ${regs['A']:02X} ({'accept' if accepted else 'reject'})")
     print(f"    counter={counter_val}, old_max={old_max_val}, "
           f"new_max={new_max_val}, bitmap byte {byte_offset} bit "
-          f"{bit_index} = {int(bit_set)}")
+          f"{bit_index} = {int(bit_set)}, plaintext "
+          f"{'DELIVERED' if delivered else 'not delivered'}")
     return 0, 1
 
 
@@ -372,6 +397,43 @@ def bitmap_bit(bitmap, position):
     return (bitmap[position >> 3] >> (position & 7)) & 1
 
 
+def test_sequential_traffic_replays_rejected(transport, labels, key,
+                                             plaintext):
+    """Test 11 (#86): ordinary sequential traffic must stay protected.
+
+    Receive counters 0..7 in order, then replay every one of them.  All
+    eight replays must be rejected.
+
+    This is the case that shows the severity without reading the
+    algorithm.  Each advance of a single counter cleared the whole byte
+    the previous counter lived in, so only the current rw_counter_max
+    stayed protected -- a 2048-counter window behaving as a window of
+    one.  On master 0..6 are each accepted a second time and their
+    payloads delivered again; only counter 7, the newest, is rejected.
+    """
+    passed = failed = 0
+
+    reset_recv_state(transport, labels)
+    write_bytes(transport, labels["hs_transport_recv"], key)
+
+    for counter in range(8):
+        p, f = send_and_check(transport, labels, key, counter, plaintext,
+                              True, f"sequential-8: counter={counter} "
+                                    f"accepted")
+        passed += p
+        failed += f
+
+    for counter in range(8):
+        p, f = send_and_check(transport, labels, key, counter, plaintext,
+                              False, f"sequential-8: counter={counter} "
+                                     f"replay rejected (window is 2048, "
+                                     f"max is 7)")
+        passed += p
+        failed += f
+
+    return passed, failed
+
+
 def test_replay_after_advance_all_residues(transport, labels, key, plaintext):
     """Test 11 (#86): advancing the window must not erase what it has seen.
 
@@ -527,6 +589,9 @@ def run_tests(transport, labels, seed):
         ("window advance preserves old bits",
          lambda: test_window_advance_preserves_old_bits(transport, labels, key,
                                                          plaintext)),
+        ("#86: sequential traffic 0..7, every replay rejected",
+         lambda: test_sequential_traffic_replays_rejected(transport, labels,
+                                                          key, plaintext)),
         ("#86: replay after advance rejected (all 8 residues)",
          lambda: test_replay_after_advance_all_residues(transport, labels, key,
                                                         plaintext)),
@@ -591,9 +656,12 @@ def main():
     labels = Labels.from_file(LABELS_PATH)
 
     # Verify required labels exist
+    # All of these are exported on master too, so this file runs unchanged
+    # against the unfixed tree — nothing here is gated on a branch-only symbol.
     required = ["rw_bitmap", "rw_counter_max", "rw_bit_mask",
                 "transport_decrypt", "tp_recv_counter", "tp_recv_counter_tmp",
-                "hs_transport_recv", "udp_recv_buf", "udp_recv_len"]
+                "hs_transport_recv", "udp_recv_buf", "udp_recv_len",
+                "tp_packet"]
     for name in required:
         addr = labels.address(name)
         if addr is None:
