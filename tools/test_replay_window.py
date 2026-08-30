@@ -434,18 +434,6 @@ def test_sequential_traffic_replays_rejected(transport, labels, key,
     return passed, failed
 
 
-def set_counter_max(transport, labels, value):
-    """Force rw_counter_max, to reach window positions a fresh session cannot.
-
-    Any counter far enough above 0 to put the bitmap cursor near position
-    2047 is also more than 256 away from it, so transport_decrypt takes
-    @clear_all and the incremental path never runs. Seeding the max is the
-    only way to exercise a small shift near the wrap.
-    """
-    write_bytes(transport, labels["rw_counter_max"],
-                value.to_bytes(8, 'little'))
-
-
 def test_advance_across_bitmap_wraparound(transport, labels, key, plaintext):
     """Test 13 (#86): the bit walk must wrap byte 255 -> byte 0 correctly.
 
@@ -453,81 +441,90 @@ def test_advance_across_bitmap_wraparound(transport, labels, key, plaintext):
     last bit of byte 255 and position 2048 is bit 0 of byte 0. The clearing
     walk relies on Y wrapping naturally at 256 to follow that.
 
-    Nothing else in this file reaches the wrap. Every counter the suite
-    sends is at most 2048 and is always received from max = 0, so the shift
-    is >= 256 and @clear_all runs instead. Seeding rw_counter_max to 2040
-    and then receiving 2050 gives shift = 10 spanning positions 2041..2050:
-    seven bits in byte 255, three in byte 0, crossing the wrap exactly once.
+    Reached through the packet path only -- no direct write to
+    rw_counter_max. A fresh window cannot get here in one step, because any
+    counter high enough to put the cursor near 2047 is also more than 256
+    away from 0, so the shift takes @clear_all. But the FIRST packet moves
+    the cursor, and the ones after it can then take small shifts:
 
-    Counter 2040 sits at byte 255 bit 0, at old_max and inside the window,
-    so it must survive. Whole-byte clearing takes out all of byte 255 and
-    erases it.
+        2040  shift 2040 -> @clear_all, max = 2040, bit 2040 set
+        2041  shift 1    -> first bit walk;  byte 255 = $03
+        2050  shift 9    -> clears 2042..2050, crossing byte 255 -> byte 0
+
+    That matters beyond tidiness: it demonstrates a real peer can produce
+    this state, rather than asserting on one the protocol might never reach.
+
+    Expected end state, derived from the sequence above and confirmed on
+    both trees: byte 255 = $03 (2040 and 2041 preserved -- both at or below
+    old_max and inside the window), byte 0 = $04 (the stale bits cleared
+    through the wrap, 2050's own bit set).
     """
     passed = failed = 0
 
-    # --- bitmap-level: exact range across the wrap ---
     reset_recv_state(transport, labels)
     write_bytes(transport, labels["hs_transport_recv"], key)
-    write_bytes(transport, labels["rw_bitmap"], b"\xff" * 256)
-    set_counter_max(transport, labels, 2040)
+
+    for counter, note in ((2040, "shift 2040 -> @clear_all"),
+                          (2041, "shift 1 -> first bit walk")):
+        p, f = send_and_check(transport, labels, key, counter, plaintext,
+                              True, f"wrap: counter={counter} accepted "
+                                    f"({note})")
+        passed += p
+        failed += f
+
+    # SYNTHETIC, and deliberately so. Bits 2048/2049 belong to the previous
+    # lap of the window; reaching one genuinely needs 2048+ counters, which
+    # no test here can afford. Without them set, "the advance cleared
+    # forward across the wrap" would pass on an implementation that clears
+    # nothing forward at all -- the same vacuity that let #86 survive a
+    # green suite. Bit 2050 is included so the whole 9-bit range must be
+    # cleared before 2050's own bit is re-set.
+    #
+    # The asymmetry is real and worth naming: the packet route buys
+    # reachability for the PRESERVATION half (byte 255) and cannot buy it
+    # for the FORWARD half (byte 0). A labelled synthetic preload is the
+    # only way to give that assertion teeth.
+    write_bytes(transport, labels["rw_bitmap"], bytes([0x07]))
 
     p, f = send_and_check(transport, labels, key, 2050, plaintext, True,
-                          "wrap: counter=2050 accepted (shift=10 from 2040)")
+                          "wrap: counter=2050 accepted (shift 9, crosses "
+                          "byte 255 -> byte 0)")
     passed += p
     failed += f
 
     if f == 0:
         bitmap = read_bytes(transport, labels["rw_bitmap"], 256)
 
-        if bitmap_bit(bitmap, 2040):
+        if bitmap[255] == 0x03:
             passed += 1
             if VERBOSE:
-                print("  PASS wrap: counter 2040 still recorded")
+                print("  PASS wrap: byte 255 = $03, counters 2040 and 2041 "
+                      "preserved")
         else:
             failed += 1
-            print("  FAIL wrap: the advance erased counter 2040's bit "
-                  "(byte 255 bit 0) -- it is at old_max and still inside "
-                  "the window, so counter 2040 is now replayable")
+            print(f"  FAIL wrap: byte 255 = ${bitmap[255]:02X}, expected $03 "
+                  f"-- counters 2040 and 2041 are at/below old_max and still "
+                  f"inside the window, so whichever bit was dropped is now "
+                  f"replayable")
 
-        stale = [pos for pos in range(2041, 2050) if bitmap_bit(bitmap, pos)]
-        if not stale:
+        if bitmap[0] == 0x04:
             passed += 1
             if VERBOSE:
-                print("  PASS wrap: positions 2041..2049 cleared across the "
-                      "byte 255 -> 0 boundary")
+                print("  PASS wrap: byte 0 = $04, stale bits cleared through "
+                      "the wrap and 2050 recorded")
         else:
             failed += 1
-            print(f"  FAIL wrap: {len(stale)} newly exposed positions still "
-                  f"set across the wrap {stale} -- stale bits will reject "
-                  f"legitimate packets")
+            print(f"  FAIL wrap: byte 0 = ${bitmap[0]:02X}, expected $04 -- "
+                  f"the walk did not clear the preloaded stale bits across "
+                  f"the byte 255 -> 0 boundary, or did not record 2050")
 
-        if bitmap_bit(bitmap, 2050):
-            passed += 1
-            if VERBOSE:
-                print("  PASS wrap: counter 2050 recorded at byte 0 bit 2")
-        else:
-            failed += 1
-            print("  FAIL wrap: counter 2050 was not recorded in the bitmap")
-
-    # --- functional: replay across the wrap must be rejected ---
-    reset_recv_state(transport, labels)
-    write_bytes(transport, labels["hs_transport_recv"], key)
-
-    p, f = send_and_check(transport, labels, key, 2040, plaintext, True,
-                          "wrap-replay: counter=2040 accepted")
-    passed += p
-    failed += f
-
-    p, f = send_and_check(transport, labels, key, 2050, plaintext, True,
-                          "wrap-replay: counter=2050 accepted (advance "
-                          "crosses byte 255 -> 0)")
-    passed += p
-    failed += f
-
-    p, f = send_and_check(transport, labels, key, 2040, plaintext, False,
-                          "wrap-replay: counter=2040 replay rejected")
-    passed += p
-    failed += f
+    # --- functional: both preserved counters must refuse a replay ---
+    for counter in (2040, 2041):
+        p, f = send_and_check(transport, labels, key, counter, plaintext,
+                              False, f"wrap-replay: counter={counter} replay "
+                                     f"rejected (max is 2050)")
+        passed += p
+        failed += f
 
     return passed, failed
 
