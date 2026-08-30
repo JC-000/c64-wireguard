@@ -220,10 +220,9 @@ def main() -> int:
     os.environ.setdefault("U64_ALLOW_MUTATE", "1")
     import test_uci_handshake_live as live
     live.post_session_hook = build_probe()
-    sys.argv = ["test_uci_handshake_live.py", "--chat",
-                "--host", args.host, "--turbo", str(args.turbo)]
     try:
-        return live.main()
+        return live.main(["--chat", "--host", args.host,
+                          "--turbo", str(args.turbo)])
     finally:
         try:
             from c64_test_harness.backends.ultimate64_client import Ultimate64Client

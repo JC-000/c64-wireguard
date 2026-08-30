@@ -658,7 +658,30 @@ def _hand_back_to_c64(tr: Ultimate64Transport, L: dict[str, int],
 # presentation out here rather than adding modes to this file is deliberate:
 # this is the regression tool, and every flag added to it is another
 # combination that has to keep working.
+#
+# A hook runs AFTER _hand_back_to_c64 by default, because that is what a
+# presentation loop needs: the C64 drives itself, polls the network and prints
+# what arrives. A hook that instead needs to keep driving the machine from the
+# host — to JSR chosen routines at chosen moments, as the config-reload probe
+# does — cannot work after the handback, which is one-way by design. Such a
+# hook declares itself with @wants_trampoline and the handback is skipped.
+#
+# Declared by the consumer rather than selected by a flag on this tool: the
+# requirement belongs to the hook, and this file's flag surface is a
+# combinatorial cost (see above) that a per-hook attribute does not pay.
 post_session_hook = None
+
+
+def wants_trampoline(fn):
+    """Mark a post_session_hook that must keep host trampoline control.
+
+    The hook then runs with the C64 still parked in the trampoline at $0334
+    and main_loop still holding the JMP, so _run_step/_kick_step keep working.
+    Such a hook owns the machine for its whole duration and must not expect
+    the C64 to be polling on its own.
+    """
+    fn.wants_trampoline = True
+    return fn
 
 
 def _chat_loop(tr: Ultimate64Transport, L: dict[str, int],
@@ -714,7 +737,12 @@ def _chat_loop(tr: Ultimate64Transport, L: dict[str, int],
 
 # ── Main flow ─────────────────────────────────────────────────────────────
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    """Run the tool.  ``argv`` defaults to ``sys.argv[1:]`` as usual.
+
+    Passing it explicitly lets a consumer that drives this tool through
+    post_session_hook do so without assigning to the ``sys.argv`` global.
+    """
     p = argparse.ArgumentParser()
     p.add_argument("--stage", type=int, choices=[1, 2, 3], default=2,
                    help="1=Type-1 accepted; 2=SESSION_ACTIVE (default); "
@@ -758,7 +786,7 @@ def main() -> int:
                         "and compare against the responder's expected values "
                         "captured via SymmetricState monkey-patch. Exits "
                         "after one iteration regardless of outcome.")
-    args = p.parse_args()
+    args = p.parse_args(argv)
     if args.dump_aead:
         _install_aead_capture_patch()
 
@@ -1103,15 +1131,22 @@ def main() -> int:
                 if state == SESSION_ACTIVE:
                     log.info("STAGE 2 ✓ — SESSION_ACTIVE reached")
                     if args.chat:
+                        loop = post_session_hook or _chat_loop
                         # Hand the machine back FIRST: from here the C64
                         # runs its own loop, so it can poll the network and
                         # print what arrives. Host trampoline control ends.
-                        _hand_back_to_c64(tr, L, main_loop_orig)
+                        # A @wants_trampoline hook needs the opposite and
+                        # keeps driving the machine itself, so skip it.
+                        if not getattr(loop, "wants_trampoline", False):
+                            _hand_back_to_c64(tr, L, main_loop_orig)
+                        else:
+                            log.info("hook %s declares wants_trampoline — "
+                                     "keeping host trampoline control",
+                                     getattr(loop, "__name__", loop))
                         # Assign rc, don't just return: the finally block
                         # below reports PASS/FAIL from rc, so returning the
                         # chat result directly left it at its initial 1 and
                         # printed "FAIL — see log" after a clean /quit.
-                        loop = post_session_hook or _chat_loop
                         rc = loop(tr, L, rt, responder)
                         return rc
                     if args.stage < 3:
