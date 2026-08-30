@@ -291,7 +291,25 @@ python3 tools/wg_chat.py --host <ip>                    # interactive, both ways
 python3 tools/wg_demo.py --host <ip>                    # unattended dialogue
 U64_ALLOW_MUTATE=1 \
   python3 tools/test_wire_encryption_live.py --host <ip>  # 9 wire assertions
+U64_ALLOW_MUTATE=1 \
+  python3 tools/test_config_reload_live.py --host <ip>    # 16 endpoint-move
 ```
+
+`test_config_reload_live.py` is the hardware check for #65: it brings up a
+session pinned to peer A, moves `cfg_peer_endpoint_port` to peer B, and asks
+where the next datagram goes — with **A still bound and listening**, so "not
+A" is measured rather than assumed. It also distinguishes a real
+`SOCKET_CLOSE` from `uci_wait_idle`'s timeout leg, which the VICE stub tests
+cannot: both drive `uci_socket_open` to 0, so it additionally requires a
+`$EE` sentinel in `net_last_error` to survive and the close to land well
+inside the ~1.5 s TOD budget. Defaults to REU=0 (#69) and 48 MHz, and
+restores 1 MHz on the way out.
+
+`--soak N` is a different question on the same box: N consecutive PRG loads
+driven to `net_init` + a real `UDP_CONNECT`, for #58. The socket is
+**abandoned** by default and `--soak-close` is the comparison — #58 is a leak
+of abandoned sockets, so closing each one would answer the wrong question.
+Do not "fix" the default.
 
 - Both chat tools default to **48 MHz** and rekey at 140 s by driving the
   `H` menu entry over DMA (`tools/wg_c64_input.py`). `rekey_pending` has

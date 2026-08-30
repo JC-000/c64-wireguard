@@ -197,6 +197,7 @@ python3 tools/test_write_bytes_limit.py          # VICE write chunking
 # Live hardware (C64U/U64, DeviceLock-aware; needs U64_ALLOW_MUTATE=1):
 U64_ALLOW_MUTATE=1 python3 tools/test_uci_handshake_live.py --stage 3 --host <device-ip>
 U64_ALLOW_MUTATE=1 python3 tools/test_wire_encryption_live.py --host <device-ip>
+U64_ALLOW_MUTATE=1 python3 tools/test_config_reload_live.py --host <device-ip>
 ```
 
 `--host` has no default on the newer tools deliberately: the device's address
