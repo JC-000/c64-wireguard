@@ -46,6 +46,10 @@ TESTS = [
     ("key_rotation",   ["tools/test_key_rotation.py"]),
     ("endpoint_update",["tools/test_endpoint_update.py"]),
     ("type2_slow",     ["tools/test_type2_slow.py"]),
+    # The live tools themselves cannot run here, but the seam they all hang
+    # from can be checked without hardware — and if it breaks, every one of
+    # them breaks while this gate stays green. Import-only, milliseconds.
+    ("live_seams",     ["tools/test_live_tool_seams.py"]),
     # NOT listed, deliberately: tools/test_uci_*_live.py and
     # tools/test_wg_responder*.py need real hardware or a live responder.
 ]
