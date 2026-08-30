@@ -42,14 +42,14 @@ WHAT THIS ASSERTS, on live firmware, in this order:
   5. The reconnected socket really works: complete the handshake through B to
      SESSION_ACTIVE and run a full Type-4 round trip over it.
 
-WHY IT HIJACKS _hand_back_to_c64. test_uci_handshake_live's post_session_hook
-fires only under --chat, and --chat hands the machine back to its own main
-loop first — which is the one thing that permanently ends host-side
-trampoline control. This test needs that control AFTER the session is up, to
-JSR config_load and do_handshake at chosen moments. So it replaces
-_hand_back_to_c64 with a no-op for the duration: the C64 stays parked in the
-trampoline and we keep driving it. Everything else — build, fingerprint,
-upload, staged config, handshake, device lock, teardown — is reused as-is.
+WHY IT KEEPS TRAMPOLINE CONTROL. A post_session_hook normally runs after
+test_uci_handshake_live has handed the machine back to the C64's own main
+loop, which permanently ends host-side trampoline control. This test needs
+the opposite: it JSRs config_load and do_handshake at chosen moments after
+the session is up. So its probe is declared @live.wants_trampoline, and the
+handshake tool skips the handback for it. Everything else — build,
+fingerprint, upload, staged config, handshake, device lock, teardown — is
+reused as-is.
 
 SOAK MODE (--soak N) is a separate question about the same box: issue #58,
 "the device degrades after ~5 program loads and needs a wall power cycle".
@@ -182,6 +182,7 @@ def _timed_step(tr, *, step_id: int, target: int, timeout: float) -> tuple[int, 
 # ── The #65 probe ─────────────────────────────────────────────────────────
 
 def build_probe(args):
+    @live.wants_trampoline
     def probe(tr, L, rt, responder) -> int:
         a_seen = _tap(rt)
         port_a = rt.port
@@ -542,19 +543,6 @@ def run_soak(args) -> int:
 
 # ── entry point ───────────────────────────────────────────────────────────
 
-def _no_handback(tr, L, main_loop_orig) -> None:
-    """Replaces _hand_back_to_c64 so trampoline control SURVIVES the session.
-
-    --chat's contract is that host-side control ends when the C64 gets its
-    main loop back. This test needs the opposite: it calls config_load and
-    do_handshake by hand after SESSION_ACTIVE. Leaving the machine parked in
-    the trampoline is exactly right for that, and nothing here needs the
-    C64's own loop — every poll, send and handle below is driven explicitly.
-    """
-    log.info("handback SUPPRESSED — keeping trampoline control for the "
-             "config-reload probe")
-
-
 def _turbo_down(host: str) -> None:
     """Leave the bench at 1 MHz for whoever has it next."""
     try:
@@ -596,14 +584,12 @@ def main() -> int:
             _turbo_down(args.host)
 
     live.post_session_hook = build_probe(args)
-    live._hand_back_to_c64 = _no_handback
-    sys.argv = ["test_uci_handshake_live.py", "--chat",
-                "--host", args.host, "--turbo", str(args.turbo),
-                "--reu", "off"]
+    argv = ["--chat", "--host", args.host, "--turbo", str(args.turbo),
+            "--reu", "off"]
     if args.password:
-        sys.argv += ["--password", args.password]
+        argv += ["--password", args.password]
     try:
-        return live.main()
+        return live.main(argv)
     finally:
         _turbo_down(args.host)
 
