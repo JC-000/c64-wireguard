@@ -495,6 +495,25 @@ def test_advance_across_bitmap_wraparound(transport, labels, key, plaintext):
     if f == 0:
         bitmap = read_bytes(transport, labels["rw_bitmap"], 256)
 
+        # Both expected values are derived from THE SPECIFIC three-packet
+        # sequence above -- 2040, 2041, then 2050 at shift 9. They are not
+        # general properties of the wrap, and changing any counter in that
+        # sequence means re-deriving both:
+        #
+        #   byte 255  the bits at or below old_max that must survive, i.e.
+        #             every counter received before the final advance that
+        #             lands in positions 2040..2047
+        #   byte 0    the synthetic preload, minus everything the advance
+        #             clears, plus the final counter's own bit
+        #
+        # Getting this wrong fails against CORRECT code rather than broken
+        # code, which is a confusing way to lose an afternoon. The two-packet
+        # route (2040 -> 2050, shift 10) gives byte 255 = $01, not $03,
+        # because 2041 is then never received.
+        #
+        # Byte-level rather than per-bit on purpose: asserting the whole byte
+        # also catches a walk that clears the right named positions and
+        # corrupts a neighbour, which is the failure mode #86 came from.
         if bitmap[255] == 0x03:
             passed += 1
             if VERBOSE:
