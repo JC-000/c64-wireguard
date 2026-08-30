@@ -155,11 +155,22 @@ net_init:
         ; That is issue #58: reproduced 2026-08-24 in 3 echo runs on a
         ; freshly power-cycled U64E, with no idle window anywhere.
         ;
-        ; Guarded on the flag holding exactly $01: this is BSS, so on a
-        ; cold boot it is whatever the RAM happened to contain, and we
-        ; must not push a garbage socket id at the firmware. A close
-        ; failure is deliberately non-fatal — net_init must still
-        ; complete, and having tried to close beats never trying.
+        ; Guarded on the flag holding exactly $01 so we never push a
+        ; garbage socket id at the firmware.
+        ;
+        ; The guard's old rationale — "this is BSS, so on a cold boot it is
+        ; whatever the RAM happened to contain" — is not true on the load
+        ; path, and was the #80 family of stale comment: UCI_BSS lands in
+        ; MAIN_AREA_LO, which the cfg declares `file = %O, fill = yes,
+        ; fillval = $00`, so the area is padded into the PRG and LOAD stamps
+        ; zeros over it. src/boot.s says so outright. After a LOAD this flag
+        ; is always $00 and this branch cannot be taken.
+        ;
+        ; The guard still earns its place, for the case it is actually
+        ; reachable in: an in-run re-init ('I' pressed a second time) with a
+        ; socket genuinely open from the first. A close failure is
+        ; deliberately non-fatal — net_init must still complete, and having
+        ; tried to close beats never trying.
         lda uci_socket_open
         cmp #$01
         bne @ni_no_socket

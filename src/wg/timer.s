@@ -12,16 +12,21 @@
 ;   Session expire: 10800 ($2A30) = 180 seconds
 ;
 ; Interface:
-;   timer_session_start - snapshot jiffy clock at session start
-;   timer_check         - check expiry/rekey/keepalive (main loop)
-;   timer_mark_send     - update last-send time after transport_send
-;   timer_elapsed_cmp   - compare elapsed time against threshold
+;   timer_session_start   - snapshot jiffy clock at session start
+;   timer_handshake_start - snapshot it at initiation and arm the handshake
+;                           deadline (issue #84)
+;   timer_check           - check handshake timeout / expiry / rekey /
+;                           keepalive (main loop)
+;   timer_mark_send       - update last-send time after transport_send
+;   timer_elapsed_cmp     - compare elapsed time against threshold
 ; =============================================================================
 
 .include "constants.inc"
 
 ; --- Public entry points ---
 .export timer_session_start
+.export timer_handshake_start
+.export timer_check_handshake
 .export timer_check
 .export timer_mark_send
 .export timer_elapsed_cmp
@@ -29,12 +34,14 @@
 ; --- External symbols ---
 ; SESSION_ACTIVE, SESSION_IDLE : session state constants (src/session.asm)
 .importzp SESSION_ACTIVE
+.importzp SESSION_HS_SENT
 .importzp SESSION_IDLE
 ; wg_state, rekey_pending, session_start_jiffy, last_send_jiffy,
 ; tp_payload_len : mutable globals (src/data.asm)
 .import session_reset
 .import wg_state
 .import rekey_pending
+.import hs_timer_armed
 .import session_start_jiffy
 .import last_send_jiffy
 .import tp_payload_len
@@ -44,6 +51,7 @@
 .import print_string
 ; session_expired_msg, rekey_msg, keepalive_msg : strings (src/strings.asm)
 .import session_expired_msg
+.import hs_timeout_msg
 .import rekey_msg
 .import keepalive_msg
 
@@ -53,6 +61,14 @@ REKEY_JIFFIES_LO     = $20     ; 7200 = $1C20
 REKEY_JIFFIES_HI     = $1c
 EXPIRE_JIFFIES_LO    = $30     ; 10800 = $2A30
 EXPIRE_JIFFIES_HI    = $2a
+; Handshake deadline: 5400 jiffies = 90 s. That is WireGuard's own
+; REKEY_ATTEMPT_TIME — the point at which a peer gives up on an initiation
+; rather than a number invented here. It bounds the WAIT for a Type 2, not
+; the cost of producing the Type 1: the jiffy clock does not advance while
+; the crypto runs with interrupts masked, and the state only becomes HS_SENT
+; after the initiation is on the wire.
+HS_TIMEOUT_JIFFIES_LO = $18    ; 5400 = $1518
+HS_TIMEOUT_JIFFIES_HI = $15
 
 .segment "APP_CODE"
 
@@ -61,6 +77,10 @@ EXPIRE_JIFFIES_HI    = $2a
 ;
 ; Snapshots jiffy clock into session_start_jiffy and last_send_jiffy.
 ; Call when transitioning to SESSION_ACTIVE.
+;
+; Also disarms the handshake deadline: the handshake it was timing has just
+; completed, and leaving it armed would let a later stale comparison tear
+; down a session that is now live.
 ;
 ; Clobbers: A
 ; =============================================================================
@@ -74,13 +94,23 @@ timer_session_start:
         lda $a2
         sta session_start_jiffy+2
         sta last_send_jiffy+2
+        lda #$00
+        sta hs_timer_armed
         rts
 
 ; =============================================================================
-; timer_check - Periodic timer checks for active session
+; timer_check - Periodic timer checks
 ;
-; Called every main loop iteration. Only operates when wg_state == ACTIVE.
-; Checks (in priority order):
+; Called every main loop iteration, in EVERY state. It used to be called only
+; when wg_state == ACTIVE — by boot.s' main loop, and again by its own first
+; three instructions — which is precisely why an unanswered handshake was
+; unreclaimable: the one mechanism that reclaims a session could not see the
+; state most likely to need reclaiming (issue #84). boot.s no longer
+; pre-filters; this routine is the single place the state gate lives.
+;
+; HS_SENT:
+;   0. Handshake deadline (90s) -> session_reset (returns the socket)
+; ACTIVE, in priority order:
 ;   1. Session expired (180s) -> reset to IDLE
 ;   2. Rekey needed (120s) -> set rekey_pending flag
 ;   3. Keepalive needed (10s) -> send empty Type 4
@@ -91,7 +121,21 @@ timer_check:
         lda wg_state
         cmp #<SESSION_ACTIVE
         beq @active
+        cmp #<SESSION_HS_SENT
+        beq @handshaking
         rts
+
+@handshaking:
+        ; Check 0 lives in APP_EXTRA (MAIN_AREA_HI), not here. APP_CODE and
+        ; APP_DATA share MAIN_AREA_LO and have 25 bytes of slack before
+        ; LIB_CHACHA20_POLY1305_CODE's align=$100 boundary at $4B00; crossing
+        ; it costs 256 bytes the area's tail cannot absorb, and the §6.7
+        ; image-overrun assert in contract_asserts.s fails the link rather
+        ; than letting MAIN_AREA_LO run into the sqtab window. Same escape
+        ; session_stage_dest took. It has to be a jmp, not a branch: the two
+        ; segments are ~$4000 apart.
+        jmp timer_check_handshake
+
 @active:
         ; --- Check 1: session expired? (elapsed > 10800 jiffies) ---
         lda #<session_start_jiffy
@@ -218,4 +262,66 @@ timer_elapsed_cmp:
         rts
 @less:
         clc                     ; C=0: elapsed < threshold
+        rts
+
+; =============================================================================
+; APP_EXTRA (MAIN_AREA_HI) — the #84 handshake deadline
+;
+; Placed here for space, not for structure: see the comment at @handshaking.
+; =============================================================================
+.segment "APP_EXTRA"
+
+; =============================================================================
+; timer_handshake_start - Record initiation time and arm the handshake deadline
+;
+; Call from session_initiate once the Type 1 is on the wire. Until #84 the
+; only thing that could reclaim a session was the 180 s expiry, and that is
+; gated on SESSION_ACTIVE — so an initiation that never got an answer sat in
+; HS_SENT holding the backend's socket for the rest of the run. This starts
+; the clock on that state instead.
+;
+; Clobbers: A
+; =============================================================================
+timer_handshake_start:
+        jsr timer_session_start ; snapshot the clock (and disarm)...
+        lda #$01
+        sta hs_timer_armed      ; ...then arm on top of it
+        rts
+
+; =============================================================================
+; timer_check_handshake - Check 0: initiation unanswered too long?
+;
+; Tail of timer_check for wg_state == HS_SENT; entered by jmp, so its rts is
+; timer_check's rts.
+;
+; Armed only by timer_handshake_start, i.e. only for an initiation this build
+; actually sent. A caller that sets wg_state = HS_SENT by hand has taken no
+; jiffy snapshot, and measuring a deadline from whatever session_start_jiffy
+; last held would fire immediately.
+;
+; Clobbers: A, X, Y
+; =============================================================================
+timer_check_handshake:
+        lda hs_timer_armed
+        beq @hs_done
+
+        lda #<session_start_jiffy
+        sta zp_ptr1
+        lda #>session_start_jiffy
+        sta zp_ptr1+1
+        lda #HS_TIMEOUT_JIFFIES_LO
+        ldx #HS_TIMEOUT_JIFFIES_HI
+        jsr timer_elapsed_cmp
+        bcc @hs_done            ; C=0: still within the deadline
+
+        ; Give up on this handshake. session_reset is the canonical teardown:
+        ; it drops to IDLE, disarms this deadline, and hands the backend's
+        ; socket back — which is the whole point. Deliberately NOT a retry:
+        ; re-initiating from a timer would loop against an unreachable peer
+        ; forever. The user re-arms with 'H'.
+        jsr session_reset
+        lda #<hs_timeout_msg
+        ldy #>hs_timeout_msg
+        jsr print_string
+@hs_done:
         rts

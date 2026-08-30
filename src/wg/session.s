@@ -52,6 +52,7 @@ SESSION_ACTIVE  = 2
 .import cookie_handle_type3
 ; Session timer (wg/timer.s)
 .import timer_session_start
+.import timer_handshake_start
 ; Networking
 .import net_udp_send
 .import net_udp_close
@@ -81,6 +82,7 @@ SESSION_ACTIVE  = 2
 .import wg_peer_port
 ; Session state variable
 .import wg_state
+.import hs_timer_armed
 ; Transport packet buffers
 .import tp_packet
 .import tp_packet_len
@@ -93,6 +95,7 @@ SESSION_ACTIVE  = 2
 .import cookie_recv_msg
 .import hs_ok_msg
 .import hs_fail_msg
+.import hs_send_err_msg
 .import decrypt_fail_msg
 .import recv_data_msg
 .import ping_reply_msg
@@ -144,7 +147,8 @@ session_stage_dest:
 ; sends via UDP.
 ;
 ; Input: cfg_* buffers populated, network initialized
-; Output: hs_packet sent, state = HS_SENT
+; Output: C=0, hs_packet sent, state = HS_SENT
+;         C=1, nothing sent, state = IDLE and the backend resource returned
 ; Clobbers: everything
 ; =============================================================================
 session_initiate:
@@ -182,11 +186,21 @@ session_initiate:
         lda #<hs_packet
         ldx #>hs_packet
         jsr net_udp_send
+        bcc @si_sent
+        jmp session_send_failed ; nothing went out — see APP_EXTRA below
 
+@si_sent:
         ; Update state
         lda #SESSION_HS_SENT
         sta wg_state
 
+        ; Start the clock on this initiation. Without it HS_SENT is an
+        ; absorbing state: nothing ever leaves it except a Type 2 that may
+        ; never come, and the backend's socket stays pinned to a peer we
+        ; have already stopped hearing from (issue #84).
+        jsr timer_handshake_start
+
+        clc
         rts
 
 ; =============================================================================
@@ -263,6 +277,13 @@ session_handle_packet:
         rts
 
 @hs_fail:
+        ; This initiation is dead: hs_process_response rejected the Type 2,
+        ; so no transport keys exist and the peer will not send another
+        ; response for a sender index we are about to stop using. Abandon it
+        ; properly instead of returning to HS_SENT holding the socket —
+        ; session_reset drops to IDLE, disarms the deadline and hands the
+        ; socket back (issue #84).
+        jsr session_reset
         lda #<hs_fail_msg
         ldy #>hs_fail_msg
         jsr print_string
@@ -372,6 +393,16 @@ session_handle_packet:
         rts
 
 @decrypt_fail:
+        ; Deliberately NOT a teardown, unlike @hs_fail above. This is one
+        ; datagram that failed AEAD, not an abandoned session: the keys are
+        ; still good and the peer is still there. Tearing down here would be
+        ; a remotely triggerable session kill — under ip65 anything on the
+        ; LAN can put a type-4 byte into udp_recv_buf, and WireGuard's own
+        ; answer to an undecryptable packet is to discard it.
+        ;
+        ; It is not a leak either: the state is ACTIVE, so the 180 s expiry
+        ; in timer_check already bounds a session whose keys have genuinely
+        ; gone bad and which therefore decrypts nothing from here on.
         lda #<decrypt_fail_msg
         ldy #>decrypt_fail_msg
         jsr print_string
@@ -381,25 +412,84 @@ session_handle_packet:
 ; session_reset - Reset session to IDLE state
 ;
 ; This is the canonical teardown primitive: the session is being dropped, so
-; hand the backend's UDP socket back as well. The UCI firmware never reclaims
-; an abandoned connected UDP socket (issue #71; GideonZ/1541ultimate#808) — a
-; dropped session that keeps its socket open leaks it until a wall power cycle.
-; net_udp_close is safe when nothing is open (returns having done nothing), and
-; the ip65 backend's net_udp_close is a no-op, so this is correct for both.
+; hand the backend's UDP socket back as well. Until #84 it had exactly one
+; caller — the 180 s expiry in timer.s — which is how every other abandonment
+; path came to hold its socket for the rest of the run. It is now reached from
+; the handshake deadline and from @hs_fail as well.
 ;
-; Reopening is automatic: net_udp_close clears uci_socket_open, so the next
-; net_udp_send re-issues UDP_CONNECT on its first-call path. The rekey path
+; The UCI firmware never reclaims an abandoned connected UDP socket (issue
+; #71; GideonZ/1541ultimate#808) — a dropped session that keeps its socket
+; open leaks it until a wall power cycle. net_udp_close is safe when nothing
+; is open (returns having done nothing).
+;
+; It is NOT a no-op on ip65 any more, which is the other half of #84: that
+; backend now releases the listener slot it claimed in ip65's 4-entry table.
+; Correct for both, because reopening is automatic in both: net_udp_close
+; clears uci_socket_open and the next net_udp_send re-issues UDP_CONNECT;
+; ip65's net_udp_send re-registers the listener the same way. The rekey path
 ; does NOT go through here (it re-handshakes via session_initiate, which keeps
 ; wg_state and the live socket), so closing on every session_reset never
 ; churns a socket that a rekey wants to reuse.
 ;
 ; Clobbers: A, X, Y (net_udp_close uses all three)
 ; =============================================================================
+; Placed in APP_EXTRA (MAIN_AREA_HI), not APP_CODE, for the same reason
+; session_stage_dest above is: MAIN_AREA_LO has 25 bytes of slack before
+; LIB_CHACHA20_POLY1305_CODE's align=$100 boundary and cannot afford to cross
+; it, and #84 needs that budget for its two new call sites. Moving the callee
+; out buys more than trimming the callers would.
+.segment "APP_EXTRA"
+
+; =============================================================================
+; session_send_failed - net_udp_send refused the Type 1 initiation
+;
+; session_initiate used to ignore net_udp_send's carry and advance to HS_SENT
+; regardless. Every backend failure — $8C SEND_TOO_LONG, $89 WAIT_TIMEOUT,
+; $85 SEND_FAIL, $87 SHORT_WRITE, $8D OPEN_REFUSED — therefore left wg_state
+; at HS_SENT with NOTHING ON THE WIRE, holding the socket, and do_handshake
+; printed no status either way. That is a sharper case than the one #84
+; describes: not "the peer never answered" but "we never asked, we knew we
+; never asked, and we sat in HS_SENT holding the socket anyway". The 90 s
+; deadline would eventually paper over it, but a failure that was observable
+; at once should not take 90 s and a silent screen to surface.
+;
+; Reached by jmp, so its rts is session_initiate's rts.
+;
+; session_reset is the right teardown even when the state was ACTIVE (a rekey
+; re-handshakes through session_initiate): a send the backend refused means
+; the peer is not reachable at all, so a session still marked live is a
+; fiction, and holding its socket is exactly what #84 is about. The previous
+; behaviour destroyed that ACTIVE session too — HS_SENT makes
+; session_handle_packet reject every Type 4 via @wrong_state — but kept the
+; socket. This is strictly better, never worse.
+;
+; The numeric code is deliberately NOT printed. net_last_error is exported by
+; the UCI backend and by neither ip65 nor this file's imports: src/net_abi.inc
+; records that as a known §13.1 non-conformance, because ip65's driver has no
+; error channel and referencing the symbol here would break the ip65 link. A
+; host reading net_last_error over the monitor still gets the code on UCI.
+;
+; Output: C=1, always.
+; Clobbers: A, X, Y
+; =============================================================================
+session_send_failed:
+        jsr session_reset       ; IDLE, disarm, hand the resource back
+        lda #<hs_send_err_msg
+        ldy #>hs_send_err_msg
+        jsr print_string
+        sec
+        rts
+
 session_reset:
         lda #SESSION_IDLE
         sta wg_state
+        sta hs_timer_armed      ; SESSION_IDLE = 0: also disarms the #84
+                                ; handshake deadline, so a reset session
+                                ; cannot be torn down twice
         jsr net_udp_close       ; hand the firmware UDP socket back (#71)
         rts
+
+.segment "APP_CODE"
 
 ; =============================================================================
 ; endpoint_update - Update peer endpoint after successful decrypt

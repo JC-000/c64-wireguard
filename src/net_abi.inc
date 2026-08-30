@@ -33,10 +33,17 @@
 .import net_udp_send        ; send one datagram. Caller stages all four
                             ; operands below first.
 .import net_udp_close       ; release the backend's UDP socket, if any.
-                            ; No-op under ip65; under UCI it hands the
-                            ; firmware handle back. Abandoning a live one
-                            ; poisons the U64E lease path until a wall
-                            ; power cycle — issue #58. Safe when idle.
+                            ; Under UCI it hands the firmware handle back —
+                            ; abandoning a live one poisons the U64E lease
+                            ; path until a wall power cycle (issue #58).
+                            ; Under ip65 it releases the entry claimed in
+                            ; the blob's 4-entry listener table; it was a
+                            ; bare `clc / rts` until issue #84, so that
+                            ; backend leaked a slot per listen and reported
+                            ; success. Safe when idle. Both backends
+                            ; re-acquire lazily on the next net_udp_send, so
+                            ; a consumer may close on any abandonment path
+                            ; without re-running net_init.
 
 ; --- Caller-set send operands (§13.1) ---
 .import net_udp_send_ptr    ; 2 B — buffer address

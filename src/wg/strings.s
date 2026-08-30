@@ -21,6 +21,8 @@
 .export hs_start_msg
 .export hs_ok_msg
 .export hs_fail_msg
+.export hs_timeout_msg
+.export hs_send_err_msg
 .export decrypt_fail_msg
 .export recv_data_msg
 .export ping_sent_msg
@@ -113,3 +115,22 @@ session_expired_msg:
         .byte "SESSION EXPIRED", 13, 0
 keepalive_msg:
         .byte "KEEPALIVE", 13, 0
+
+; =============================================================================
+; APP_EXTRA (MAIN_AREA_HI) — space, not structure
+;
+; APP_DATA shares MAIN_AREA_LO with APP_CODE, and the two together have 25
+; bytes of slack before LIB_CHACHA20_POLY1305_CODE's align=$100 boundary at
+; $4B00. Crossing it costs a full 256 bytes, which the area's remaining tail
+; (177 B under UCI, 214 B under ip65) cannot absorb — the link then fails on
+; the §6.7 image-overrun assert in contract_asserts.s rather than quietly
+; running MAIN_AREA_LO into the sqtab window. This one string is over that
+; budget, so it goes where session_stage_dest and the #84 handshake deadline
+; went.
+; =============================================================================
+.segment "APP_EXTRA"
+
+hs_timeout_msg:
+        .byte "HANDSHAKE TIMEOUT", 13, 0
+hs_send_err_msg:
+        .byte "HANDSHAKE SEND FAILED", 13, 0

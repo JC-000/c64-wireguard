@@ -234,6 +234,7 @@
 .export session_start_jiffy
 .export last_send_jiffy
 .export rekey_pending
+.export hs_timer_armed
 
 ; --- TAI64N timestamp state ---
 .export tai64n_base_time
@@ -749,6 +750,16 @@ last_send_jiffy:
         .res 3, 0              ; last packet send time
 rekey_pending:
         .res 1                 ; 1 = rekey initiated
+hs_timer_armed:
+        .res 1                 ; 1 = an initiation WE sent is being timed
+                               ; (issue #84). Set by timer_handshake_start,
+                               ; cleared by timer_session_start and
+                               ; session_reset. Gating the handshake timeout
+                               ; on this rather than on wg_state alone means
+                               ; a caller that pokes wg_state = HS_SENT
+                               ; directly — every VICE suite does — does not
+                               ; get a deadline measured from a jiffy
+                               ; snapshot nobody took.
 
 ; --- TAI64N timestamp state ---
 tai64n_base_time:
