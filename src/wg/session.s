@@ -248,6 +248,19 @@ session_handle_packet:
         ; HS_SENT is not a narrowing of the legitimate case: a cookie reply
         ; is only ever a response to an initiation, and a rekey goes through
         ; session_initiate, which sets HS_SENT before any reply can arrive.
+        ;
+        ; DO NOT DELETE THESE 7 BYTES WHEN MAIN_AREA_LO IS TIGHT. Sitting
+        ; next to two checks that can each cite upstream chapter and verse,
+        ; this gate reads like belt-and-braces, and it is not. The upstream
+        ; guards are sufficient THERE because of a precondition that is false
+        ; HERE: wireguard-go's ConsumeReply has no side effects beyond storing
+        ; a cookie, so an accepted forgery costs the receiver nothing. Our
+        ; handler sends. Port a guard without porting the reason it suffices
+        ; and you get a fix that passes review, matches upstream, and leaves
+        ; the session kill working — which is exactly what happened while #94
+        ; was being fixed. Rationale colocated with the invariant on purpose;
+        ; same reasoning as CRYPTO_BSS's align in #104.
+        ; Covered by tools/test_issue_94_95_adversarial.py T3/T6/T7.
         lda wg_state
         cmp #SESSION_HS_SENT
         bne @cookie_fail
