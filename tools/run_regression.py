@@ -70,6 +70,13 @@ TESTS = [
     # Without the red half, a green gate would be consistent with the code
     # still being needed and simply never exercised.
     ("cold_reclaim",   ["tools/test_cold_segment_reclaim.py"]),
+    # Issue #94: the three guards on the Type 3 (cookie reply) path. Fast
+    # group only — the suite's --slow group runs hs_process_response /
+    # hs_create_initiation and is hours per case under VICE warp, well past
+    # SUITE_TIMEOUT. The fast group is seconds and covers all three guards
+    # plus their acceptance controls; T7 carries its own 300 s bound so a
+    # regression fails inside the budget instead of hanging the pool.
+    ("issue_94",       ["tools/test_issue_94_95_adversarial.py"]),
     # NOT listed, deliberately: tools/test_uci_*_live.py and
     # tools/test_wg_responder*.py need real hardware or a live responder.
 ]

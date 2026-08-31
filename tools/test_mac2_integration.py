@@ -229,6 +229,15 @@ def test_cookie_sets_valid_flag(transport, labels, rng):
     type3[48:64] = ct_tag[16:]   # tag
 
     # Clear cookie_valid before handling cookie reply
+    # Issue #94: cookie_handle_type3 now requires the reply to be addressed to
+    # our current sender index, and requires that we have actually sent an
+    # initiation (hs_mac1_valid, the hasLastMAC1 equivalent). This is a unit
+    # test of the XChaCha20-Poly1305 path, not of those guards, so satisfy
+    # both preconditions explicitly. tools/test_issue_94_cookie_reply.py owns
+    # the guard behaviour.
+    write_bytes(transport, labels["hs_sender_idx"], b'\x01\x02\x03\x04')
+    write_bytes(transport, labels["hs_mac1_valid"], bytes([1]))
+
     write_bytes(transport, cookie_valid_addr, bytes([0]))
     write_bytes(transport, udp_recv_buf_addr, bytes(type3))
     jsr(transport, 0x0380, timeout=120.0)
@@ -395,6 +404,15 @@ def test_full_flow(transport, labels, rng):
     type3[8:32] = nonce_24
     type3[32:48] = ct_tag[:16]
     type3[48:64] = ct_tag[16:]
+
+    # Issue #94: cookie_handle_type3 now requires the reply to be addressed to
+    # our current sender index, and requires that we have actually sent an
+    # initiation (hs_mac1_valid, the hasLastMAC1 equivalent). This is a unit
+    # test of the XChaCha20-Poly1305 path, not of those guards, so satisfy
+    # both preconditions explicitly. tools/test_issue_94_cookie_reply.py owns
+    # the guard behaviour.
+    write_bytes(transport, labels["hs_sender_idx"], b'\x01\x02\x03\x04')
+    write_bytes(transport, labels["hs_mac1_valid"], bytes([1]))
 
     write_bytes(transport, cookie_valid_addr, bytes([0]))
     write_bytes(transport, udp_recv_buf_addr, bytes(type3))
