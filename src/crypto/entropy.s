@@ -53,6 +53,15 @@ entropy_init:
         ; hs_ephem_priv, so without this the ephemeral key's whole feedback
         ; chain starts from a compile-time constant on every machine.
         ;
+        ; NOT every session_initiate reaches this. There are two call sites:
+        ; boot.s's do_handshake, which calls entropy_init first, and
+        ; session.s's Type-3 cookie-reply branch, which re-initiates without
+        ; it. That path is benign today only because a Type 3 can arrive
+        ; only after a Type 1 already went out, so the state has been seeded
+        ; and has since absorbed a full initiation's worth of reads -- but
+        ; "every handshake is seeded" would be false, and that path is
+        ; already under review as issue #94.
+        ;
         ; XOR-in, never assign: this routine is called before every
         ; handshake, and later calls have a state that already absorbed
         ; hundreds of hardware reads. XOR cannot reduce the entropy already
@@ -69,9 +78,17 @@ entropy_init:
         ;                 unpredictable across power cycles.
         ;   cia1_ta_lo/hi timer A's phase, one CPU cycle of resolution over
         ;                 a ~$4295 period. The finest-grained source here.
-        ;   vic_raster    beam position, 0..261; correlated with timer A
-        ;                 (both clock-derived) but not identical to it,
-        ;                 since the two have different periods.
+        ;   vic_raster    beam position, 0..261. WORTH ALMOST NOTHING and
+        ;                 kept only because it is already paid for: an NTSC
+        ;                 frame is 65 * 263 = 17095 cycles and timer A's
+        ;                 period is 17046, so the two are within 50 cycles
+        ;                 of each other and the raster is in the same
+        ;                 clock-affine family as the timer, not an
+        ;                 independent axis. Do NOT reach for it as the
+        ;                 non-affine source issue #101 needs -- CIA1 TOD is
+        ;                 the one that is genuinely off this clock
+        ;                 (uci_tod_start already runs in net_init under
+        ;                 BACKEND=uci, but not under ip65).
         ;   sid_osc3      real noise on hardware, a clock ramp under VICE.
         ;
         ; This is a SEED, not a CSPRNG. It buys "not the same constant on
@@ -179,12 +196,29 @@ entropy_fill:
 ; alone. In the cancelled phases described above that is not a weakening but
 ; a total loss: measured under VICE, 2.00% of 200 paired trials had
 ; entropy_fill produce output identical to the previous call from the same
-; state, always the same machine-independent 9-byte cycle
-; ($ff $01 $fc $07 $f0 $1f $c0 $7f $00, which is exactly what the recurrence
-; predicts for s0 = $00 with osc EOR ta pinned at $ff).
+; state. There are TWO such constants, not one -- K = osc EOR ta is fixed at
+; both of the phases entropy_byte's note names, S = $ff and S = $7f -- and
+; each yields its own machine-independent cycle, exactly as the recurrence
+; predicts for s0 = $00:
 ;
-; entropy_init therefore mixes live machine state in here before every
-; handshake (issue #89). That removes the universal constant. It does NOT
-; remove the cancellation itself, which is a separate defect in
-; entropy_byte's two-source design.
+;     K = $ff  (period 9)   ff 01 fc 07 f0 1f c0 7f 00
+;     K = $7f  (period 18)  7f 81 7d 84 77 90 5f c0 ff
+;                           80 7e 82 7b 88 6f a0 3f 00
+;
+; Those are GENERATION order. entropy_fill writes DESCENDING -- Y counts
+; down -- so a buffer dump is the reverse, which is why the $ff case is
+; measured as f0 07 fc 01 ff 00 7f c0 1f repeating and not as it reads
+; above. Reproduce either with the recurrence
+; s <- (ROL s) EOR K, carry-in = bit 7 of the pre-ROL s.
+;
+; entropy_init therefore mixes live machine state in here (issue #89). READ
+; WHAT THAT DOES AND DOES NOT BUY. It removes the two UNIVERSAL constants:
+; the cancelled output stops being one of 2 precomputable keys and becomes
+; one of 2 * 256 = 512, since s0 is now a byte instead of $00. It does not
+; reduce how OFTEN the cancellation happens -- independently measured after
+; this fix at 25/1500 = 1.67% of ephemeral keys still precomputable. 9 bits
+; of ephemeral private key is as fatal to WireGuard as 1 bit. #89 is a
+; correctness fix to a false comment and a fixed seed; the generator is NOT
+; fixed. That is issue #101, and it needs a source that is not affine in the
+; CPU clock, in entropy_byte and entropy_fill rather than here.
 entropy_state:  .res 1
