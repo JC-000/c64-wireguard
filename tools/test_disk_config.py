@@ -37,7 +37,8 @@ VERBOSE = False
 
 def make_config_content(static_priv, static_pub, peer_pub,
                         endpoint_ip, endpoint_port,
-                        tunnel_ip, target_ip):
+                        tunnel_ip, target_ip,
+                        key_lines=None):
     """Build WG.CFG content from binary values.
 
     Args:
@@ -48,14 +49,24 @@ def make_config_content(static_priv, static_pub, peer_pub,
         endpoint_port: int (1-65535)
         tunnel_ip: 4-tuple/list of ints (0-255)
         target_ip: 4-tuple/list of ints (0-255)
+        key_lines: optional 3-tuple of literal strings to emit as lines 1-3
+            instead of the uppercase hex of the three key arguments. Used by
+            the case-folding and non-hex-rejection tests (#88), which need
+            control over the exact characters on the wire — the default
+            `.hex().upper()` rendering is precisely what let the
+            uppercase-only parser go unnoticed.
 
     Returns:
         ASCII string with CR-terminated lines.
     """
     lines = []
-    lines.append(static_priv.hex().upper())
-    lines.append(static_pub.hex().upper())
-    lines.append(peer_pub.hex().upper())
+    if key_lines is not None:
+        assert len(key_lines) == 3
+        lines.extend(key_lines)
+    else:
+        lines.append(static_priv.hex().upper())
+        lines.append(static_pub.hex().upper())
+        lines.append(peer_pub.hex().upper())
     lines.append(f"{endpoint_ip[0]}.{endpoint_ip[1]}.{endpoint_ip[2]}.{endpoint_ip[3]}")
     lines.append(str(endpoint_port))
     lines.append(f"{tunnel_ip[0]}.{tunnel_ip[1]}.{tunnel_ip[2]}.{tunnel_ip[3]}")
@@ -567,6 +578,242 @@ def test_full_config_extras(transport, labels, rng):
 
 
 # ============================================================================
+# Test group 8: hex digit case-folding and non-hex rejection (issue #88)
+#
+# `hex_digit` used to decode uppercase only: it subtracted '0' and, for
+# anything >= 10, subtracted a further $07. That adjustment is calibrated for
+# 'A'-'F' ($41-$30-$07 = $0A). Lowercase 'a' is $61, so $61-$30 = $31 and
+# $31-$07 = $2A — bit 5 survives, and a byte whose low nibble is a-f decodes
+# wrong. "ca" decoded to $EA, not $CA. Nothing validated, nothing reported:
+# the only symptom was a handshake that never completed.
+#
+# The whole gate missed it because make_config_content() rendered every key
+# with `.hex().upper()`, which is the one case the parser handled.
+#
+# CASE_KEY exercises every nibble value 0-f in BOTH positions, so a decode
+# that is wrong for any single hex digit shows up as a byte mismatch. Byte 0
+# is $CA — the worked example from the issue.
+# ============================================================================
+
+CASE_KEY = (bytes([0xCA])
+            + bytes([(i << 4) | ((i + 1) & 0x0F) for i in range(16)])
+            + bytes([(i << 4) | ((0x0F - i) & 0x0F) for i in range(15)]))
+assert len(CASE_KEY) == 32
+assert set(b >> 4 for b in CASE_KEY) == set(range(16))
+assert set(b & 0xF for b in CASE_KEY) == set(range(16))
+assert CASE_KEY[0] == 0xCA
+
+# The value the buggy parser produced for CASE_KEY when written in lowercase:
+# each nibble c goes through ((c_char - $30) - $07) & $FF, with bit 5 of the
+# low nibble surviving into the byte. Derived here rather than hardcoded so
+# the "red" expectation is checkable by eye.
+def _buggy_decode(hex_text):
+    out = bytearray()
+    for i in range(0, len(hex_text), 2):
+        vals = []
+        for ch in hex_text[i:i + 2]:
+            a = (ord(ch) - 0x30) & 0xFF
+            if a >= 10:
+                a = (a - 0x07) & 0xFF
+            vals.append(a)
+        out.append(((vals[0] << 4) | vals[1]) & 0xFF)
+    return bytes(out)
+
+
+def mixed_case_hex(data):
+    """Hex string with alternating character case: 'Ca', 'dE', ..."""
+    h = data.hex()
+    return "".join(c.upper() if i % 2 == 0 else c.lower()
+                   for i, c in enumerate(h))
+
+
+def build_hex_digit_sweep_trampoline(labels):
+    """Trampoline at $0370: call hex_digit for every character 0..255.
+
+    Stores the returned A at $C000+c and the returned carry (0 or 1) at
+    $C100+c. One JSR characterises the whole 256-character domain, so the
+    'accepts what it must / rejects everything else' claim is exhaustive
+    rather than sampled.
+
+        LDX #0
+    loop:
+        TXA
+        JSR hex_digit
+        STA $C000,X
+        LDA #0
+        ROL A            ; A = carry flag
+        STA $C100,X
+        INX
+        BNE loop
+        RTS
+
+    hex_digit preserves X and Y (it only does SEC/SBC/CMP/AND/ADC on A).
+    """
+    addr = labels["hex_digit"]
+    return bytes([
+        0xA2, 0x00,                              # LDX #0
+        0x8A,                                    # loop: TXA
+        0x20, addr & 0xFF, (addr >> 8) & 0xFF,   # JSR hex_digit
+        0x9D, 0x00, 0xC0,                        # STA $C000,X
+        0xA9, 0x00,                              # LDA #0
+        0x2A,                                    # ROL A
+        0x9D, 0x00, 0xC1,                        # STA $C100,X
+        0xE8,                                    # INX
+        0xD0, 0xF0,                              # BNE loop
+        0x60,                                    # RTS
+    ])
+
+
+def sweep_hex_digit(transport, labels):
+    """Run the sweep; return (values[256], carries[256])."""
+    write_bytes(transport, 0x0370, build_hex_digit_sweep_trampoline(labels))
+    jsr(transport, 0x0370, timeout=20.0)
+    values = list(read_bytes(transport, 0xC000, 256))
+    carries = list(read_bytes(transport, 0xC100, 256))
+    return values, carries
+
+
+def test_hex_digit_sweep(transport, labels):
+    """Characterise hex_digit over all 256 input characters.
+
+    Accept 0-9, A-F, a-f with the correct value and carry clear; reject
+    every other character with carry set. 256 assertions, one per character
+    — nothing here can pass on a parser that does nothing, because 16 of
+    them demand specific non-zero values.
+    """
+    passed = failed = 0
+    values, carries = sweep_hex_digit(transport, labels)
+
+    valid = {}
+    for i, ch in enumerate("0123456789"):
+        valid[ord(ch)] = i
+    for i, ch in enumerate("ABCDEF"):
+        valid[ord(ch)] = 10 + i
+    for i, ch in enumerate("abcdef"):
+        valid[ord(ch)] = 10 + i
+
+    bad_accepts = []
+    for c in range(256):
+        if c in valid:
+            ok = (carries[c] == 0 and values[c] == valid[c])
+            if ok:
+                passed += 1
+            else:
+                failed += 1
+                print(f"  FAIL hex_digit({c:#04x} {chr(c)!r}): "
+                      f"got value {values[c]:#04x} carry {carries[c]}, "
+                      f"want value {valid[c]:#04x} carry 0")
+        else:
+            if carries[c] == 1:
+                passed += 1
+            else:
+                failed += 1
+                bad_accepts.append(c)
+    if bad_accepts:
+        shown = " ".join(f"{c:#04x}" for c in bad_accepts[:12])
+        print(f"  FAIL hex_digit accepted {len(bad_accepts)} non-hex "
+              f"characters (carry clear); first: {shown}")
+    return passed, failed
+
+
+def test_hex_case_config(transport, labels):
+    """Lowercase / uppercase / mixed-case key lines must decode identically.
+
+    Instance 5's WG.CFG holds CASE_KEY three times: line 1 lowercase,
+    line 2 uppercase, line 3 mixed. All three must land as CASE_KEY.
+    """
+    passed = failed = 0
+
+    result = call_config_read(transport, labels)
+    if result == 0:
+        passed += 1
+        if VERBOSE:
+            print("  PASS case: config_read_file accepted the mixed-case file")
+    else:
+        failed += 1
+        print(f"  FAIL case: config_read_file returned {result}, expected 0")
+
+    p, f = verify_key(transport, labels, "cfg_static_priv", CASE_KEY,
+                      "case: lowercase key decodes to CASE_KEY")
+    passed += p; failed += f
+    if f:
+        print(f"    lowercase, decoded by the pre-#88 parser: "
+              f"{_buggy_decode(CASE_KEY.hex()).hex()}")
+
+    p, f = verify_key(transport, labels, "cfg_static_pub", CASE_KEY,
+                      "case: uppercase key decodes to CASE_KEY")
+    passed += p; failed += f
+
+    p, f = verify_key(transport, labels, "cfg_peer_pub", CASE_KEY,
+                      "case: mixed-case key decodes to CASE_KEY")
+    passed += p; failed += f
+
+    # Case-insensitivity stated directly, independent of CASE_KEY: whatever
+    # the parser produced for the lowercase line, it must have produced for
+    # the uppercase and mixed lines too.
+    lo = bytes(read_bytes(transport, labels["cfg_static_priv"], 32))
+    up = bytes(read_bytes(transport, labels["cfg_static_pub"], 32))
+    mi = bytes(read_bytes(transport, labels["cfg_peer_pub"], 32))
+    if lo == up == mi:
+        passed += 1
+        if VERBOSE:
+            print("  PASS case: lower == upper == mixed")
+    else:
+        failed += 1
+        print("  FAIL case: the three renderings of one key disagree")
+        print(f"    lower: {lo.hex()}")
+        print(f"    upper: {up.hex()}")
+        print(f"    mixed: {mi.hex()}")
+
+    # The issue's worked example, called out on its own so a failure names
+    # the mechanism: "ca" -> $CA, not $EA.
+    got = read_bytes(transport, labels["cfg_static_priv"], 1)[0]
+    if got == 0xCA:
+        passed += 1
+        if VERBOSE:
+            print("  PASS case: lowercase 'ca' -> $CA")
+    else:
+        failed += 1
+        print(f"  FAIL case: lowercase 'ca' decoded to {got:#04x}, want 0xca"
+              f" ({'the pre-#88 value' if got == 0xEA else 'unexpected'})")
+
+    return passed, failed
+
+
+def test_non_hex_rejected(transport, labels, bad_char):
+    """A non-hex character in a key field must be reported, not converted.
+
+    The disk's WG.CFG has valid uppercase keys on lines 1 and 2 and a single
+    bad character on line 3. config_read_file must return C=1.
+
+    The two key assertions that follow are the non-vacuity guard: an
+    implementation that simply always failed would also satisfy "returns 1",
+    but it would not have decoded lines 1 and 2 on the way there.
+    """
+    passed = failed = 0
+
+    result = call_config_read(transport, labels)
+    if result == 1:
+        passed += 1
+        if VERBOSE:
+            print(f"  PASS reject: {bad_char!r} in a key field returns C=1")
+    else:
+        failed += 1
+        print(f"  FAIL reject: key field containing {bad_char!r} "
+              f"(${ord(bad_char):02X}) was accepted — config_read_file "
+              f"returned {result}, expected 1")
+
+    p, f = verify_key(transport, labels, "cfg_static_priv", CASE_KEY,
+                      "reject: line 1 still decoded before the failure")
+    passed += p; failed += f
+    p, f = verify_key(transport, labels, "cfg_static_pub", CASE_KEY,
+                      "reject: line 2 still decoded before the failure")
+    passed += p; failed += f
+
+    return passed, failed
+
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -611,6 +858,10 @@ def main():
         "cfg_peer_endpoint_ip", "cfg_peer_endpoint_port",
         "tunnel_ip", "ping_target_ip",
         "wg_peer_port",
+        # The per-character decoder, called directly by the #88 sweep so the
+        # accept/reject domain can be characterised exhaustively rather than
+        # sampled through 64-character config lines.
+        "hex_digit",
     ]
     for name in required:
         if labels.address(name) is None:
@@ -797,6 +1048,79 @@ def main():
             return p_total, f_total
 
         p, f = run_disk_test(disk_4b, labels, instance_4b_tests)
+        total_passed += p; total_failed += f
+
+        # ==================================================================
+        # Instance 5: hex digit case folding (issue #88)
+        #
+        # The same 32-byte key three times: lowercase, uppercase, mixed.
+        # Lowercase is what `wg genkey | base64 -d | xxd -p`, Python's
+        # bytes.hex(), openssl and xxd all emit, and README's "64 hex chars"
+        # never said otherwise — so lowercase is the likely real-world file,
+        # and before #88 it decoded to the wrong key with no diagnostic.
+        #
+        # The 256-character hex_digit sweep rides along in this instance: it
+        # needs no particular disk, and a second VICE boot for it would buy
+        # nothing.
+        # ==================================================================
+        print("\n=== Instance 5: hex case folding + hex_digit sweep (#88) ===")
+
+        content_5 = make_config_content(
+            CASE_KEY, CASE_KEY, CASE_KEY,
+            [10, 0, 0, 1], 51820, [10, 0, 0, 2], [10, 0, 0, 1],
+            key_lines=(CASE_KEY.hex().lower(),
+                       CASE_KEY.hex().upper(),
+                       mixed_case_hex(CASE_KEY)),
+        )
+        disk_5 = create_disk_with_config(tmpdir, content_5, "hexcase.d64")
+
+        def instance_5_tests(transport, labels):
+            p_total = f_total = 0
+
+            print("\n--- hex case folding (lower / upper / mixed) ---")
+            p, f = test_hex_case_config(transport, labels)
+            p_total += p; f_total += f
+            print(f"  {p} passed, {f} failed")
+
+            print("\n--- hex_digit sweep over all 256 characters ---")
+            p, f = test_hex_digit_sweep(transport, labels)
+            p_total += p; f_total += f
+            print(f"  {p} passed, {f} failed")
+
+            return p_total, f_total
+
+        p, f = run_disk_test(disk_5, labels, instance_5_tests)
+        total_passed += p; total_failed += f
+
+        # ==================================================================
+        # Instance 6: a non-hex character must be reported (issue #88)
+        #
+        # 'G' is the character immediately after 'F' — the near miss a
+        # hand-edited or truncated key produces. Lines 1 and 2 are valid
+        # uppercase, so they parse on both the old and the new parser and
+        # act as the non-vacuity guard for "returns C=1".
+        # ==================================================================
+        print("\n=== Instance 6: non-hex character rejected (#88) ===")
+
+        bad_line = CASE_KEY.hex().upper()
+        bad_line = bad_line[:20] + "G" + bad_line[21:]
+        assert len(bad_line) == 64
+
+        content_6 = make_config_content(
+            CASE_KEY, CASE_KEY, CASE_KEY,
+            [10, 0, 0, 1], 51820, [10, 0, 0, 2], [10, 0, 0, 1],
+            key_lines=(CASE_KEY.hex().upper(), CASE_KEY.hex().upper(),
+                       bad_line),
+        )
+        disk_6 = create_disk_with_config(tmpdir, content_6, "nonhex.d64")
+
+        def instance_6_tests(transport, labels):
+            print("\n--- non-hex character in a key field ---")
+            p, f = test_non_hex_rejected(transport, labels, "G")
+            print(f"  {p} passed, {f} failed")
+            return p, f
+
+        p, f = run_disk_test(disk_6, labels, instance_6_tests)
         total_passed += p; total_failed += f
 
     # ==================================================================
