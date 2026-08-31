@@ -285,10 +285,28 @@ WG_REU_BANKS_USED = $00
 .ifdef USE_X25519_SIBLING
 .import __LIB_X25519_INIT_CODE_LOAD__, __LIB_X25519_INIT_CODE_SIZE__
 
-; The cold segment must sit after every live byte (it is what boot.s erases)
-; and must not run past the overlay (or the zero-fill would be writing over
-; addresses the overlay does not reclaim).
-.assert __LIB_X25519_INIT_CODE_LOAD__ >= __APP_DATA_LOAD__ + __APP_DATA_SIZE__, lderror, "LIB_X25519_INIT_CODE is no longer the last file-emitting segment in MAIN_AREA_HI — live data now sits inside the span boot.s zeroes at the end of the table build"
+; ADJACENCY, not ordering. The cold segment must start at exactly the byte
+; after APP_DATA ends.
+;
+; `>=` was not enough, and the hole is worth spelling out because it is
+; invisible: a NEW file-emitting segment declared BETWEEN APP_DATA and
+; LIB_X25519_INIT_CODE satisfies every other assert in this block while
+; putting live data on top of APP_BSS. Demonstrated with a 200-byte probe
+; segment in a scratch cfg:
+;
+;   APP_DATA              008536  0087A0
+;   PROBE_HI              0087A1  008868   <- 105 live bytes above $8800
+;   APP_BSS               008800  009F72   <- hs_c / hs_h underneath them
+;   LIB_X25519_INIT_CODE  008869  008BA2
+;   ld65 exit = 0, no assert, no warning
+;
+; The boundary check above is anchored on APP_DATA's end, so it only sees
+; APP_DATA; the check below only sees the cold segment's own extent. With
+; `>=`, everything in between is unexamined. Requiring the two to abut
+; means any segment inserted there displaces the cold segment and fails
+; here, which is the whole point of this block: the invariant must not
+; depend on someone remembering the ordering rule in the cfg comment.
+.assert __LIB_X25519_INIT_CODE_LOAD__ = __APP_DATA_LOAD__ + __APP_DATA_SIZE__, lderror, "LIB_X25519_INIT_CODE no longer starts immediately after APP_DATA — a file-emitting segment has been inserted between them (or after the cold segment), so live data now sits inside the span boot.s zeroes at the end of the table build. The cold segment must be the LAST file-emitting segment in MAIN_AREA_HI and must abut APP_DATA; route the new segment to MAIN_AREA_LO, or place it before APP_DATA and re-check the APP_BSS_OVERLAY boundary above"
 .assert __LIB_X25519_INIT_CODE_LOAD__ + __LIB_X25519_INIT_CODE_SIZE__ <= __APP_BSS_OVERLAY_START__ + __APP_BSS_OVERLAY_SIZE__, lderror, "LIB_X25519_INIT_CODE runs past the end of APP_BSS_OVERLAY — boot.s would zero bytes outside the region the overlay reclaims"
 .endif
 

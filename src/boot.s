@@ -208,7 +208,30 @@ start:
         ; testable rather than asserted: $00 is BRK, so any surviving entry
         ; into this span after boot derails into the KERNAL BRK handler
         ; instead of silently doing something plausible. See
-        ; tools/test_cold_segment_reclaim.py.
+        ; tools/test_cold_segment_reclaim.py, whose red case drives exactly
+        ; that.
+        ;
+        ; WHAT THIS TRADE COSTS, stated plainly. The one live call site that
+        ; can still reach sqtab_init is poly1305_init's
+        ; `lda sqtab_ready / bne / jsr sqtab_init`. Nothing CLEARS
+        ; sqtab_ready — it is set once here and lives in the file-backed
+        ; LIB_CHACHA20_POLY1305_DATA, not in BSS — so the branch is not
+        ; taken in any code path. But sqtab_ready is a single byte sitting
+        ; immediately after the 16-byte aead_scratch, and "no code clears
+        ; it" is not "it cannot become $00". Before this change, a
+        ; corrupted sqtab_ready cost ~80k cycles rebuilding a table that
+        ; was already correct and the program carried on; after it, the
+        ; same event is a jsr into $00 and the machine is gone. That is the
+        ; right direction for a fault to fail in — silent self-healing over
+        ; a memory-corruption bug is how you never find the bug — but it is
+        ; a real change in failure mode, not a free win.
+        ;
+        ; It also imposes an obligation on anything added later: no
+        ; soft-reset or reconfigure path may call poly1305_lib_init (or
+        ; sqtab_init, or reu_mul_init) a second time expecting the
+        ; idempotence their banners promise. Those banners describe the
+        ; library, and are still true of it; they stopped being true of
+        ; THIS IMAGE at this instruction.
         ;
         ; The bounds come from the linker (define = yes on the segment), not
         ; from a constant here — the span is 826 bytes under REU and 160

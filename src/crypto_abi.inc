@@ -91,6 +91,17 @@
 ;
 ; Sibling-only: the in-tree src/crypto/poly1305.s has no sqtab_ready and
 ; no lib_init entry point, so the 0/0 build keeps calling sqtab_init.
+;
+; CALL IT EXACTLY ONCE, AT BOOT (issue #103). Upstream documents these
+; entry points as safe to call repeatedly, and for the library that is
+; true. It is no longer true of this image: src/boot.s reclaims
+; LIB_X25519_INIT_CODE as APP_BSS and zeroes it as soon as the table build
+; returns, so sqtab_init / mul_tables_init / reu_mul_init exist only until
+; that point. A second call — from a soft reset, a reconfigure path, or a
+; test harness — is a jsr into $00. poly1305_init's guarded
+; `jsr sqtab_init` is safe only because sqtab_ready is set here and no
+; code clears it; if corruption ever clears it, that call is fatal rather
+; than merely wasteful, which is the trade this image makes.
 .ifdef USE_CHACHA_SIBLING
 .import poly1305_lib_init
 .endif
