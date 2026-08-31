@@ -38,11 +38,18 @@ each, sample ``entropy_state`` before and after ``entropy_init``:
   4. within one run, re-stamping the state to $00 and calling
      ``entropy_init`` ``SEED_SAMPLES`` times must yield many distinct values.
      Same teeth as 3 but with a real sample size instead of RUNS=4.
-  5. the 32 bytes ``entropy_fill`` produces straight after ``entropy_init``
-     differ across the independent runs.  This is issue #89's acceptance
-     criterion ("two runs produce different ephemeral keys") stated
-     directly.  NOTE it already passes on master -- CIA1 timer A's phase
-     varies between VICE boots -- so it is a guard, not the red test.
+  5. any two runs that reached ``entropy_fill`` with DIFFERENT whitening
+     states produced different 32-byte keys.  This is issue #89's acceptance
+     criterion ("two runs produce different ephemeral keys") in the only
+     form VICE can decide: two VICE instances booting the same PRG can be
+     bit-identical machines, and identical machines legitimately produce
+     identical keys, so the unconditional form can fail on correct code.
+     Measured failing on both trees at a similar rate, and #107's more
+     deterministic boot made it worse.  Conditioning it on the states having
+     differed keeps the property that matters -- the seed propagates into
+     the key -- and drops the part that only measures VICE.  It contributes
+     nothing on the unfixed tree, where every state is $00; assertions 2-4
+     are the red ones.
 
 VACUITY CONTROL.  ``--vacuity-control`` skips every ``entropy_init`` call and
 changes nothing else.  On a CORRECT tree it must FAIL assertions 2, 3 and 4:
@@ -233,19 +240,66 @@ def run_tests(labels):
                   f">= {SEED_MIN_DISTINCT}) -- entropy_init is not sampling "
                   f"anything that varies")
 
-    # --- 5. #89 acceptance: independent runs, different key bytes ------
+    # --- 5. #89 acceptance, conditioned so it cannot fail on correct code --
+    #
+    # The unconditional form -- "RUNS independent boots must produce RUNS
+    # distinct keys" -- is #89's stated acceptance criterion and it is NOT
+    # decidable under VICE.  Two VICE instances booting the same PRG can be
+    # bit-identical machines: same cycle count at every instruction, so the
+    # same jiffy, timer A, raster and OSC3 at the moment entropy_init runs,
+    # so the same seed and the same entropy_fill reads, so legitimately the
+    # same key.  Host-timing jitter usually perturbs that, which is why the
+    # unconditional form usually passes -- but "usually" is a flaky gate
+    # assertion, and it was measured failing on BOTH trees at a similar rate
+    # (master d48c452: 2 collisions in 24 boots; this tree: 1 in 16).  It got
+    # worse when #107 made the boot path more deterministic.
+    #
+    # So assert the part the fix is actually responsible for: if two runs
+    # reached entropy_fill with DIFFERENT whitening states, they must not
+    # produce the same key.  That is what "the seed propagates into the key"
+    # means, it fires if the seed is computed but not consumed, and it cannot
+    # fail on two identical machines because its precondition excludes them.
+    #
+    # Vacuity note: on the unfixed tree every post-init state is $00, so the
+    # precondition never holds and this contributes no assertion at all.  It
+    # is not part of the red baseline and is not claimed to be -- assertions
+    # 2, 3 and 4 are what fail there.  The identical-machine count is printed
+    # either way, because a run where every machine was identical would mean
+    # this assertion checked nothing and the reader should see that.
     keys = [r[2] for r in runs]
-    if len(set(keys)) == RUNS:
+    post = [r[1] for r in runs]
+
+    violations, compared, identical_machines = [], 0, 0
+    for i in range(RUNS):
+        for j in range(i + 1, RUNS):
+            if post[i] != post[j]:
+                compared += 1
+                if keys[i] == keys[j]:
+                    violations.append((i, j))
+            elif keys[i] == keys[j]:
+                identical_machines += 1
+
+    if identical_machines and VERBOSE:
+        print(f"  NOTE {identical_machines} run pair(s) were bit-identical "
+              f"machines (same seed, same key) -- expected under VICE, "
+              f"excluded from the assertion below")
+
+    if compared == 0:
+        print(f"  SKIP no two runs reached entropy_fill with different "
+              f"whitening states, so key propagation was not exercised "
+              f"(expected on the unfixed tree, where every state is $00)")
+    elif not violations:
         passed += 1
         if VERBOSE:
-            print(f"  PASS {RUNS} independent runs produced {RUNS} distinct "
-                  f"32-byte entropy_fill outputs")
+            print(f"  PASS {compared} run pair(s) with different whitening "
+                  f"states produced different 32-byte ephemeral keys")
     else:
         failed += 1
-        dupes = RUNS - len(set(keys))
-        print(f"  FAIL {dupes} of {RUNS} independent runs produced a "
-              f"REPEATED 32-byte ephemeral key: "
-              f"{[k.hex() for k in keys]}")
+        print(f"  FAIL {len(violations)} run pair(s) reached entropy_fill "
+              f"with DIFFERENT whitening states and still produced the SAME "
+              f"32-byte ephemeral key -- the seed is not propagating into "
+              f"the key: "
+              f"{[(i, j, keys[i].hex()) for i, j in violations]}")
 
     return passed, failed
 
