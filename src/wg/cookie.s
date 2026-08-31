@@ -61,6 +61,8 @@
 
 ; Handshake / session / config / network buffers
 .import cfg_peer_pub
+.import hs_sender_idx
+.import hs_mac1_valid
 .import udp_recv_buf
 .import cookie_buf
 .import cookie_valid
@@ -142,6 +144,27 @@ hchacha20:
 ; =============================================================================
 ; cookie_handle_type3 - Process Type 3 cookie reply
 ;
+; 0. Reject the packet outright unless BOTH upstream preconditions hold
+;    (issue #94). Neither is a wg_state gate; the state gate that stops a
+;    forged reply from tearing down a live session lives at the dispatch
+;    site in session.s and is a third, separate guard.
+;
+;    (a) receiver_index (udp_recv_buf+4..7) == hs_sender_idx.
+;        A cookie reply is addressed to one of OUR indices. Upstream:
+;        wireguard-go device/receive.go looks reply.Receiver up in
+;        device.indexTable and drops the packet when no peer owns it;
+;        wireguard-linux-compat src/cookie.c does the same via
+;        wg_index_hashtable_lookup(). We hold exactly one index at a time,
+;        so the "table" is a 4-byte compare. Before this check the field
+;        was never read at all and any value was accepted.
+;
+;    (b) hs_mac1_valid != 0 — wireguard-go cookie.go ConsumeReply's
+;        `if !st.mac2.hasLastMAC1 { return false }`. The AAD below is
+;        hs_packet+116, and until we have sent an initiation that is 16
+;        zero bytes on a freshly loaded PRG (ld65 fills the file gap that
+;        covers APP_BSS), i.e. a constant an attacker who has observed
+;        NOTHING can encrypt against.
+;
 ; 1. Derive cookie_key = BLAKE2s-256("cookie--" || cfg_peer_pub)
 ; 2. HChaCha20(cookie_key, nonce[0..15]) -> subkey
 ; 3. XChaCha20-Poly1305 decrypt cookie with subkey + nonce[16..23]
@@ -152,6 +175,25 @@ hchacha20:
 ; Clobbers: everything
 ; =============================================================================
 cookie_handle_type3:
+        ; 0a. The reply must be addressed to the index we are currently
+        ; using. Compare all four bytes; any mismatch rejects.
+        ldx #3
+@chk_idx:
+        lda udp_recv_buf+4,x
+        cmp hs_sender_idx,x
+        bne @reject
+        dex
+        bpl @chk_idx
+
+        ; 0b. We must have an initiation of our own whose MAC1 is sitting in
+        ; hs_packet+116 to use as AAD. Without one the AAD is public.
+        lda hs_mac1_valid
+        bne @accepted_preconditions
+@reject:
+        lda #$ff
+        rts
+
+@accepted_preconditions:
         ; 1. Derive cookie_key = BLAKE2s("cookie--" || cfg_peer_pub)
         lda #32
         sta b2s_out_len
