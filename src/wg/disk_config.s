@@ -105,15 +105,26 @@ config_read_file:
 
         ; --- Failure epilogue, parked mid-routine ---------------------------
         ; It sits here, not after the success path, so that every key line
-        ; (including the optional PSK, ~70 bytes below) reaches it with a
-        ; 2-byte `bcs`. Four `bcc @next / jmp @close_fail` pairs instead would
-        ; cost 12 bytes more, and APP_DATA ends 3 bytes short of the align=$100
-        ; boundary at $4B00 that LIB_CHACHA20_POLY1305_CODE sits on: crossing
-        ; it moves every later segment up a page and overruns MAIN_AREA_LO by
-        ; 42 bytes. That budget is why read_key_line exists at all — folding
-        ; the four copies of the key-line preamble into one helper paid for
-        ; the validation added here. Measure with `build/wireguard.map` before
-        ; growing anything in this file.
+        ; reaches it with a 2-byte `bcs` -- including the optional PSK below,
+        ; which is the only BACKWARD branch to it and the reason for the
+        ; placement. Four `bcc @next / jmp @close_fail` pairs instead would
+        ; cost 12 bytes more.
+        ;
+        ; That matters because APP_DATA ends a handful of bytes short of the
+        ; align=$100 boundary at $4B00 that LIB_CHACHA20_POLY1305_CODE sits
+        ; on: crossing it moves every later segment up a page, and
+        ; MAIN_AREA_LO has no page to give. Folding the four copies of the
+        ; key-line preamble into read_key_line is what paid for the
+        ; validation added here.
+        ;
+        ; Do NOT copy a byte count out of this comment -- the slack differs
+        ; per backend (BACKEND=uci also puts UCI_BSS in MAIN_AREA_LO) and
+        ; goes stale on every link. The authority is the link itself:
+        ; src/contract_asserts.s:240 asserts __MAIN_AREA_LO_LAST__ <=
+        ; WG_SQTAB_BASE with lderror, so an over-budget image fails to link
+        ; rather than silently overrunning. That assert, not a number in a
+        ; comment, is why this is not a repeat of the "176 free bytes" trap.
+        ; Read build/wireguard.map for the current figure.
 @close_fail:
         jsr clrchn
 @fail:
