@@ -96,9 +96,11 @@
 
 ; --- fe25519 / X25519 / fe25519-mul support ---
 ; Owned by c64-x25519/src/data.s + sibling fe25519/x25519 when
-; USE_X25519_SIBLING=1. The integration build script (tools/integration/
-; build_x25519.sh) emits the sibling equivalents into CRYPTO_BSS +
-; CRYPTO_RODATA. fe_p, mul38_lo/hi_tab, mul_dma_lo/hi, mul_src2_buf,
+; USE_X25519_SIBLING=1. The sibling's equivalents land in its own §4
+; segment, LIB_X25519_DATA, which the cfgs route into LOADER with
+; align = $100 (measured: the segment starts at $1000). They are NOT
+; emitted into CRYPTO_BSS/CRYPTO_RODATA, as this comment used to claim.
+; fe_p, mul38_lo/hi_tab, mul_dma_lo/hi, mul_src2_buf,
 ; mul_cached_a, x25_basepoint, x25_scalar/u/result, x25_x2/z2/x3/z3/a/b/
 ; da/cb/e are the sibling-owned set; fe_wide moves to ZP $40 in the
 ; sibling. Suppressed here in that case to avoid duplicates.

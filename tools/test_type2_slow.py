@@ -404,16 +404,12 @@ def main():
                 print(f"FATAL: Main menu did not appear on instance {idx}")
                 sys.exit(1)
             write_bytes(inst.transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
-            # Menu prints before reu_mul_init finishes (PR #40): re-run it
-            # deterministically after takeover.
-            #
-            # Absent entirely in a REU=0 build — WG_NO_REU compiles the
-            # routine out, so the label does not resolve. Guarding on the
-            # label rather than assuming it exists is what lets this suite
-            # cover the onchip profile at all; it previously died with
-            # KeyError: 'reu_mul_init' the moment it met that build.
-            if "reu_mul_init" in labels:
-                jsr(inst.transport, labels["reu_mul_init"], timeout=180.0)
+            # The reu_mul_init re-run here compensated for the menu printing
+            # before the table build (PR #40). binary_wait_for_boot_ready
+            # above now waits for boot_ready, which boot.s sets after that
+            # build returns, so it was already redundant; issue #103 makes
+            # it impossible as well, since the segment holding reu_mul_init
+            # is reclaimed as APP_BSS and zeroed at that same point.
             jsr(inst.transport, labels["entropy_init"])
 
         print(f"All {effective_workers} instances ready\n")

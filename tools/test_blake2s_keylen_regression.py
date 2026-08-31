@@ -51,7 +51,7 @@ def main():
             return 1
 
     labels = Labels.from_file(LABELS_PATH)
-    for n in ("hs_compute_mac1", "hs_mac1_key", "hs_packet", "reu_mul_init"):
+    for n in ("hs_compute_mac1", "hs_mac1_key", "hs_packet"):
         if labels.address(n) is None:
             print(f"FATAL: label {n} missing")
             return 1
@@ -66,7 +66,10 @@ def main():
             print("FATAL: menu did not appear")
             return 1
         write_bytes(tr, 0x0339, bytes([0x4C, 0x39, 0x03]))
-        jsr(tr, labels["reu_mul_init"], timeout=180.0)
+        # No reu_mul_init rebuild (issue #103): binary_wait_for_boot_ready
+        # above already waited for boot.s's table build to return, and the
+        # segment holding reu_mul_init is reclaimed as APP_BSS and zeroed
+        # once it has. See tools/test_cold_segment_reclaim.py.
 
         # Poison b2s_key_len, then run the keyed caller; it must restore 0.
         write_bytes(tr, labels["hs_mac1_key"], bytes(range(32)))

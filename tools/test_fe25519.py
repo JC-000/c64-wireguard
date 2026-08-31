@@ -667,19 +667,19 @@ def main():
         jsr(transport, labels["poly1305_init"], timeout=30.0)
         print("sqtab ready")
 
-        # Rebuild the REU-resident mul rows too: boot.s prints the menu
-        # (including "Q=QUIT") BEFORE sqtab_init/reu_mul_init run, so the
-        # wait_for_text() above returns while reu_mul_init is still mid-
-        # flight and the takeover interrupts it (issue #34). Same reason
-        # the poly1305_init sqtab rebuild above is mandatory.
-        # The label is absent in the REU=0 build (x25519 onchip profile
-        # has no §8.2 surface at all) — mul works without any table.
-        if "reu_mul_init" in labels:
-            print("Initializing REU mul tables...")
-            jsr(transport, labels["reu_mul_init"], timeout=120.0)
-            print("REU mul tables ready")
-        else:
-            print("no reu_mul_init label — REU=0 (onchip) build, skipping")
+        # No reu_mul_init rebuild here any more (issue #103). It was added
+        # when this suite waited on the "Q=QUIT" title text, which boot.s
+        # prints BEFORE the table build, so takeover could interrupt
+        # reu_mul_init mid-flight (issue #34). Since issue #55 the wait
+        # above is binary_wait_for_boot_ready, and boot_ready is set AFTER
+        # the table build returns — so the rows are already complete and
+        # correct by the time we get here.
+        #
+        # It is now also impossible: boot.s reclaims LIB_X25519_INIT_CODE as
+        # APP_BSS and zeroes it, so reu_mul_init's address holds $00 (BRK).
+        # If the ordering assumption above were ever wrong, the mul tests
+        # below would fail on garbage rows rather than silently pass, and
+        # tools/test_cold_segment_reclaim.py checks the rows directly.
 
         passed, failed = run_tests(transport, labels, seed)
 

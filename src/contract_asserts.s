@@ -241,6 +241,75 @@ WG_REU_BANKS_USED = $00
 
 .endif
 
+; --- APP_BSS_OVERLAY guard (issue #103) --------------------------------------
+;
+; APP_BSS_OVERLAY ($8800-$9FFF) is the same RAM as the top of MAIN_AREA_HI,
+; described a second time so APP_BSS can be laid over LIB_X25519_INIT_CODE —
+; 826 bytes of cold init that is dead the moment src/boot.s's table build
+; returns, and which boot.s then zeroes so the span is ordinary BSS.
+;
+; ld65 catches the two size failures on its own (either side going over is a
+; plain area overflow). What it CANNOT catch is the overlap being wrong,
+; because it does not know the two regions describe the same bytes: it will
+; happily link an image where live file content extends past $8800 and is
+; then erased at boot, or where the regions have drifted apart and there is a
+; hole between them. Both fail silently on the C64 — data quietly turning to
+; zeros a few hundred thousand cycles into the boot is about the least
+; debuggable failure this program could have. Hence lderror, here, rather
+; than a comment stating the boundary — the defect class issue #103 exists to
+; stop (cf. the "~1.9 KB free" comment this change deletes).
+;
+; APP_DATA is the last LIVE file-emitting segment in MAIN_AREA_HI in every
+; configuration — including USE_X25519_SIBLING=0, where the archive is not
+; linked at all and LIB_X25519_INIT_CODE does not exist. So the boundary
+; check is anchored on APP_DATA's end, not on the cold segment's load
+; address: keying it to the cold segment would make the one safety property
+; here evaporate in exactly the build that has no cold segment to reclaim.
+.import __MAIN_AREA_HI_START__, __MAIN_AREA_HI_SIZE__
+.import __APP_BSS_OVERLAY_START__, __APP_BSS_OVERLAY_SIZE__
+.import __APP_DATA_LOAD__, __APP_DATA_SIZE__
+
+.assert __APP_DATA_LOAD__ + __APP_DATA_SIZE__ <= __APP_BSS_OVERLAY_START__, lderror, "live MAIN_AREA_HI file content (APP_EXTRA/APP_DATA) has grown past the APP_BSS_OVERLAY boundary — APP_BSS is laid over that RAM and boot.s's cold-segment zero-fill would erase part of it at boot; raise APP_BSS_OVERLAY's start in cfg/c64-wireguard-*.cfg (which costs APP_BSS the same number of bytes) or move data back to MAIN_AREA_LO"
+
+; The overlay must be a SUBSET of MAIN_AREA_HI and must end with it. A gap at
+; the top would strand RAM no region owns; an overlay extending past $9FFF
+; would put APP_BSS in the ip65 blob's BSS ($A000-$AF3F, measured from
+; ip65-build/ip65-c64.map) — issue #80 in the other direction.
+.assert __APP_BSS_OVERLAY_START__ >= __MAIN_AREA_HI_START__, lderror, "APP_BSS_OVERLAY starts below MAIN_AREA_HI — it is meant to overlay the top of that region, not extend it downward into the sqtab window"
+.assert __APP_BSS_OVERLAY_START__ + __APP_BSS_OVERLAY_SIZE__ = __MAIN_AREA_HI_START__ + __MAIN_AREA_HI_SIZE__, lderror, "APP_BSS_OVERLAY and MAIN_AREA_HI no longer end together — either APP_BSS runs past $9FFF into the ip65 blob's BSS, or the top of MAIN_AREA_HI is stranded with no segment able to use it"
+
+; The rest only exists when the x25519 archive is in the link. Under
+; USE_X25519_SIBLING=0 the segment is `optional = yes` and empty, so
+; ld65 defines none of its symbols and importing them is an unresolved
+; external, not a satisfied assert.
+.ifdef USE_X25519_SIBLING
+.import __LIB_X25519_INIT_CODE_LOAD__, __LIB_X25519_INIT_CODE_SIZE__
+
+; ADJACENCY, not ordering. The cold segment must start at exactly the byte
+; after APP_DATA ends.
+;
+; `>=` was not enough, and the hole is worth spelling out because it is
+; invisible: a NEW file-emitting segment declared BETWEEN APP_DATA and
+; LIB_X25519_INIT_CODE satisfies every other assert in this block while
+; putting live data on top of APP_BSS. Demonstrated with a 200-byte probe
+; segment in a scratch cfg:
+;
+;   APP_DATA              008536  0087A0
+;   PROBE_HI              0087A1  008868   <- 105 live bytes above $8800
+;   APP_BSS               008800  009F72   <- hs_c / hs_h underneath them
+;   LIB_X25519_INIT_CODE  008869  008BA2
+;   ld65 exit = 0, no assert, no warning
+;
+; The boundary check above is anchored on APP_DATA's end, so it only sees
+; APP_DATA; the check below only sees the cold segment's own extent. With
+; `>=`, everything in between is unexamined. Requiring the two to abut
+; means any segment inserted there displaces the cold segment and fails
+; here, which is the whole point of this block: the invariant must not
+; depend on someone remembering the ordering rule in the cfg comment.
+.assert __LIB_X25519_INIT_CODE_LOAD__ = __APP_DATA_LOAD__ + __APP_DATA_SIZE__, lderror, "LIB_X25519_INIT_CODE no longer starts immediately after APP_DATA — a file-emitting segment has been inserted between them (or after the cold segment), so live data now sits inside the span boot.s zeroes at the end of the table build. The cold segment must be the LAST file-emitting segment in MAIN_AREA_HI and must abut APP_DATA; route the new segment to MAIN_AREA_LO, or place it before APP_DATA and re-check the APP_BSS_OVERLAY boundary above"
+.assert __LIB_X25519_INIT_CODE_LOAD__ + __LIB_X25519_INIT_CODE_SIZE__ <= __APP_BSS_OVERLAY_START__ + __APP_BSS_OVERLAY_SIZE__, lderror, "LIB_X25519_INIT_CODE runs past the end of APP_BSS_OVERLAY — boot.s would zero bytes outside the region the overlay reclaims"
+.endif
+
 ; --- §13.8 network-backend capability fit (SPEC v0.12.0 §13.3 / §13.8) -------
 ;
 ; The selected backend publishes what it guarantees to move in one datagram

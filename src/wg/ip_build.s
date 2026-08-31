@@ -384,8 +384,8 @@ udp_tunnel_build:
 
         rts
 
-; In APP_EXTRA (MAIN_AREA_HI): MAIN_AREA_LO has no headroom left for the
-; 16-bit length checks added here. See the note above print_buf16 in
+; In APP_EXTRA (MAIN_AREA_HI): MAIN_AREA_LO could not hold the 16-bit length
+; checks added here when they were written. See the note above print_buf16 in
 ; session.s.
         .segment "APP_EXTRA"
 

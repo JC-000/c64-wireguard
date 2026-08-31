@@ -146,11 +146,27 @@ Both `cfg/c64-wireguard-{ip65,uci}.cfg` carry the same segment set:
 - **x25519 (§4-prefixed since v0.8.0)**: `LIB_X25519_CODE` (rw —
   contains SMC patch sites; MAIN_AREA_LO), `LIB_X25519_DATA` (rw,
   `align=$100`, 3584 B — placed in LOADER's slack), and
-  `LIB_X25519_INIT_CODE` (rw, `define=yes`, MAIN_AREA_HI; reclaimable
-  after boot via `__LIB_X25519_INIT_CODE_LOAD__`/`__..._SIZE__` —
-  826 B REU / 160 B onchip). Ordering rule: `LIB_X25519_INIT_CODE`
-  must stay the last file-emitting segment in its area, before any
-  bss segment.
+  `LIB_X25519_INIT_CODE` (rw, `define=yes`, MAIN_AREA_HI — 826 B REU /
+  160 B onchip). As of issue #103 this segment is **actually
+  reclaimed**, not merely documented as reclaimable: `APP_BSS_OVERLAY`
+  in both cfgs describes the top of MAIN_AREA_HI a second time as a
+  non-file region so `APP_BSS` lies over it, and `src/boot.s` zeroes the
+  span through `__LIB_X25519_INIT_CODE_LOAD__`/`__..._SIZE__` the
+  instant the table build returns. Ordering rule, now load-bearing for
+  more than R5: `LIB_X25519_INIT_CODE` must stay the **last**
+  file-emitting segment in MAIN_AREA_HI, because its load address is
+  what `src/contract_asserts.s` uses as "end of live file content" when
+  it checks the overlay boundary. A file-emitting segment declared after
+  it would be live data inside the span boot zeroes, and the assert
+  would not see it.
+
+  What makes the reclaim safe is that the segment holds only
+  `sqtab_init`/`mul_tables_init`, `reu_mul_init` and `reu_probe`; the
+  first two are called once from `src/boot.s` before `boot_ready` is
+  set, and `reu_probe` is not called from this repo at all. The one
+  guarded hot-path re-entry — `poly1305_init`'s `jsr sqtab_init` — is
+  gated on chacha's `sqtab_ready`, which lives in the file-backed
+  `LIB_CHACHA20_POLY1305_DATA`, is set at boot, and is never cleared.
 - **chacha (§4-prefixed since v0.7.0)**:
   `LIB_CHACHA20_POLY1305_CODE` (rw, MAIN_AREA_LO, 8094 B) with
   **`align=$100` — a constant-time requirement**, not cosmetic: the

@@ -126,13 +126,13 @@ timer_check:
         rts
 
 @handshaking:
-        ; Check 0 lives in APP_EXTRA (MAIN_AREA_HI), not here. APP_CODE and
-        ; APP_DATA share MAIN_AREA_LO and have 25 bytes of slack before
-        ; LIB_CHACHA20_POLY1305_CODE's align=$100 boundary at $4B00; crossing
-        ; it costs 256 bytes the area's tail cannot absorb, and the §6.7
-        ; image-overrun assert in contract_asserts.s fails the link rather
-        ; than letting MAIN_AREA_LO run into the sqtab window. Same escape
-        ; session_stage_dest took. It has to be a jmp, not a branch: the two
+        ; Check 0 lives in APP_EXTRA (MAIN_AREA_HI), not here — the same
+        ; escape session_stage_dest took, taken for the same reason, when
+        ; APP_CODE could not grow far enough to hold it. The binding
+        ; constraint in MAIN_AREA_LO is LIB_CHACHA20_POLY1305_CODE's
+        ; align = $100 pin; the §6.7 image-overrun assert in
+        ; contract_asserts.s is what reports crossing it.
+        ; It has to be a jmp, not a branch: the two
         ; segments are ~$4000 apart.
         jmp timer_check_handshake
 

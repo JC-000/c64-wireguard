@@ -76,6 +76,18 @@
         .import config_read_file        ; src/wg/disk_config.s
         .import entropy_init            ; src/crypto/entropy.s
 
+; --- Imports: linker-defined bounds of the reclaimed cold segment ---------
+; Published by `define = yes` on LIB_X25519_INIT_CODE in both cfgs. The
+; zero-fill after the table build below is what turns that span from code
+; into APP_BSS; see the comment there and issue #103.
+; Only defined when the x25519 archive is in the link — under
+; USE_X25519_SIBLING=0 the segment is empty, ld65 defines nothing for it,
+; and there is no cold code to reclaim in the first place.
+.ifdef USE_X25519_SIBLING
+        .import __LIB_X25519_INIT_CODE_LOAD__
+        .import __LIB_X25519_INIT_CODE_SIZE__
+.endif
+
 ; (net_init, net_dhcp_acquire, net_poll, net_udp_listen, net_print_ip come via
 ;  net_abi.inc; sqtab_init, reu_mul_init come via crypto_abi.inc.)
 
@@ -165,6 +177,91 @@ start:
 .ifndef WG_NO_REU
         ; Initialize REU multiplication tables (precompute all 256x256 products)
         jsr     reu_mul_init
+.endif
+
+.ifdef USE_X25519_SIBLING
+        ; --- Reclaim LIB_X25519_INIT_CODE as APP_BSS (issue #103) ------------
+        ;
+        ; THIS IS THE LAST INSTANT THE COLD INIT CODE EXISTS. The two calls
+        ; above are the only callers of anything in LIB_X25519_INIT_CODE
+        ; (sqtab_init / mul_tables_init, reu_mul_init; reu_probe is never
+        ; called from this repo at all), and both have returned. From here
+        ; on, cfg/c64-wireguard-*.cfg lays APP_BSS over that span through
+        ; the APP_BSS_OVERLAY region, so those 826 bytes (160 under
+        ; WG_NO_REU) are ordinary zero-initialised BSS like every other
+        ; byte of APP_BSS — and this loop is what makes them zero, because
+        ; it is the one part of the span LOAD could not stamp with the
+        ; region's fill.
+        ;
+        ; ORDER IS LOAD-BEARING, in both directions:
+        ;   - it must run AFTER the table build, or it erases the code
+        ;     mid-flight;
+        ;   - it must run BEFORE anything writes an APP_BSS variable that
+        ;     falls in the span, or it erases live state. Nothing above it
+        ;     touches APP_BSS: `start:` banks out BASIC, zeroes $A000-$BFFF,
+        ;     calls clrscr / print_string / vic_boost_begin (screen RAM,
+        ;     $D0xx and their own locals), then the two table builders.
+        ;     boot_ready, the first APP_BSS write in the program, is set
+        ;     below.
+        ;
+        ; Overwriting with $00 is also what makes the deadness claim
+        ; testable rather than asserted: $00 is BRK, so any surviving entry
+        ; into this span after boot derails into the KERNAL BRK handler
+        ; instead of silently doing something plausible. See
+        ; tools/test_cold_segment_reclaim.py, whose red case drives exactly
+        ; that.
+        ;
+        ; WHAT THIS TRADE COSTS, stated plainly. The one live call site that
+        ; can still reach sqtab_init is poly1305_init's
+        ; `lda sqtab_ready / bne / jsr sqtab_init`. Nothing CLEARS
+        ; sqtab_ready — it is set once here and lives in the file-backed
+        ; LIB_CHACHA20_POLY1305_DATA, not in BSS — so the branch is not
+        ; taken in any code path. But sqtab_ready is a single byte sitting
+        ; immediately after the 16-byte aead_scratch, and "no code clears
+        ; it" is not "it cannot become $00". Before this change, a
+        ; corrupted sqtab_ready cost ~80k cycles rebuilding a table that
+        ; was already correct and the program carried on; after it, the
+        ; same event is a jsr into $00 and the machine is gone. That is the
+        ; right direction for a fault to fail in — silent self-healing over
+        ; a memory-corruption bug is how you never find the bug — but it is
+        ; a real change in failure mode, not a free win.
+        ;
+        ; It also imposes an obligation on anything added later: no
+        ; soft-reset or reconfigure path may call poly1305_lib_init (or
+        ; sqtab_init, or reu_mul_init) a second time expecting the
+        ; idempotence their banners promise. Those banners describe the
+        ; library, and are still true of it; they stopped being true of
+        ; THIS IMAGE at this instruction.
+        ;
+        ; The bounds come from the linker (define = yes on the segment), not
+        ; from a constant here — the span is 826 bytes under REU and 160
+        ; under the onchip profile, and hardcoding either would be a number
+        ; that goes stale exactly like the ones issue #103 is about.
+        lda     #<__LIB_X25519_INIT_CODE_LOAD__
+        sta     zp_ptr1
+        lda     #>__LIB_X25519_INIT_CODE_LOAD__
+        sta     zp_ptr1+1
+        ldx     #>__LIB_X25519_INIT_CODE_SIZE__ ; whole pages to clear
+        lda     #$00
+        ldy     #$00
+@cold_page:
+        cpx     #$00
+        beq     @cold_tail
+@cold_page_byte:
+        sta     (zp_ptr1),y
+        iny
+        bne     @cold_page_byte
+        inc     zp_ptr1+1
+        dex
+        jmp     @cold_page
+@cold_tail:
+        ldy     #<__LIB_X25519_INIT_CODE_SIZE__ ; 0..255 trailing bytes
+        beq     @cold_done
+@cold_tail_byte:
+        dey
+        sta     (zp_ptr1),y
+        bne     @cold_tail_byte
+@cold_done:
 .endif
 
         jsr     vic_boost_end

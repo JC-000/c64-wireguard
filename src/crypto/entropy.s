@@ -10,11 +10,16 @@
 .export entropy_byte
 .export entropy_fill
 
-; APP_EXTRA (MAIN_AREA_HI), not CRYPTO_CODE. MAIN_AREA_LO is effectively
-; full — the §6.7 image-overrun assert in contract_asserts.s fires on a few
-; dozen extra bytes there — while MAIN_AREA_HI has ~1.9 KB free and already
-; carries code (LIB_X25519_INIT_CODE). Nothing about this module needs to be
-; low: it touches only $D41B/$DC0x and its callers reach it by JSR.
+; APP_EXTRA (MAIN_AREA_HI), not CRYPTO_CODE. Nothing about this module needs
+; to be low: it touches only $D41B/$DC0x and its callers reach it by JSR.
+;
+; No free-space figure here, deliberately. The line that used to sit at this
+; spot said MAIN_AREA_HI had "~1.9 KB free"; when issue #103 measured it, it
+; had 28 bytes, and a PR had already been sized against the comment in good
+; faith. Both areas fail the link when they are overrun — MAIN_AREA_LO on the
+; §6.7 image-overrun assert in contract_asserts.s, MAIN_AREA_HI on a plain
+; ld65 area overflow — so the budget is something to be told by a build, never
+; something to be remembered.
 .segment "APP_EXTRA"
 
 ; =============================================================================
@@ -105,9 +110,10 @@ entropy_fill:
         bpl @loop               ; unsigned: 0 still processes, $FF exits
         rts
 
-; APP_EXTRA_BSS (MAIN_AREA_HI), not CRYPTO_BSS: MAIN_AREA_LO has almost no
-; slack and the §6.7 image-overrun assert in contract_asserts.s catches an
-; extra byte there. MAIN_AREA_HI has ~1.9 KB free.
+; APP_EXTRA_BSS, which the cfg routes into APP_BSS_OVERLAY (MAIN_AREA_HI's
+; RAM from $8800 up), rather than CRYPTO_BSS. CRYPTO_BSS is page-aligned for
+; a constant-time reason that has nothing to do with this byte, and one
+; stray .res there moves the whole segment.
 .segment "APP_EXTRA_BSS"
 
 ; Persistent whitening state. Power-on value is whatever RAM held, which is
