@@ -460,6 +460,8 @@ Peer configuration is loaded from a `WG.CFG` sequential file on disk (device 8).
 8. Pre-shared key (64 hex chars) — *optional, defaults to zeros if omitted*
 9. Unix timestamp (decimal, up to 10 digits) — *optional, defaults to zeros if omitted*
 
+Hex key fields accept upper- and lowercase (`0-9`, `A-F`, `a-f`) interchangeably, so the lowercase output of `bytes.hex()`, `xxd -p`, `openssl` or `wg pubkey | base64 -d | xxd -p` can be pasted in as-is. Any other character in a key field — including the shifted-PETSCII letters a file typed on the C64 in lower/uppercase display mode contains, and a stray `LF` from a CRLF-terminated file — makes the load fail with `CONFIG ERROR` rather than producing a key that is quietly wrong. Before issue #88 the parser decoded uppercase only and validated nothing: a lowercase key was mangled in silence and presented as a handshake that never completed.
+
 The Unix timestamp (line 9) initializes the TAI64N epoch anchor for handshake replay protection. If omitted, timestamps start from zero and increment monotonically.
 
 ### Cookies and Timers
