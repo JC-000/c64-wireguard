@@ -26,6 +26,7 @@
         .import msg_recv_ptr
         .import msg_recv_len
         .import tp_packet
+        .import tp_payload_len
 
         .segment "APP_CODE"
 
@@ -392,9 +393,10 @@ udp_tunnel_build:
 ; =============================================================================
 ; udp_tunnel_parse - Parse a decrypted IP/UDP packet from the tunnel
 ;
-; Input:  tp_packet+16 = decrypted IP packet
+; Input:  tp_packet+16     = decrypted IP packet
+;         tp_payload_len   = how many bytes were actually decrypted into it
 ; Output: A = 0 success (msg_recv_ptr/msg_recv_len set, 16-bit), A = $FF fail
-; Clobbers: A
+; Clobbers: A, X
 ; =============================================================================
 udp_tunnel_parse:
         ; check protocol (byte 9) == UDP (17)
@@ -427,9 +429,13 @@ udp_tunnel_parse:
         sta msg_recv_len+1
         bcc @fail
 
-        ; Bound the text to what one tunnel packet can carry. The header
-        ; field is peer-supplied; without this a forged length would have the
-        ; display walk past tp_packet. MSG_TEXT_MAX < sizeof tp_packet - 44.
+        ; Two bounds, and they prove different things. Both are needed.
+        ;
+        ; (1) MSG_TEXT_MAX keeps the display inside tp_packet: the highest
+        ;     byte reachable is 44 + MSG_TEXT_MAX - 1 = 875, and
+        ;     MSG_TEXT_MAX < sizeof tp_packet - 44 holds by the same
+        ;     derivation that caps WG_MTU. This says nothing about whether
+        ;     the bytes were ever received.
         lda msg_recv_len+1
         cmp #>MSG_TEXT_MAX
         bcc @len_ok
@@ -440,9 +446,56 @@ udp_tunnel_parse:
         bne @fail
 @len_ok:
 
+        ; (2) tp_payload_len bounds it to what this packet actually
+        ;     decrypted, which is the property that matters (issue #97).
+        ;     The length field is peer-supplied and nothing clears tp_packet
+        ;     between datagrams: session.s copies only udp_recv_len bytes in.
+        ;     Without this bound the display runs from tp_packet+44 through
+        ;     the PREVIOUS INBOUND packet's decrypted plaintext -- the whole
+        ;     832-byte window in the worst case, and that case needs no
+        ;     forged length at all. An empty keepalive (payload 0) overwrites
+        ;     only tp_packet[0..31], leaving the destination port at +38..39
+        ;     and the length at +40..41 holding the last message's inner UDP
+        ;     header: dst port is msg_port by construction and the length is
+        ;     that message's own, so the whole of it is reprinted. A forged
+        ;     length in a 26-byte payload -- the shortest that still carries
+        ;     the field it forges -- reaches 818.
+        ;
+        ;     Inbound only. transport_encrypt's AEAD is also in place at
+        ;     tp_packet+16 (transport.s:338-345), so residue left by a SEND
+        ;     is ciphertext, not plaintext.
+        ;
+        ;     msg_recv_len + IP_UDP_HDR_LEN must be within tp_payload_len.
+        ;     Bound (1) already caps msg_recv_len at 832, so the add cannot
+        ;     carry out of 16 bits. A peer that pads its plaintext up to the
+        ;     WireGuard 16-byte boundary sends MORE than it declares, which
+        ;     passes; only claiming more than arrived is rejected.
+        lda msg_recv_len
+        clc
+        adc #IP_UDP_HDR_LEN
+        tax                     ; X = claimed total, low
+        lda msg_recv_len+1
+        adc #0                  ; A = claimed total, high
+        cmp tp_payload_len+1
+        bcc @len_fits
+        bne @fail
+        cpx tp_payload_len
+        bcc @len_fits
+        bne @fail
+@len_fits:
+
         lda #0
         rts
 
 @fail:
+        ; msg_recv_ptr and msg_recv_len were stored above, BEFORE either bound
+        ; ran, so on this path msg_recv_len still holds the peer's unchecked
+        ; value (measured: A=$ff, msg_recv_len=832). session.s tests A before
+        ; reading it, and that is the whole of what makes it safe -- a caller
+        ; that read msg_recv_len without checking A would reinstate #97 in
+        ; full. Zeroing the pair here is 8 bytes; MAIN_AREA_HI has 2 free at
+        ; REU=1 (map: APP_EXTRA_BSS ends $9FFD, area ends $9FFF), so the
+        ; invariant is stated rather than enforced. Spend the bytes here first
+        ; if any ever come free.
         lda #$ff
         rts
