@@ -183,6 +183,12 @@ sqtab_hi = WG_SQTAB_HI
 
 ; --- Hardware registers ---
 .export vic_border, vic_bg
+; vic_raster + the jiffy bytes are entropy_init's seed sources (issue #89);
+; tools/test_entropy_seed.py resolves them by name rather than hardcoding
+; $d012/$a0-$a2, so a future move of either is a link error, not a silently
+; wrong test.
+.export vic_raster
+.exportzp jiffy_hi, jiffy_mid, jiffy_lo
 .export cia1_ta_lo, cia1_ta_hi, cia1_cra
 .export sid_v3_freq_lo, sid_v3_freq_hi, sid_v3_ctrl, sid_osc3
 .export reu_status, reu_command, reu_c64_lo, reu_c64_hi
