@@ -169,6 +169,7 @@ def test_build_verification(labels):
         "timer_session_start", "timer_check", "timer_mark_send",
         "timer_elapsed_cmp", "config_read_file",
         "ip_packet_buf", "cookie_valid",
+        "hs_sender_idx", "hs_mac1_valid",
     ]
 
     for name in required_labels:
@@ -1001,6 +1002,15 @@ def test_cookie(transport, labels, rng):
     type3[48:64] = ct_tag[16:]   # tag
 
     # Clear cookie_valid first
+    # Issue #94: cookie_handle_type3 now requires the reply to be addressed to
+    # our current sender index, and requires that we have actually sent an
+    # initiation (hs_mac1_valid, the hasLastMAC1 equivalent). This is a unit
+    # test of the XChaCha20-Poly1305 path, not of those guards, so satisfy
+    # both preconditions explicitly. tools/test_issue_94_cookie_reply.py owns
+    # the guard behaviour.
+    write_bytes(transport, labels["hs_sender_idx"], b'\x01\x02\x03\x04')
+    write_bytes(transport, labels["hs_mac1_valid"], bytes([1]))
+
     write_bytes(transport, cookie_valid_addr, bytes([0]))
     write_bytes(transport, udp_recv_buf_addr, bytes(type3))
     jsr(transport, 0x0340)
@@ -1060,7 +1070,12 @@ def test_cookie(transport, labels, rng):
     type3b = bytearray(64)
     type3b[0] = 3
     type3b[1:4] = b'\x00\x00\x00'
-    type3b[4:8] = b'\x05\x06\x07\x08'
+    # Same receiver_index as type3: issue #94 made cookie_handle_type3 check
+    # it against hs_sender_idx, and this case is about a second cookie
+    # OVERWRITING the first, not about the index. Changing it here would make
+    # the $FF that follows come from the index guard rather than from the
+    # AEAD, which is the opposite of what test 4 asks.
+    type3b[4:8] = b'\x01\x02\x03\x04'
     type3b[8:32] = nonce_24b
     type3b[32:48] = ct_tag2[:16]
     type3b[48:64] = ct_tag2[16:]
@@ -1592,6 +1607,7 @@ def main():
         "timer_session_start", "timer_check", "timer_mark_send",
         "timer_elapsed_cmp", "config_read_file",
         "ip_packet_buf", "cookie_valid", "cookie_buf",
+        "hs_sender_idx", "hs_mac1_valid",
         "input_buffer", "zp_ptr1", "zp_tmp1",
         "tunnel_ip", "ping_target_ip", "ping_seq",
         "ip_cksum_result", "msg_port", "msg_recv_ptr", "msg_recv_len",

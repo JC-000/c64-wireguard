@@ -231,6 +231,39 @@ session_handle_packet:
         rts                     ; unknown type, ignore
 
 @type3:
+        ; Only accept a cookie reply while an initiation of ours is
+        ; outstanding. This is the guard that matters (issue #94): the branch
+        ; below ends in session_initiate, so in ACTIVE one unauthenticated
+        ; 64-byte datagram replaced a live session with a fresh handshake.
+        ;
+        ; The two checks inside cookie_handle_type3 (receiver_index and
+        ; hs_mac1_valid) are upstream's and are NOT sufficient on their own
+        ; here: both the MAC1 used as AAD (Type 1 offset 116) and
+        ; hs_sender_idx (Type 1 offset 4) travel in cleartext in the SAME
+        ; initiation, so an eavesdropper who can forge the AAD can equally
+        ; forge the index. Upstream survives that because ConsumeReply only
+        ; stores a cookie and never sends or tears anything down; our handler
+        ; re-initiates, so the state gate is what makes the difference.
+        ;
+        ; HS_SENT is not a narrowing of the legitimate case: a cookie reply
+        ; is only ever a response to an initiation, and a rekey goes through
+        ; session_initiate, which sets HS_SENT before any reply can arrive.
+        ;
+        ; DO NOT DELETE THESE 7 BYTES WHEN MAIN_AREA_LO IS TIGHT. Sitting
+        ; next to two checks that can each cite upstream chapter and verse,
+        ; this gate reads like belt-and-braces, and it is not. The upstream
+        ; guards are sufficient THERE because of a precondition that is false
+        ; HERE: wireguard-go's ConsumeReply has no side effects beyond storing
+        ; a cookie, so an accepted forgery costs the receiver nothing. Our
+        ; handler sends. Port a guard without porting the reason it suffices
+        ; and you get a fix that passes review, matches upstream, and leaves
+        ; the session kill working — which is exactly what happened while #94
+        ; was being fixed. Rationale colocated with the invariant on purpose;
+        ; same reasoning as CRYPTO_BSS's align in #104.
+        ; Covered by tools/test_issue_94_95_adversarial.py T3/T6/T7.
+        lda wg_state
+        cmp #SESSION_HS_SENT
+        bne @cookie_fail
         jsr cookie_handle_type3
         cmp #0
         bne @cookie_fail

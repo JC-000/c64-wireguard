@@ -126,6 +126,7 @@
 ; Misc
 .import input_buffer
 .import cookie_valid
+.import hs_mac1_valid
 
 ; =============================================================================
 ; Data
@@ -629,6 +630,14 @@ hs_create_initiation:
         sta hs_packet+116,x
         dex
         bpl @copy_mac1
+
+        ; hs_packet+116 now holds a MAC1 we produced, so the cookie-reply
+        ; AAD is finally something an attacker cannot know without having
+        ; watched us send this initiation. Arm the guard cookie_handle_type3
+        ; checks (issue #94); wireguard-go sets mac2.hasLastMAC1 at the same
+        ; point, in CookieChecker/AddMacs.
+        lda #1
+        sta hs_mac1_valid
 
         ; MAC2: use cookie if available, else zeros
         lda cookie_valid

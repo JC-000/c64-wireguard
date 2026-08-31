@@ -161,6 +161,7 @@
 .export hs_transport_send
 .export hs_transport_recv
 .export hs_preshared_key
+.export hs_mac1_valid
 
 ; --- Network buffers ---
 .export zp_save_buf
@@ -610,6 +611,23 @@ hs_transport_recv:
         .res 32, 0             ; transport recv key
 hs_preshared_key:
         .res 32, 0             ; PSK for handshake (copied from cfg)
+hs_mac1_valid:
+        .res 1                 ; 1 = hs_packet+116 holds the MAC1 of an
+                               ; initiation WE actually built (issue #94).
+                               ; This is the equivalent of wireguard-go's
+                               ; CookieChecker mac2.hasLastMAC1: a cookie
+                               ; reply is AEAD-bound to that MAC1 as AAD, so
+                               ; before the first initiation the AAD is a
+                               ; value everybody knows. "Uninitialised" here
+                               ; means "sixteen zero bytes when the program
+                               ; starts", not "unpredictable" -- by ld65's
+                               ; region fill where APP_BSS is plain
+                               ; file-backed, and by boot.s's cold-segment
+                               ; zero-fill where it is overlaid on
+                               ; LIB_X25519_INIT_CODE (#107). Measured both
+                               ; ways; the observable does not change.
+                               ; Set once by hs_create_initiation; like
+                               ; upstream's flag it is never cleared.
 
 ; --- Network buffers ---
 zp_save_buf:
