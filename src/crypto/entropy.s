@@ -126,11 +126,18 @@ entropy_init:
 ; test_session/test_handshake fail intermittently on "all 17 bytes identical
 ; (0x7f)" and "sender_idx ffffffff == ffffffff".
 ;
-; Under VICE this is total degeneracy because OSC3 is a clock-derived ramp
-; rather than noise (VICE does not clock reSID with sound disabled). On real
-; hardware OSC3 IS noise, so the failure is not total — but two operands that
-; are affine in the same clock still carry far less entropy than they appear
-; to, which matters because this feeds WireGuard ephemeral keys.
+; EVERYTHING ABOVE IS THE VICE PICTURE. It is total degeneracy there because
+; OSC3 is a clock-derived ramp rather than noise: VICE does not clock reSID
+; with sound disabled.
+;
+; This paragraph used to go on to say that on real hardware "OSC3 IS noise, so
+; the failure is not total -- but two operands that are affine in the same
+; clock still carry far less entropy than they appear to". That was a guess,
+; and it has since been measured and is wrong in both halves. On a real 6581/
+; 8580 the two operands are NOT both affine in the CPU clock -- voice-3 ctrl
+; $88 (noise + TEST) freezes OSC3 to a single value, so $D41B is an LFSR --
+; and the sum does not cancel at any phase. The measurements are with
+; entropy_state below; read them before acting on anything in this block.
 ;
 ; Stirring a persistent byte in makes consecutive outputs stop being a
 ; function of S alone. DO NOT READ THAT AS "THE STIRRING FIXED THE
@@ -181,22 +188,44 @@ entropy_fill:
 ; RAM from $8800 up), rather than CRYPTO_BSS. CRYPTO_BSS is page-aligned for
 ; a constant-time reason that has nothing to do with this byte, and one
 ; stray .res there moves the whole segment.
+;
+; That routing is the cfg's to state and has already moved once. Nothing
+; about the $00 below depends on knowing it: what matters is only that the
+; PRG image reaches this address, and the note on entropy_state gives the
+; check that settles that for any layout.
 .segment "APP_EXTRA_BSS"
 
 ; Persistent whitening state.
 ;
 ; ITS LOAD-TIME VALUE IS $00, ON EVERY RUN AND EVERY MACHINE. This comment
-; used to claim the opposite -- "power-on value is whatever RAM held" -- and
-; that was wrong for a mechanical reason worth stating, because it is easy
-; to make again: BSS placed in a file-backed, fill=yes area is emitted into
-; the PRG as fill bytes, so LOAD stamps them. APP_EXTRA_BSS loads into
-; MAIN_AREA_HI, which cfg/c64-wireguard-*.cfg declares
-; `file = %O, ..., fill = yes, fillval = $00`, and the image runs to $9FFF.
-; src/boot.s says the same thing about the low BSS. Verified rather than
-; argued: build/wireguard.map placed entropy_state at $9FE3, the PRG loads
-; at $0801 and is 38913 bytes, and file offset 2 + $9FE3 - $0801 reads $00.
-; A `type = bss` marking hides none of that -- it only means ld65 emits no
-; CONTENT of its own; the area's fill still covers the address.
+; used to claim the opposite -- "power-on value is whatever RAM held".
+;
+; THE CHECK, which is the durable form and the one to trust:
+;
+;   take entropy_state's address from build/wireguard.map, read the PRG's
+;   2-byte load address, and the byte at file offset 2 + addr - load is what
+;   LOAD writes to it.
+;
+; It reads $00 in every backend/REU combination. tools/test_entropy_seed.py
+; performs exactly that computation on every run and asserts the value in RAM
+; after boot matches it, so the claim cannot quietly stop being true.
+;
+; The mechanism, stated so it does not have to be re-stated: a PRG is a
+; contiguous byte stream from its load address, so ANY address the image
+; reaches gets written by LOAD. An address is reached when some enclosing
+; memory area is file-backed and fill = yes -- and `type = bss` does not
+; exempt it, because that marking only means ld65 emits no CONTENT of its
+; own; the enclosing area's fill still covers the address. src/boot.s makes
+; the same point about the low BSS.
+;
+; DELIBERATELY NOT NAMED HERE: which area that is. It has already changed
+; once in this file's lifetime and again when #107 landed the overlay, so a
+; comment naming the segment-to-area mapping would go false without anything
+; in this module being edited -- as three comments in this file's history
+; already have. If you are deciding whether some OTHER symbol is safe, do
+; not reason from this paragraph --
+; run the check above on that symbol. It is three lines of Python and it is
+; the only form of this claim that cannot go stale.
 ;
 ; Because entropy_byte/entropy_fill feed this byte back into every output,
 ; and entropy_fill writes hs_ephem_priv in session_initiate, a fixed start
