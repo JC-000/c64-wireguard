@@ -51,6 +51,12 @@ TESTS = [
     # downgrade rests entirely on them: revert either and #95 returns to its
     # filed severity with the gate still green. Fast — ~8 s, zero X25519.
     ("hs_recovery",    ["tools/test_issue_95_handshake_recovery.py"]),
+    # #89. Boots four INDEPENDENT VICE instances of its own, which is the
+    # whole point — "the whitening state starts from a compile-time constant"
+    # is invisible inside any single run, so nothing already in this list
+    # could have seen it. Its instances count against MAX_PARALLEL like any
+    # other suite's, but they are sequential within the suite.
+    ("entropy_seed",   ["tools/test_entropy_seed.py"]),
     # The live tools themselves cannot run here, but the seam they all hang
     # from can be checked without hardware — and if it breaks, every one of
     # them breaks while this gate stays green. Import-only, milliseconds.

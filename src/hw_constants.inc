@@ -29,6 +29,11 @@ chkin           = $ffc6         ; set input channel
 ; raster-compare high bit, so it must be read-modify-written, never
 ; assigned outright.
 vic_ctrl1       = $d011         ; control register 1 (DEN, RSEL, YSCROLL)
+; Raster line low 8 bits. READ-ONLY for our purposes: writing $d012 sets the
+; raster-compare latch, it does not move the beam. Free-running from power-on
+; and independent of anything the program does, which is why entropy_init
+; samples it (issue #89).
+vic_raster      = $d012         ; current raster line (low 8 bits)
 vic_border      = $d020         ; border color
 vic_bg          = $d021         ; background color
 
@@ -61,6 +66,15 @@ proc_port       = $01           ; processor port (ROM banking)
 ; --- System addresses ---
 screen_ram      = $0400         ; screen memory (40x25)
 color_ram       = $d800         ; color memory
+; KERNAL jiffy clock (TI), 3 bytes, BIG-endian: $a0 is the most significant.
+; Incremented by the $ea31 IRQ ~60x/second since reset, so its low byte
+; measures how long the machine took to get here -- host load, drive timing
+; and how long the user stared at the menu all move it. entropy_init samples
+; the two low bytes (issue #89); the high byte advances once every ~4.7
+; minutes and would contribute nothing.
+jiffy_hi        = $00a0         ; jiffy clock, most significant byte
+jiffy_mid       = $00a1         ; jiffy clock, middle byte
+jiffy_lo        = $00a2         ; jiffy clock, least significant byte
 kbd_buffer      = $0277         ; keyboard buffer
 kbd_buf_count   = $00c6         ; keyboard buffer count
 cassette_buf    = $0334         ; cassette buffer (safe scratch area)

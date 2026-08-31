@@ -23,12 +23,14 @@
 .segment "APP_EXTRA"
 
 ; =============================================================================
-; entropy_init - Initialize entropy sources
+; entropy_init - Initialize entropy sources and seed the whitening state
 ;
 ; Sets SID voice 3 to noise waveform with maximum frequency.
 ; Starts CIA1 timer A in free-running mode.
+; Mixes the current machine state into entropy_state (issue #89).
 ;
 ; Clobbers: A
+; Preserves: X, Y
 ; =============================================================================
 entropy_init:
         ; SID voice 3: max frequency
@@ -44,6 +46,63 @@ entropy_init:
         ora #$01                ; set start bit
         and #$f7                ; clear one-shot bit
         sta cia1_cra
+
+        ; --- Seed entropy_state from live machine state (issue #89) -------
+        ; entropy_state is zero on entry to the FIRST call after LOAD (see
+        ; its declaration below for why), and entropy_fill turns it into
+        ; hs_ephem_priv, so without this the ephemeral key's whole feedback
+        ; chain starts from a compile-time constant on every machine.
+        ;
+        ; NOT every session_initiate reaches this. There are two call sites:
+        ; boot.s's do_handshake, which calls entropy_init first, and
+        ; session.s's Type-3 cookie-reply branch, which re-initiates without
+        ; it. That path is benign today only because a Type 3 can arrive
+        ; only after a Type 1 already went out, so the state has been seeded
+        ; and has since absorbed a full initiation's worth of reads -- but
+        ; "every handshake is seeded" would be false, and that path is
+        ; already under review as issue #94.
+        ;
+        ; XOR-in, never assign: this routine is called before every
+        ; handshake, and later calls have a state that already absorbed
+        ; hundreds of hardware reads. XOR cannot reduce the entropy already
+        ; there, an assignment would throw it away.
+        ;
+        ; Ordered AFTER the SID/CIA setup above so sid_osc3 is reading an
+        ; oscillator that has been told to run: before the sta sid_v3_ctrl
+        ; it reads whatever waveform the KERNAL left, which is silence.
+        ;
+        ; The four sources and what each is worth is deliberately modest:
+        ;   jiffy_lo/mid  time from RESET to this call, in 1/60 s. Moves
+        ;                 with drive timing, host scheduling and how long
+        ;                 the operator took to press H. Coarse but genuinely
+        ;                 unpredictable across power cycles.
+        ;   cia1_ta_lo/hi timer A's phase, one CPU cycle of resolution over
+        ;                 a ~$4295 period. The finest-grained source here.
+        ;   vic_raster    beam position, 0..261. WORTH ALMOST NOTHING and
+        ;                 kept only because it is already paid for: an NTSC
+        ;                 frame is 65 * 263 = 17095 cycles and timer A's
+        ;                 period is 17046, so the two are within 50 cycles
+        ;                 of each other and the raster is in the same
+        ;                 clock-affine family as the timer, not an
+        ;                 independent axis. Do NOT reach for it as the
+        ;                 non-affine source issue #101 needs -- CIA1 TOD is
+        ;                 the one that is genuinely off this clock
+        ;                 (uci_tod_start already runs in net_init under
+        ;                 BACKEND=uci, but not under ip65).
+        ;   sid_osc3      real noise on hardware, a clock ramp under VICE.
+        ;
+        ; This is a SEED, not a CSPRNG. It buys "not the same constant on
+        ; every run"; it does not buy a secure key on its own. See the
+        ; entropy_byte note below for the cancellation that still limits
+        ; what the generator itself can contribute.
+        lda entropy_state
+        eor jiffy_lo
+        eor jiffy_mid
+        eor cia1_ta_lo
+        eor cia1_ta_hi
+        eor vic_raster
+        eor sid_osc3
+        sta entropy_state
         rts
 
 ; =============================================================================
@@ -67,16 +126,31 @@ entropy_init:
 ; test_session/test_handshake fail intermittently on "all 17 bytes identical
 ; (0x7f)" and "sender_idx ffffffff == ffffffff".
 ;
-; Under VICE this is total degeneracy because OSC3 is a clock-derived ramp
-; rather than noise (VICE does not clock reSID with sound disabled). On real
-; hardware OSC3 IS noise, so the failure is not total — but two operands that
-; are affine in the same clock still carry far less entropy than they appear
-; to, which matters because this feeds WireGuard ephemeral keys.
+; EVERYTHING ABOVE IS THE VICE PICTURE. It is total degeneracy there because
+; OSC3 is a clock-derived ramp rather than noise: VICE does not clock reSID
+; with sound disabled.
 ;
-; Stirring a persistent byte in breaks the cancellation: consecutive outputs
-; can no longer be a function of S alone. XOR-ing the hardware reads on top is
-; entropy-preserving, so this is strictly no worse anywhere; the rotate only
-; whitens. Costs ~8 cycles and one byte of RAM.
+; This paragraph used to go on to say that on real hardware "OSC3 IS noise, so
+; the failure is not total -- but two operands that are affine in the same
+; clock still carry far less entropy than they appear to". That was a guess,
+; and it has since been measured and is wrong in both halves. On a real 6581/
+; 8580 the two operands are NOT both affine in the CPU clock -- voice-3 ctrl
+; $88 (noise + TEST) freezes OSC3 to a single value, so $D41B is an LFSR --
+; and the sum does not cancel at any phase. The measurements are with
+; entropy_state below; read them before acting on anything in this block.
+;
+; Stirring a persistent byte in makes consecutive outputs stop being a
+; function of S alone. DO NOT READ THAT AS "THE STIRRING FIXED THE
+; DEGENERACY" -- it is true and it is not the property that matters. When S
+; sits at a cancelling phase, K = osc EOR ta is constant and the recurrence
+; is s <- (ROL s) EOR K, which is still a PURE FUNCTION OF THE SEED. All the
+; rotate did was stop the output being one repeated byte, which is worse than
+; nothing on its own: it took a visible failure signature and made it look
+; like a stream. What actually protects the key is that the precondition does
+; not hold on real hardware (see entropy_state below), not this instruction.
+;
+; XOR-ing the hardware reads on top is entropy-preserving, so this is
+; strictly no worse anywhere. Costs ~8 cycles and one byte of RAM.
 ;
 ; NOTE the failure signature is deliberately still reachable by a genuinely
 ; dead RNG (state stuck, both reads flat), so the assertions in
@@ -114,9 +188,100 @@ entropy_fill:
 ; RAM from $8800 up), rather than CRYPTO_BSS. CRYPTO_BSS is page-aligned for
 ; a constant-time reason that has nothing to do with this byte, and one
 ; stray .res there moves the whole segment.
+;
+; That routing is the cfg's to state and has already moved once. Nothing
+; about the $00 below depends on knowing it: what matters is only that the
+; PRG image reaches this address, and the note on entropy_state gives the
+; check that settles that for any layout.
 .segment "APP_EXTRA_BSS"
 
-; Persistent whitening state. Power-on value is whatever RAM held, which is
-; itself a weak entropy source and is never worse than starting from a
-; constant.
+; Persistent whitening state.
+;
+; ITS LOAD-TIME VALUE IS $00, ON EVERY RUN AND EVERY MACHINE. This comment
+; used to claim the opposite -- "power-on value is whatever RAM held".
+;
+; THE CHECK, which is the durable form and the one to trust:
+;
+;   take entropy_state's address from build/wireguard.map, read the PRG's
+;   2-byte load address, and the byte at file offset 2 + addr - load is what
+;   LOAD writes to it.
+;
+; It reads $00 in every backend/REU combination. tools/test_entropy_seed.py
+; performs exactly that computation on every run and asserts the value in RAM
+; after boot matches it, so the claim cannot quietly stop being true.
+;
+; The mechanism, stated so it does not have to be re-stated: a PRG is a
+; contiguous byte stream from its load address, so ANY address the image
+; reaches gets written by LOAD. An address is reached when some enclosing
+; memory area is file-backed and fill = yes -- and `type = bss` does not
+; exempt it, because that marking only means ld65 emits no CONTENT of its
+; own; the enclosing area's fill still covers the address. src/boot.s makes
+; the same point about the low BSS.
+;
+; DELIBERATELY NOT NAMED HERE: which area that is. It has already changed
+; once in this file's lifetime and again when #107 landed the overlay, so a
+; comment naming the segment-to-area mapping would go false without anything
+; in this module being edited -- as three comments in this file's history
+; already have. If you are deciding whether some OTHER symbol is safe, do
+; not reason from this paragraph --
+; run the check above on that symbol. It is three lines of Python and it is
+; the only form of this claim that cannot go stale.
+;
+; Because entropy_byte/entropy_fill feed this byte back into every output,
+; and entropy_fill writes hs_ephem_priv in session_initiate, a fixed start
+; means the whole ephemeral-key chain is deterministic in the hardware reads
+; alone. In the cancelled phases described above that is not a weakening but
+; a total loss: measured under VICE, 2.00% of 200 paired trials had
+; entropy_fill produce output identical to the previous call from the same
+; state. There are TWO such constants, not one -- K = osc EOR ta is fixed at
+; both of the phases entropy_byte's note names, S = $ff and S = $7f -- and
+; each yields its own machine-independent cycle, exactly as the recurrence
+; predicts for s0 = $00:
+;
+;     K = $ff  (period 9)   ff 01 fc 07 f0 1f c0 7f 00
+;     K = $7f  (period 18)  7f 81 7d 84 77 90 5f c0 ff
+;                           80 7e 82 7b 88 6f a0 3f 00
+;
+; Those are GENERATION order. entropy_fill writes DESCENDING -- Y counts
+; down -- so a buffer dump is the reverse, which is why the $ff case is
+; measured as f0 07 fc 01 ff 00 7f c0 1f repeating and not as it reads
+; above. Reproduce either with the recurrence
+; s <- (ROL s) EOR K, carry-in = bit 7 of the pre-ROL s.
+;
+; entropy_init therefore mixes live machine state in here (issue #89). READ
+; WHAT THAT DOES AND DOES NOT BUY. It removes the two UNIVERSAL constants:
+; a cancelled output stops being one of 2 precomputable keys and becomes one
+; of 2 * 256 = 512, since s0 is now a byte instead of $00. It does not change
+; how OFTEN a cancellation happens -- under VICE, still 25/1500 = 1.67% of
+; fills after the fix. 9 bits of ephemeral private key would be as fatal to
+; WireGuard as 1 bit.
+;
+; BUT THE CANCELLATION IS A VICE ARTEFACT, NOT A HARDWARE DEFECT, and this
+; comment would overstate in the other direction if it stopped above.
+; Measured on a U64E (fw 3.15, BACKEND=uci REU=0, everything executed on the
+; 6510), against the same code that shows it under VICE:
+;
+;                       VICE     HW 1 MHz    HW 48 MHz
+;   distinct S /128        2         105          100
+;   duplicate fills    4/200     0/3072       0/3072
+;   universal keys   present    0/6144       0/6144
+;
+; S is statistically indistinguishable from uniform on metal; the 95% upper
+; bound on the degenerate rate is 0.049%, which excludes VICE's 1-2% at about
+; 1e-27. The cause is that voice-3 ctrl $88 (noise + TEST) freezes OSC3 to a
+; single value, so $D41B is an LFSR and is NOT affine in the CPU clock. VICE
+; with sound disabled does not clock reSID, which is the only reason it ever
+; looked affine. The null result is trustworthy because the same run forced
+; the condition -- a byte-identical entropy_fill with its two reads replaced
+; by immediates XORing to a constant K -- and got 8/8 exact predicted
+; universal keys, so the detector was proven to fire before the 0/6144 was
+; believed.
+;
+; So: #89 was a real defect and this is a real fix -- the seed reaching
+; hs_ephem_priv was $00 on every run, confirmed on hardware. What #89 does
+; NOT do is fix the generator, and what the hardware says is that the
+; generator's known weakness is not exploitable on a real C64. Issue #101
+; stays open on design grounds (two sources that CAN cancel in principle,
+; and only one of them is real entropy), not as a live exposure. Anyone
+; reaching for it should read the hardware numbers above first.
 entropy_state:  .res 1
