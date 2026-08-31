@@ -50,6 +50,15 @@ TESTS = [
     # from can be checked without hardware — and if it breaks, every one of
     # them breaks while this gate stays green. Import-only, milliseconds.
     ("live_seams",     ["tools/test_live_tool_seams.py"]),
+    # Issue #103. LIB_X25519_INIT_CODE is now reclaimed as APP_BSS rather
+    # than merely documented as reclaimable, which is only safe while the
+    # cold init is genuinely dead after boot. This suite is the red/green
+    # for that: it checks the span is erased, that the tables the erased
+    # code built are still correct, and — the red half — that deliberately
+    # forcing the one guarded branch back into the span does NOT return.
+    # Without the red half, a green gate would be consistent with the code
+    # still being needed and simply never exercised.
+    ("cold_reclaim",   ["tools/test_cold_segment_reclaim.py"]),
     # NOT listed, deliberately: tools/test_uci_*_live.py and
     # tools/test_wg_responder*.py need real hardware or a live responder.
 ]
