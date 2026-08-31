@@ -356,8 +356,26 @@ def main():
             print("FATAL: boot_ready never set")
             sys.exit(1)
         write_bytes(t, IDLE_LOOP, PARK)
-        if "reu_mul_init" in labels:
-            jsr(t, labels["reu_mul_init"], timeout=180.0)
+        # NO post-takeover reu_mul_init rebuild (issue #103 / PR #107).
+        #
+        # This suite originally copied the `jsr reu_mul_init` from
+        # test_type2_slow.py, whose justification -- "the menu prints before
+        # reu_mul_init finishes (PR #40), so re-run it deterministically after
+        # takeover" -- stopped being true at issue #55: binary_wait_for_boot_ready
+        # now returns only once the table build has completed.  PR #107 removed
+        # the call from the other suites; this one was written concurrently and
+        # missed that sweep, which is what turned master red.
+        #
+        # It is now not merely redundant but fatal.  boot.s:179 calls
+        # reu_mul_init BEFORE the reclaim at boot.s:183-260, and the reclaim
+        # zeroes LIB_X25519_INIT_CODE so cfg/c64-wireguard-*.cfg can lay APP_BSS
+        # over it.  Measured on b4ca1d8: LIB_X25519_INIT_CODE $87BB-$8AF4 vs
+        # APP_BSS $8800-$9F72, a 757-byte overlap.  reu_mul_init's entry ($87BB)
+        # is just below $8800, so the jsr lands in surviving code, runs ~69
+        # bytes, then falls into zeroed RAM -- which is why the symptom is a
+        # 180 s timeout rather than an immediate fault.  The tables it built at
+        # boot live in REU memory and in the sqtab window, both outside the
+        # reclaimed span, so they outlive the code and nothing needs rebuilding.
         print("VICE ready.\n")
 
         print("--- D1: the 90 s handshake deadline (timer.s:304-327) ---")
