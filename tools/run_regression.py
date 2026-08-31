@@ -46,6 +46,11 @@ TESTS = [
     ("key_rotation",   ["tools/test_key_rotation.py"]),
     ("endpoint_update",["tools/test_endpoint_update.py"]),
     ("type2_slow",     ["tools/test_type2_slow.py"]),
+    # PR #91's two handshake-recovery behaviours (the 90 s deadline and
+    # @hs_fail -> session_reset). Nothing asserted either, and the #95 severity
+    # downgrade rests entirely on them: revert either and #95 returns to its
+    # filed severity with the gate still green. Fast — ~8 s, zero X25519.
+    ("hs_recovery",    ["tools/test_issue_95_handshake_recovery.py"]),
     # The live tools themselves cannot run here, but the seam they all hang
     # from can be checked without hardware — and if it breaks, every one of
     # them breaks while this gate stays green. Import-only, milliseconds.
