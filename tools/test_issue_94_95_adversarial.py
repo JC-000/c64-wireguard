@@ -60,6 +60,7 @@ import os
 import struct
 import subprocess
 import sys
+import time
 
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
@@ -159,9 +160,22 @@ class Results:
         self.rows.append((name, ok, detail))
         print(f"  [{'PASS' if ok else 'FAIL'}] {name}: {detail}")
 
-    def summary(self):
+    def summary(self, timings=None, setup=None):
         bad = [r for r in self.rows if not r[1]]
         print(f"\n{'='*72}")
+        if timings:
+            # Printed on every run, not just slow ones. The gate builds REU=1
+            # while development happened at REU=0, and an adversarial lane
+            # measured a --slow case running >51 min on a REU=1 + cartridge
+            # build that takes minutes at REU=0 (cause never isolated). If
+            # that ever reaches the fast group, this line is what says so,
+            # instead of the gate looking mysteriously hung.
+            for name, secs in timings:
+                print(f"  {name:5s} {secs:8.1f}s")
+            if setup is not None:
+                print(f"  {'boot':5s} {setup:8.1f}s  (VICE boot + reu_mul_init)")
+            print(f"  {'TOTAL':5s} {sum(t for _, t in timings):8.1f}s (groups)")
+            print(f"{'='*72}")
         print(f"{len(self.rows) - len(bad)}/{len(self.rows)} expectations met")
         print(f"{'='*72}")
         return len(bad)
@@ -745,6 +759,7 @@ def main():
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
                         extra_args=["-reu", "-reusize", "512"])
     with ViceInstanceManager(config=config) as mgr:
+        t_boot = time.monotonic()
         inst = mgr.acquire()
         print(f"VICE PID={inst.pid}, port={inst.port}")
         transport = inst.transport
@@ -754,16 +769,20 @@ def main():
         write_bytes(transport, IDLE_LOOP, bytes([0x4C, 0x39, 0x03]))
         if "reu_mul_init" in labels:
             jsr(transport, labels["reu_mul_init"], timeout=180.0)
-        print("VICE ready.\n")
+        setup = time.monotonic() - t_boot
+        print(f"VICE ready ({setup:.1f}s).\n")
 
+        timings = []
         for name, fn in groups:
             print(f"--- {name} ---")
+            t0 = time.monotonic()
             fn(transport, labels, res)
-            print()
+            timings.append((name, time.monotonic() - t0))
+            print(f"    ({timings[-1][1]:.1f}s)\n")
 
         mgr.release(inst)
 
-    sys.exit(1 if res.summary() else 0)
+    sys.exit(1 if res.summary(timings, setup) else 0)
 
 
 if __name__ == "__main__":

@@ -76,6 +76,16 @@ TESTS = [
     # SUITE_TIMEOUT. The fast group is seconds and covers all three guards
     # plus their acceptance controls; T7 carries its own 300 s bound so a
     # regression fails inside the budget instead of hanging the pool.
+    #
+    # Measured, not assumed: the fast group runs ZERO X25519 scalarmults, and
+    # X25519 is the only consumer of the REU (LIB_X25519_REU_BANKS_USED = $3B,
+    # LIB_CHACHA20_POLY1305_REU_BANKS_USED = 0). So the REU=1/REU=0 split this
+    # gate builds under cannot move it. Timed on the unfixed tree, where the
+    # crypto actually runs: T1-T6 = 0.6 s at REU=1, 1.5 s at REU=0; on the
+    # fixed tree 0.2 s total, because guarded packets are rejected before any
+    # crypto. The suite prints a per-group timing table on every run — if that
+    # ever disagrees with these numbers, say so rather than demoting the suite
+    # to SERIAL_TESTS or thinning its assertions.
     ("issue_94",       ["tools/test_issue_94_95_adversarial.py"]),
     # NOT listed, deliberately: tools/test_uci_*_live.py and
     # tools/test_wg_responder*.py need real hardware or a live responder.
