@@ -205,7 +205,7 @@ hex_to_bytes:
 @loop:
         ; Read high nibble
         jsr chrin
-        jsr @hex_digit          ; A = high nibble value
+        jsr hex_digit          ; A = high nibble value
         asl
         asl
         asl
@@ -214,7 +214,7 @@ hex_to_bytes:
 
         ; Read low nibble
         jsr chrin
-        jsr @hex_digit          ; A = low nibble value
+        jsr hex_digit          ; A = low nibble value
         ora zp_tmp2             ; combine high | low
 
         sta (zp_ptr2),y
@@ -224,7 +224,7 @@ hex_to_bytes:
         rts
 
 ; Convert ASCII/PETSCII hex digit in A to 0-15
-@hex_digit:
+hex_digit:
         sec
         sbc #$30                ; subtract '0'
         cmp #10
