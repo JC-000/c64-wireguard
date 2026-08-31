@@ -132,10 +132,18 @@ entropy_init:
 ; are affine in the same clock still carry far less entropy than they appear
 ; to, which matters because this feeds WireGuard ephemeral keys.
 ;
-; Stirring a persistent byte in breaks the cancellation: consecutive outputs
-; can no longer be a function of S alone. XOR-ing the hardware reads on top is
-; entropy-preserving, so this is strictly no worse anywhere; the rotate only
-; whitens. Costs ~8 cycles and one byte of RAM.
+; Stirring a persistent byte in makes consecutive outputs stop being a
+; function of S alone. DO NOT READ THAT AS "THE STIRRING FIXED THE
+; DEGENERACY" -- it is true and it is not the property that matters. When S
+; sits at a cancelling phase, K = osc EOR ta is constant and the recurrence
+; is s <- (ROL s) EOR K, which is still a PURE FUNCTION OF THE SEED. All the
+; rotate did was stop the output being one repeated byte, which is worse than
+; nothing on its own: it took a visible failure signature and made it look
+; like a stream. What actually protects the key is that the precondition does
+; not hold on real hardware (see entropy_state below), not this instruction.
+;
+; XOR-ing the hardware reads on top is entropy-preserving, so this is
+; strictly no worse anywhere. Costs ~8 cycles and one byte of RAM.
 ;
 ; NOTE the failure signature is deliberately still reachable by a genuinely
 ; dead RNG (state stuck, both reads flat), so the assertions in
@@ -213,12 +221,38 @@ entropy_fill:
 ;
 ; entropy_init therefore mixes live machine state in here (issue #89). READ
 ; WHAT THAT DOES AND DOES NOT BUY. It removes the two UNIVERSAL constants:
-; the cancelled output stops being one of 2 precomputable keys and becomes
-; one of 2 * 256 = 512, since s0 is now a byte instead of $00. It does not
-; reduce how OFTEN the cancellation happens -- independently measured after
-; this fix at 25/1500 = 1.67% of ephemeral keys still precomputable. 9 bits
-; of ephemeral private key is as fatal to WireGuard as 1 bit. #89 is a
-; correctness fix to a false comment and a fixed seed; the generator is NOT
-; fixed. That is issue #101, and it needs a source that is not affine in the
-; CPU clock, in entropy_byte and entropy_fill rather than here.
+; a cancelled output stops being one of 2 precomputable keys and becomes one
+; of 2 * 256 = 512, since s0 is now a byte instead of $00. It does not change
+; how OFTEN a cancellation happens -- under VICE, still 25/1500 = 1.67% of
+; fills after the fix. 9 bits of ephemeral private key would be as fatal to
+; WireGuard as 1 bit.
+;
+; BUT THE CANCELLATION IS A VICE ARTEFACT, NOT A HARDWARE DEFECT, and this
+; comment would overstate in the other direction if it stopped above.
+; Measured on a U64E (fw 3.15, BACKEND=uci REU=0, everything executed on the
+; 6510), against the same code that shows it under VICE:
+;
+;                       VICE     HW 1 MHz    HW 48 MHz
+;   distinct S /128        2         105          100
+;   duplicate fills    4/200     0/3072       0/3072
+;   universal keys   present    0/6144       0/6144
+;
+; S is statistically indistinguishable from uniform on metal; the 95% upper
+; bound on the degenerate rate is 0.049%, which excludes VICE's 1-2% at about
+; 1e-27. The cause is that voice-3 ctrl $88 (noise + TEST) freezes OSC3 to a
+; single value, so $D41B is an LFSR and is NOT affine in the CPU clock. VICE
+; with sound disabled does not clock reSID, which is the only reason it ever
+; looked affine. The null result is trustworthy because the same run forced
+; the condition -- a byte-identical entropy_fill with its two reads replaced
+; by immediates XORing to a constant K -- and got 8/8 exact predicted
+; universal keys, so the detector was proven to fire before the 0/6144 was
+; believed.
+;
+; So: #89 was a real defect and this is a real fix -- the seed reaching
+; hs_ephem_priv was $00 on every run, confirmed on hardware. What #89 does
+; NOT do is fix the generator, and what the hardware says is that the
+; generator's known weakness is not exploitable on a real C64. Issue #101
+; stays open on design grounds (two sources that CAN cancel in principle,
+; and only one of them is real entropy), not as a live exposure. Anyone
+; reaching for it should read the hardware numbers above first.
 entropy_state:  .res 1
