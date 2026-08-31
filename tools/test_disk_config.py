@@ -38,7 +38,7 @@ VERBOSE = False
 def make_config_content(static_priv, static_pub, peer_pub,
                         endpoint_ip, endpoint_port,
                         tunnel_ip, target_ip,
-                        key_lines=None):
+                        key_lines=None, psk_line=None):
     """Build WG.CFG content from binary values.
 
     Args:
@@ -55,6 +55,12 @@ def make_config_content(static_priv, static_pub, peer_pub,
             control over the exact characters on the wire — the default
             `.hex().upper()` rendering is precisely what let the
             uppercase-only parser go unnoticed.
+        psk_line: optional literal string to emit as line 8 (the pre-shared
+            key). Omitted by default, which is what makes config_read_file
+            take its EOF branch and zero the PSK buffer. The #88 rejection
+            tests need line 8 present because the `bcs @close_fail` after the
+            PSK read is the only BACKWARD branch to the failure epilogue —
+            the one the mid-routine placement of that epilogue exists for.
 
     Returns:
         ASCII string with CR-terminated lines.
@@ -71,6 +77,8 @@ def make_config_content(static_priv, static_pub, peer_pub,
     lines.append(str(endpoint_port))
     lines.append(f"{tunnel_ip[0]}.{tunnel_ip[1]}.{tunnel_ip[2]}.{tunnel_ip[3]}")
     lines.append(f"{target_ip[0]}.{target_ip[1]}.{target_ip[2]}.{target_ip[3]}")
+    if psk_line is not None:
+        lines.append(psk_line)
     return "\r".join(lines) + "\r"
 
 
@@ -780,35 +788,132 @@ def test_hex_case_config(transport, labels):
     return passed, failed
 
 
-def test_non_hex_rejected(transport, labels, bad_char):
-    """A non-hex character in a key field must be reported, not converted.
+# ---------------------------------------------------------------------------
+# Rejection cases. Each plants exactly ONE non-hex character in ONE key line.
+#
+# Between them they reach every branch the fix added:
+#
+#   hex_digit's three distinct reject paths
+#       `bcc @not_hex`  (character below '0')            -> the space case
+#       `sbc #$11` borrow                                 -> the ':' case
+#       `cmp #6` / `bcs @not_hex` overflow                -> the 'G'/'z' cases
+#   hex_to_bytes' two `bcs @not_hex`
+#       high nibble (even index)                          -> 'G', space
+#       low nibble  (odd index)                           -> ':', 'z'
+#   config_read_file's four key-line `bcs @close_fail`
+#       line 1, line 2, line 3 (forward), PSK (BACKWARD)
+#
+# The PSK case is the one that matters structurally: its `bcs @close_fail` is
+# the only backward branch to the failure epilogue, and reaching it in two
+# bytes is the entire reason the epilogue is parked mid-routine. Nothing
+# exercised it before.
+#
+# `index` also fixes how many bytes are decoded before the abort (index // 2),
+# which is what the post-rejection buffer-state assertions check. It is never
+# 0 or 1: a zero-byte partial decode would make that assertion "expect all
+# zeros", which a parser that wrote nothing at all would also satisfy.
+# ---------------------------------------------------------------------------
 
-    The disk's WG.CFG has valid uppercase keys on lines 1 and 2 and a single
-    bad character on line 3. config_read_file must return C=1.
+REJECT_CASES = [
+    dict(name="line3-high-nibble-G", line=3, index=20, char="G",
+         why="'G' is the character immediately after 'F' -- the near miss a "
+             "hand-edited or truncated key produces. Even index, so the "
+             "HIGH-nibble `bcs @not_hex`; line 3's forward `bcs @close_fail`."),
+    dict(name="line1-low-nibble-colon", line=1, index=21, char=":",
+         why="':' is $3A, immediately after '9', and is the character the "
+             "fold arithmetic is most delicate about: $3A-$30 = $0A passes "
+             "`cmp #10`, so only the `sbc #$11` borrow rejects it. Odd "
+             "index, so the LOW-nibble `bcs @not_hex` -- otherwise never "
+             "reached."),
+    dict(name="line2-space-below-zero", line=2, index=2, char=" ",
+         why="Space is $20, below '0', so it leaves through `bcc @not_hex` "
+             "-- hex_digit's third reject path, which no other case takes. "
+             "A stray space is a plausible hand-edit."),
+    dict(name="psk-line-low-nibble-z", line=8, index=63, char="z",
+         why="The PSK line's `bcs @close_fail` is the only BACKWARD branch "
+             "to the failure epilogue, i.e. the single branch that "
+             "placement exists to make possible. Last character of the "
+             "line, so 31 of 32 bytes decode before the abort."),
+]
 
-    The two key assertions that follow are the non-vacuity guard: an
-    implementation that simply always failed would also satisfy "returns 1",
-    but it would not have decoded lines 1 and 2 on the way there.
+
+def build_reject_config(case):
+    """Build a WG.CFG for one rejection case.
+
+    Returns (config_content, [(label, expected_32_bytes, description), ...]).
+
+    The expectations describe the buffer state config_read_file must leave
+    behind on the failure path:
+
+      * key lines BEFORE the fault  -- fully decoded (the non-vacuity guard:
+        an implementation that just always failed would satisfy "returns 1"
+        but would not have decoded anything on the way there)
+      * the faulted line            -- a genuine partial decode of
+        index // 2 bytes, tail untouched
+      * key lines AFTER the fault   -- never reached, still zero
+
+    boot.s:243 already ran config_read_file once against this same file
+    before the test's own call, and hex_to_bytes only stores a byte once
+    BOTH its nibbles decoded, so the partial decode is idempotent and the
+    tail is the zero fill the PRG loaded.
+    """
+    good = CASE_KEY.hex().upper()
+    idx = case["index"]
+    assert idx // 2 >= 1, "a zero-byte partial decode is a vacuous expectation"
+    bad = good[:idx] + case["char"] + good[idx + 1:]
+    assert len(bad) == 64 and bad != good
+
+    lines = {1: good, 2: good, 3: good, 8: good}
+    lines[case["line"]] = bad
+
+    content = make_config_content(
+        CASE_KEY, CASE_KEY, CASE_KEY,
+        [10, 0, 0, 1], 51820, [10, 0, 0, 2], [10, 0, 0, 1],
+        key_lines=(lines[1], lines[2], lines[3]),
+        psk_line=lines[8],
+    )
+
+    n = idx // 2
+    expected = []
+    for lineno, label in ((1, "cfg_static_priv"), (2, "cfg_static_pub"),
+                          (3, "cfg_peer_pub"), (8, "cfg_preshared_key")):
+        if lineno < case["line"]:
+            expected.append((label, CASE_KEY,
+                             "fully decoded before the fault"))
+        elif lineno == case["line"]:
+            expected.append((label, CASE_KEY[:n] + bytes(32 - n),
+                             f"partial decode, {n} bytes, tail untouched"))
+        else:
+            expected.append((label, bytes(32),
+                             "never reached, still zero"))
+    return content, expected
+
+
+def test_non_hex_rejected(transport, labels, case, expected):
+    """One non-hex character in one key field must be reported, not converted.
+
+    config_read_file must return C=1, and must leave the config buffers in
+    the state `expected` describes.
     """
     passed = failed = 0
+    name = case["name"]
 
     result = call_config_read(transport, labels)
     if result == 1:
         passed += 1
         if VERBOSE:
-            print(f"  PASS reject: {bad_char!r} in a key field returns C=1")
+            print(f"  PASS reject[{name}]: returns C=1")
     else:
         failed += 1
-        print(f"  FAIL reject: key field containing {bad_char!r} "
-              f"(${ord(bad_char):02X}) was accepted — config_read_file "
-              f"returned {result}, expected 1")
+        print(f"  FAIL reject[{name}]: key line {case['line']} containing "
+              f"{case['char']!r} (${ord(case['char']):02X}) at index "
+              f"{case['index']} was accepted — config_read_file returned "
+              f"{result}, expected 1")
 
-    p, f = verify_key(transport, labels, "cfg_static_priv", CASE_KEY,
-                      "reject: line 1 still decoded before the failure")
-    passed += p; failed += f
-    p, f = verify_key(transport, labels, "cfg_static_pub", CASE_KEY,
-                      "reject: line 2 still decoded before the failure")
-    passed += p; failed += f
+    for label, want, what in expected:
+        p, f = verify_key(transport, labels, label, want,
+                          f"reject[{name}]: {label} {what}")
+        passed += p; failed += f
 
     return passed, failed
 
@@ -855,7 +960,7 @@ def main():
     required = [
         "config_read_file", "config_load",
         "cfg_static_priv", "cfg_static_pub", "cfg_peer_pub",
-        "cfg_peer_endpoint_ip", "cfg_peer_endpoint_port",
+        "cfg_peer_endpoint_ip", "cfg_peer_endpoint_port", "cfg_preshared_key",
         "tunnel_ip", "ping_target_ip",
         "wg_peer_port",
         # The per-character decoder, called directly by the #88 sweep so the
@@ -1093,35 +1198,33 @@ def main():
         total_passed += p; total_failed += f
 
         # ==================================================================
-        # Instance 6: a non-hex character must be reported (issue #88)
+        # Instances 6a-6d: a non-hex character must be reported (issue #88)
         #
-        # 'G' is the character immediately after 'F' — the near miss a
-        # hand-edited or truncated key produces. Lines 1 and 2 are valid
-        # uppercase, so they parse on both the old and the new parser and
-        # act as the non-vacuity guard for "returns C=1".
+        # One VICE instance per REJECT_CASES entry — a WG.CFG carries one
+        # config, so one planted fault per disk. See REJECT_CASES for what
+        # each one reaches; between them they cover both nibble positions,
+        # all three of hex_digit's reject paths, and all four key-line
+        # `bcs @close_fail` sites including the PSK line's backward branch.
         # ==================================================================
-        print("\n=== Instance 6: non-hex character rejected (#88) ===")
+        for n, case in enumerate(REJECT_CASES):
+            tag = f"6{chr(ord('a') + n)}"
+            print(f"\n=== Instance {tag}: reject {case['name']} (#88) ===")
+            print(f"    {case['why']}")
 
-        bad_line = CASE_KEY.hex().upper()
-        bad_line = bad_line[:20] + "G" + bad_line[21:]
-        assert len(bad_line) == 64
+            content, expected = build_reject_config(case)
+            disk = create_disk_with_config(
+                tmpdir, content, f"nonhex_{case['name']}.d64")
 
-        content_6 = make_config_content(
-            CASE_KEY, CASE_KEY, CASE_KEY,
-            [10, 0, 0, 1], 51820, [10, 0, 0, 2], [10, 0, 0, 1],
-            key_lines=(CASE_KEY.hex().upper(), CASE_KEY.hex().upper(),
-                       bad_line),
-        )
-        disk_6 = create_disk_with_config(tmpdir, content_6, "nonhex.d64")
+            def instance_reject_tests(transport, labels,
+                                      _case=case, _expected=expected):
+                print("\n--- non-hex character in a key field ---")
+                p, f = test_non_hex_rejected(transport, labels,
+                                             _case, _expected)
+                print(f"  {p} passed, {f} failed")
+                return p, f
 
-        def instance_6_tests(transport, labels):
-            print("\n--- non-hex character in a key field ---")
-            p, f = test_non_hex_rejected(transport, labels, "G")
-            print(f"  {p} passed, {f} failed")
-            return p, f
-
-        p, f = run_disk_test(disk_6, labels, instance_6_tests)
-        total_passed += p; total_failed += f
+            p, f = run_disk_test(disk, labels, instance_reject_tests)
+            total_passed += p; total_failed += f
 
     # ==================================================================
     # Summary
