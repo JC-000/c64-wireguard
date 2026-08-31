@@ -871,6 +871,264 @@ def test_display_payload(transport, labels):
     return passed, failed
 
 
+
+def _screen_text(transport):
+    """Read the C64's screen RAM and decode it to ASCII (screen codes)."""
+    scr = bytes(read_bytes(transport, 0x0400, 1000))
+    out = []
+    for b in scr:
+        if b == 32:
+            out.append(" ")
+        elif 1 <= b <= 26:
+            out.append(chr(b + 64))
+        elif 33 <= b <= 63:
+            out.append(chr(b))
+        else:
+            out.append(".")
+    return "".join(out)
+
+
+def _clear_screen(transport):
+    write_bytes(transport, 0x0400, bytes([32]) * 1000)
+
+
+def _inner_udp(port, text, declared_udp_len=None):
+    """Build an inner IPv4/UDP datagram (the tunnelled payload).
+
+    declared_udp_len overrides the UDP length header without changing how
+    many bytes are actually sent — that is the forgery under test.
+    """
+    ip = bytearray(20)
+    ip[0] = 0x45                       # IPv4, IHL 5
+    ip[2:4] = struct.pack('>H', 28 + len(text))
+    ip[8] = 64                         # TTL
+    ip[9] = 17                         # protocol = UDP
+    ip[12:16] = b'\x0a\x00\x00\x02'    # src
+    ip[16:20] = b'\x0a\x00\x00\x01'    # dst
+    udp = bytearray(8)
+    udp[0:2] = struct.pack('>H', port)
+    udp[2:4] = struct.pack('>H', port)
+    udp[4:6] = struct.pack('>H', 8 + len(text) if declared_udp_len is None
+                                 else declared_udp_len)
+    return bytes(ip) + bytes(udp) + text
+
+
+def test_tunnel_text_payload_bound(transport, labels):
+    """Issue #97: inner text must be bounded by what was actually decrypted.
+
+    udp_tunnel_parse takes the text length from the peer's inner UDP length
+    header. Before the fix it bounded that only against the assemble-time
+    constant MSG_TEXT_MAX, never against tp_payload_len, so a peer that
+    declares more text than it sent has the difference printed from whatever
+    was left in tp_packet. That is the PREVIOUS packet's decrypted
+    plaintext: session.s copies only udp_recv_len bytes into tp_packet and
+    nothing clears the rest.
+
+    Packet A carries a full-size message of a known marker. The screen is
+    then wiped and short packets are delivered; A's marker must not reappear
+    on screen. The last of them is an empty keepalive, which needs no forged
+    length at all -- it overwrites only tp_packet[0..31], so the port at
+    +38..39 and the length at +40..41 still hold A's inner UDP header and the
+    whole 832-byte display window is A's plaintext.
+
+    Only the INBOUND direction leaves plaintext in tp_packet;
+    transport_encrypt's AEAD is in place too, so send residue is ciphertext.
+    """
+    passed = failed = 0
+
+    port = 9999
+    recv_key = bytes(range(32))
+    receiver_idx = b'\xde\xad\xbe\xef'
+    MARKER = b"QXMARKER"
+    tp_packet = labels["tp_packet"]
+
+    write_bytes(transport, labels["msg_port"],
+                bytes([(port >> 8) & 0xFF, port & 0xFF]))
+    write_bytes(transport, labels["hs_transport_recv"], recv_key)
+    write_bytes(transport, labels["tp_peer_recv_idx"], receiver_idx)
+    write_bytes(transport, labels["tp_recv_counter"], bytes(8))
+    if "rw_counter_max" in labels:
+        write_bytes(transport, labels["rw_counter_max"], bytes(8))
+    if "rw_bitmap" in labels:
+        write_bytes(transport, labels["rw_bitmap"], bytes(256))
+    write_bytes(transport, labels["wg_state"], bytes([2]))   # ACTIVE
+
+    # Trampoline for calling udp_tunnel_parse directly on the buffer state a
+    # delivery left behind: JSR udp_tunnel_parse; STA $0360; RTS.
+    parse_addr = labels["udp_tunnel_parse"]
+    write_bytes(transport, 0x0340, bytes([
+        0x20, parse_addr & 0xFF, parse_addr >> 8,
+        0x8D, 0x60, 0x03,
+        0x60,
+    ]))
+
+    def reparse():
+        """Re-run udp_tunnel_parse on the current tp_packet/tp_payload_len.
+
+        Returns (A, msg_recv_len). A == $FF means the packet was rejected,
+        in which case msg_recv_len is not used by the caller.
+        """
+        jsr(transport, 0x0340)
+        return (read_bytes(transport, 0x0360, 1)[0],
+                int.from_bytes(
+                    read_bytes(transport, labels["msg_recv_len"], 2), 'little'))
+
+    def deliver(counter, inner):
+        nonce = b'\x00' * 4 + struct.pack('<Q', counter)
+        ct_tag = ChaCha20Poly1305(recv_key).encrypt(nonce, inner, None)
+        pkt = (struct.pack('<I', 4) + receiver_idx
+               + struct.pack('<Q', counter) + ct_tag)
+        write_bytes(transport, labels["udp_recv_buf"], pkt)
+        write_bytes(transport, labels["udp_recv_len"],
+                    struct.pack('<H', len(pkt)))
+        write_bytes(transport, labels["udp_recv_ready"], bytes([1]))
+        jsr(transport, labels["session_handle_packet"], timeout=180.0)
+        return len(pkt)
+
+    # --- Packet A: a legitimate MSG_TEXT_MAX-sized message ----------------
+    # 832 == MSG_TEXT_MAX; this also proves the fix does not truncate a
+    # maximum-length message that really did arrive.
+    text_a = MARKER * 104
+    len_a = deliver(1, _inner_udp(port, text_a))
+
+    # rc/recv_len, not just the marker: session.s falls back to
+    # display_payload on a rejection and that prints the whole inner
+    # datagram, text included, so a screen check alone passes under an
+    # always-reject implementation. The fix must ACCEPT a legitimate
+    # MSG_TEXT_MAX message and hand over all 832 bytes.
+    rc_a, recv_len_a = reparse()
+    if (MARKER.decode() in _screen_text(transport)
+            and rc_a == 0 and recv_len_a == 832):
+        passed += 1
+        if VERBOSE:
+            print(f"  PASS packet A ({len_a}B datagram, {len(text_a)}B text) "
+                  f"accepted whole and displayed (A=0, msg_recv_len=832)")
+    else:
+        failed += 1
+        print(f"  FAIL packet A, a legitimate MSG_TEXT_MAX message, was not "
+              f"accepted whole: A={rc_a:#04x}, msg_recv_len={recv_len_a}, "
+              f"marker on screen="
+              f"{MARKER.decode() in _screen_text(transport)}")
+
+    # --- Short packets whose inner UDP length header claims 840 (= 832
+    #     text bytes, exactly MSG_TEXT_MAX, which the constant bound admits)
+    shapes = [
+        # (label, inner datagram, real text bytes, counter)
+        ("8 text bytes declared as 832",
+         _inner_udp(port, b"BRAVOYES", declared_udp_len=8 + 832), 8, 2),
+        # 26 bytes is the shortest inner payload that still contains the
+        # protocol byte (+9), the destination port (+22..23) and the length
+        # field (+24..25), so it is the attacker-controlled worst case.
+        ("inner header truncated at 26 bytes",
+         _inner_udp(port, b"", declared_udp_len=8 + 832)[:26], 0, 3),
+        # A four-byte over-declaration. Too small to show up as a marker on
+        # screen, so only the length assertion catches it -- which is the
+        # point: it kills a bound written against tp_packet_len (32 bytes
+        # too generous, since that counts the type-4 header and the tag)
+        # instead of tp_payload_len.
+        ("8 text bytes declared as 12",
+         _inner_udp(port, b"BRAVOYES", declared_udp_len=8 + 12), 8, 4),
+    ]
+
+    # The worst case, and it forges nothing: an empty keepalive. It writes
+    # only tp_packet[0..31], so session.s routes on tp_packet+25 -- a byte of
+    # the keepalive's own AEAD tag -- and udp_tunnel_parse then reads the
+    # port at +38..39 and the length at +40..41 out of the PREVIOUS message's
+    # inner UDP header, which by construction name msg_port and that
+    # message's own length. The whole 832-byte window is then residue.
+    #
+    # Only the tag byte is chance (1 in 256), so pick a counter whose tag
+    # supplies 17 and the shape becomes deterministic.
+    ka_counter = None
+    for cand in range(100, 60000):
+        tag = ChaCha20Poly1305(recv_key).encrypt(
+            b'\x00' * 4 + struct.pack('<Q', cand), b'', None)
+        if tag[9] == 17:           # tp_packet+16+9 == IP_PROTO_UDP
+            ka_counter = cand
+            break
+    if ka_counter is None:
+        failed += 1
+        print("  FAIL could not find a keepalive counter whose tag byte 9 "
+              "is 17 — the worst-case shape is unreachable in this run")
+    else:
+        shapes.append(("empty keepalive, nothing forged", b"", 0, ka_counter))
+
+    for name, inner, real_text, counter in shapes:
+        if inner == b"":
+            # The keepalive reads its port and length out of whatever came
+            # last, so put a known full-size message there first.
+            deliver(counter - 1, _inner_udp(port, text_a))
+        _clear_screen(transport)
+        pkt_len = deliver(counter, inner)
+        payload_len = len(inner)
+
+        # Non-vacuity: A's plaintext really is still sitting in tp_packet
+        # past the end of this packet, so "not on screen" is a statement
+        # about the display bound and not about an empty buffer.
+        top = 44 + 832                      # one past the last byte printable
+        tail = bytes(read_bytes(transport, tp_packet + pkt_len,
+                                top - pkt_len))
+        if MARKER in tail:
+            passed += 1
+            if VERBOSE:
+                print(f"  PASS [{name}] residue live: A's plaintext occupies "
+                      f"tp_packet[{pkt_len}..{top - 1}] "
+                      f"({top - pkt_len} bytes)")
+        else:
+            failed += 1
+            print(f"  FAIL [{name}] A's plaintext is NOT in "
+                  f"tp_packet[{pkt_len}..{top - 1}] — the disclosure "
+                  f"assertion below would be vacuous")
+
+        scr = _screen_text(transport)
+        leaked = scr.count(MARKER.decode())
+        if leaked == 0:
+            passed += 1
+            if VERBOSE:
+                print(f"  PASS [{name}] no prior-packet plaintext on screen")
+        else:
+            failed += 1
+            print(f"  FAIL [{name}] {leaked} copies of packet A's plaintext "
+                  f"printed (issue #97): {payload_len - 28 if payload_len > 28 else 0}"
+                  f" text bytes arrived, the header claimed 832")
+
+        # Acceptance criterion, stated directly: either the packet is
+        # rejected, or the length handed to the display is no more than the
+        # text that actually arrived.
+        rc, recv_len = reparse()
+        if rc == 0xFF or recv_len <= real_text:
+            passed += 1
+            if VERBOSE:
+                print(f"  PASS [{name}] udp_tunnel_parse "
+                      + (f"rejected it (A=$FF)" if rc == 0xFF
+                         else f"clamped msg_recv_len to {recv_len} "
+                              f"(<= {real_text} decrypted)"))
+        else:
+            failed += 1
+            print(f"  FAIL [{name}] udp_tunnel_parse accepted it (A={rc:#04x}) "
+                  f"with msg_recv_len={recv_len}, but only {real_text} text "
+                  f"bytes were decrypted")
+
+    # Positive control: an implementation that simply printed nothing would
+    # pass every negative assertion above. A short, honest message must
+    # still be displayed.
+    _clear_screen(transport)
+    deliver(5, _inner_udp(port, b"HONESTONE"))
+    rc, recv_len = reparse()
+    if "HONESTONE" in _screen_text(transport) and rc == 0 and recv_len == 9:
+        passed += 1
+        if VERBOSE:
+            print("  PASS an honest short message is still accepted and "
+                  "displayed (A=0, msg_recv_len=9)")
+    else:
+        failed += 1
+        print(f"  FAIL an honest short message was not displayed "
+              f"(A={rc:#04x}, msg_recv_len={recv_len})")
+
+    return passed, failed
+
+
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -887,6 +1145,8 @@ def run_tests(transport, labels, seed):
         ("Type 4 in session", lambda: test_type4_in_session(transport, labels, rng)),
         ("round-trip", lambda: test_round_trip(transport, labels, rng)),
         ("display_payload", lambda: test_display_payload(transport, labels)),
+        ("tunnel text payload bound",
+         lambda: test_tunnel_text_payload_bound(transport, labels)),
     ]
 
     if SLOW:
@@ -965,6 +1225,7 @@ def main():
         "tp_packet", "tp_packet_len", "tp_payload_ptr",
         "tp_payload_len", "tp_send_counter", "tp_recv_counter",
         "tp_peer_recv_idx", "input_buffer",
+        "msg_port", "msg_recv_ptr", "msg_recv_len", "udp_tunnel_parse",
         "zp_ptr1", "transport_encrypt", "transport_decrypt",
         "transport_init",
     ]

@@ -605,9 +605,18 @@ def test_udp_parse(transport, labels):
     ])
     write_bytes(transport, 0x0340, trampoline)
 
-    def parse_and_read(ip_pkt):
-        """Write IP packet at tp_packet+16, call parse, return A."""
+    def parse_and_read(ip_pkt, payload_len=None):
+        """Write IP packet at tp_packet+16, call parse, return A.
+
+        tp_payload_len is an input to udp_tunnel_parse since issue #97: the
+        inner text is bounded by what the packet actually decrypted to, not
+        only by MSG_TEXT_MAX. The honest case passes nothing and gets
+        tp_payload_len = len(ip_pkt).
+        """
         write_bytes(transport, tp_packet + 16, ip_pkt)
+        write_bytes(transport, labels["tp_payload_len"],
+                    struct.pack('<H', len(ip_pkt) if payload_len is None
+                                      else payload_len))
         jsr(transport, 0x0340)
         return read_bytes(transport, 0x0360, 1)[0]
 
@@ -685,6 +694,34 @@ def test_udp_parse(transport, labels):
     else:
         failed += 1
         print(f"  FAIL valid UDP 30B: A={result:#04x}, len={recv_len2}")
+
+    # Test 6 (issue #97): the inner UDP length header declares more text than
+    # the packet decrypted to. Those bytes were never received — printing
+    # them discloses the previous packet's plaintext. The end-to-end proof is
+    # test_session.py's test_tunnel_text_payload_bound; this is the unit form.
+    result = parse_and_read(ip_pkt2, payload_len=len(ip_pkt2) - 10)
+    recv_len3 = int.from_bytes(read_bytes(transport, msg_recv_len_addr, 2),
+                               'little')
+    if result == 0xFF or recv_len3 <= 20:
+        passed += 1
+        if VERBOSE:
+            print(f"  PASS inflated length header -> A={result:#04x}, "
+                  f"len={recv_len3} (20 text bytes decrypted)")
+    else:
+        failed += 1
+        print(f"  FAIL inflated length header accepted: A={result:#04x}, "
+              f"len={recv_len3}, but only 20 text bytes were decrypted")
+
+    # Test 7 (issue #97): a payload too short to hold an IP+UDP header at all
+    # must be rejected, not read as though it held text.
+    result = parse_and_read(ip_pkt2, payload_len=20)
+    if result == 0xFF:
+        passed += 1
+        if VERBOSE:
+            print("  PASS 20-byte payload (no room for a UDP header) -> A=$FF")
+    else:
+        failed += 1
+        print(f"  FAIL 20-byte payload accepted: A={result:#04x}")
 
     return passed, failed
 
