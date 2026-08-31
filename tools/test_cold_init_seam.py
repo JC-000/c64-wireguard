@@ -190,6 +190,27 @@ def _guarded_by_presence_test(node: ast.AST, parents: dict) -> bool:
     return False
 
 
+# Keyword spellings of the address argument, for calls written as
+# jsr(transport, addr=labels["x"]). The harness names it `addr`.
+ADDR_KEYWORDS = ("addr", "address")
+
+
+def _exec_func_names(tree: ast.AST) -> dict[str, int]:
+    """EXEC_FUNCS plus any local alias an import gave them.
+
+    `from c64_test_harness import jsr as run_sub` then `run_sub(t, a)` is the
+    same call with a different spelling; a name-only table would miss it and
+    report green.
+    """
+    names = dict(EXEC_FUNCS)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                if alias.name in EXEC_FUNCS and alias.asname:
+                    names[alias.asname] = EXEC_FUNCS[alias.name]
+    return names
+
+
 def find_exec_sites(source: str) -> list[tuple[int, str, str, bool]]:
     """Return (lineno, func_name, label_name, presence_guarded) per call that
     executes a label-derived address."""
@@ -200,18 +221,28 @@ def find_exec_sites(source: str) -> list[tuple[int, str, str, bool]]:
             parents[child] = node
 
     aliases = _collect_aliases(tree)
+    exec_funcs = _exec_func_names(tree)
     sites: list[tuple[int, str, str, bool]] = []
 
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         fname = getattr(node.func, "id", getattr(node.func, "attr", None))
-        if fname not in EXEC_FUNCS:
+        if fname not in exec_funcs:
             continue
-        idx = EXEC_FUNCS[fname]
-        if len(node.args) <= idx:
+        idx = exec_funcs[fname]
+
+        arg = None
+        if len(node.args) > idx:
+            arg = node.args[idx]
+        else:
+            for kw in node.keywords:
+                if kw.arg in ADDR_KEYWORDS:
+                    arg = kw.value
+                    break
+        if arg is None:
             continue
-        arg = node.args[idx]
+
         name = _label_name_from_node(arg)
         if name is None and isinstance(arg, ast.Name):
             name = aliases.get(arg.id)
@@ -283,6 +314,18 @@ def main(transport, labels):
     jsr(transport, labels["{sym}"], timeout=60.0)
 """
 
+MUTANT_KEYWORD_TMPL = """
+def main(transport, labels):
+    jsr(transport, addr=labels["{sym}"], timeout=180.0)
+"""
+
+MUTANT_IMPORT_ALIAS_TMPL = """
+from c64_test_harness import jsr as run_sub
+
+def main(transport, labels):
+    run_sub(transport, labels["{sym}"], timeout=180.0)
+"""
+
 
 def _pick_symbols(lo: int, hi: int, labels: dict[str, int]):
     """One symbol inside the span and one outside, chosen from this link.
@@ -341,6 +384,16 @@ def self_test(lo: int, hi: int, labels: dict[str, int]) -> None:
     v = violations_in(MUTANT_ALIASED_TMPL.format(sym=in_sym), lo, hi, labels)
     check("mutant: jsr through a local alias is flagged", len(v) == 1,
           "addr = labels[...] then jsr(t, addr) must not slip past")
+
+    v = violations_in(MUTANT_KEYWORD_TMPL.format(sym=in_sym), lo, hi, labels)
+    check("mutant: jsr with a keyword addr= is flagged", len(v) == 1,
+          "the address argument can be passed by name")
+
+    v = violations_in(MUTANT_IMPORT_ALIAS_TMPL.format(sym=in_sym), lo, hi,
+                      labels)
+    check("mutant: jsr imported under an alias is flagged", len(v) == 1,
+          "`from c64_test_harness import jsr as run_sub` is the same call "
+          "with a different spelling; a name-only table reports green")
 
     v = violations_in(CONTROL_READ_TMPL.format(sym=in_sym), lo, hi, labels)
     check("control: reading an address in the span is NOT flagged",
