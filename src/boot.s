@@ -80,8 +80,13 @@
 ; Published by `define = yes` on LIB_X25519_INIT_CODE in both cfgs. The
 ; zero-fill after the table build below is what turns that span from code
 ; into APP_BSS; see the comment there and issue #103.
+; Only defined when the x25519 archive is in the link — under
+; USE_X25519_SIBLING=0 the segment is empty, ld65 defines nothing for it,
+; and there is no cold code to reclaim in the first place.
+.ifdef USE_X25519_SIBLING
         .import __LIB_X25519_INIT_CODE_LOAD__
         .import __LIB_X25519_INIT_CODE_SIZE__
+.endif
 
 ; (net_init, net_dhcp_acquire, net_poll, net_udp_listen, net_print_ip come via
 ;  net_abi.inc; sqtab_init, reu_mul_init come via crypto_abi.inc.)
@@ -174,6 +179,7 @@ start:
         jsr     reu_mul_init
 .endif
 
+.ifdef USE_X25519_SIBLING
         ; --- Reclaim LIB_X25519_INIT_CODE as APP_BSS (issue #103) ------------
         ;
         ; THIS IS THE LAST INSTANT THE COLD INIT CODE EXISTS. The two calls
@@ -233,6 +239,7 @@ start:
         sta     (zp_ptr1),y
         bne     @cold_tail_byte
 @cold_done:
+.endif
 
         jsr     vic_boost_end
 

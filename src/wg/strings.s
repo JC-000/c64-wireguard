@@ -119,14 +119,13 @@ keepalive_msg:
 ; =============================================================================
 ; APP_EXTRA (MAIN_AREA_HI) — space, not structure
 ;
-; APP_DATA shares MAIN_AREA_LO with APP_CODE, and the two together have 25
-; bytes of slack before LIB_CHACHA20_POLY1305_CODE's align=$100 boundary at
-; $4B00. Crossing it costs a full 256 bytes, which the area's remaining tail
-; (177 B under UCI, 214 B under ip65) cannot absorb — the link then fails on
-; the §6.7 image-overrun assert in contract_asserts.s rather than quietly
-; running MAIN_AREA_LO into the sqtab window. This one string is over that
-; budget, so it goes where session_stage_dest and the #84 handshake deadline
-; went.
+; This string was over the MAIN_AREA_LO budget when it was added, so it went
+; where session_stage_dest and the #84 handshake deadline went. As of issue
+; #103 APP_DATA itself lives in MAIN_AREA_HI, so the distinction between this
+; block and the APP_DATA block above is now historical rather than a
+; placement decision — both land in the same area. Leaving it split costs
+; nothing and rewriting it would churn a file full of load-bearing string
+; offsets for no gain.
 ; =============================================================================
 .segment "APP_EXTRA"
 

@@ -112,11 +112,12 @@ SESSION_ACTIVE  = 2
 ;
 ; Clobbers: A, X
 ; =============================================================================
-; Placed in APP_EXTRA (MAIN_AREA_HI), not APP_CODE: MAIN_AREA_LO had 42
-; bytes less headroom than this routine needs, and the §6.7 image-overrun
-; assert in contract_asserts.s caught it at link time rather than letting
-; the image run into the sqtab window. MAIN_AREA_HI has ~1.9 KB free and
-; already carries code (LIB_X25519_INIT_CODE).
+; Placed in APP_EXTRA (MAIN_AREA_HI), not APP_CODE. It was moved here when
+; MAIN_AREA_LO could not hold it; the §6.7 image-overrun assert in
+; contract_asserts.s is what caught that, and is what would catch it again.
+; Nothing about this routine needs to be low — it copies six bytes between
+; two absolute addresses. No headroom figures: see the note in
+; src/crypto/entropy.s for why this repo stopped writing them down.
 .segment "APP_EXTRA"
 
 session_stage_dest:
@@ -434,10 +435,11 @@ session_handle_packet:
 ; Clobbers: A, X, Y (net_udp_close uses all three)
 ; =============================================================================
 ; Placed in APP_EXTRA (MAIN_AREA_HI), not APP_CODE, for the same reason
-; session_stage_dest above is: MAIN_AREA_LO has 25 bytes of slack before
-; LIB_CHACHA20_POLY1305_CODE's align=$100 boundary and cannot afford to cross
-; it, and #84 needs that budget for its two new call sites. Moving the callee
-; out buys more than trimming the callers would.
+; session_stage_dest above is. The constraint in MAIN_AREA_LO is
+; LIB_CHACHA20_POLY1305_CODE's align = $100 pin: APP_CODE growth that
+; crosses it moves every later segment up a whole page, which the area's
+; tail may not be able to absorb. Whether it can is a per-build fact the
+; linker reports; it is not written down here.
 .segment "APP_EXTRA"
 
 ; =============================================================================
@@ -583,11 +585,10 @@ display_payload:
         jsr chrout
         rts
 
-; MAIN_AREA_LO is full (§6.7 image-overrun assert fires 42 bytes over once
-; the 16-bit length paths are in), so the two new routines that widened the
-; message path — this one and udp_tunnel_parse in ip_build.s — live in
-; APP_EXTRA (MAIN_AREA_HI) beside session_stage_dest. Same precedent, same
-; reason.
+; The two routines that widened the message path — this one and
+; udp_tunnel_parse in ip_build.s — live in APP_EXTRA (MAIN_AREA_HI) beside
+; session_stage_dest, because MAIN_AREA_LO could not hold them when they
+; were written. Same precedent, same reason.
 .segment "APP_EXTRA"
 
 ; =============================================================================

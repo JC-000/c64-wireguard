@@ -259,15 +259,17 @@ WG_REU_BANKS_USED = $00
 ; than a comment stating the boundary — the defect class issue #103 exists to
 ; stop (cf. the "~1.9 KB free" comment this change deletes).
 ;
-; LIB_X25519_INIT_CODE is the last file-emitting segment in MAIN_AREA_HI, so
-; its LOAD address is exactly "one past the end of live file content". That
-; makes the first assert the whole safety property: nothing live reaches into
-; the span boot.s zeroes.
+; APP_DATA is the last LIVE file-emitting segment in MAIN_AREA_HI in every
+; configuration — including USE_X25519_SIBLING=0, where the archive is not
+; linked at all and LIB_X25519_INIT_CODE does not exist. So the boundary
+; check is anchored on APP_DATA's end, not on the cold segment's load
+; address: keying it to the cold segment would make the one safety property
+; here evaporate in exactly the build that has no cold segment to reclaim.
 .import __MAIN_AREA_HI_START__, __MAIN_AREA_HI_SIZE__
 .import __APP_BSS_OVERLAY_START__, __APP_BSS_OVERLAY_SIZE__
-.import __LIB_X25519_INIT_CODE_LOAD__, __LIB_X25519_INIT_CODE_SIZE__
+.import __APP_DATA_LOAD__, __APP_DATA_SIZE__
 
-.assert __APP_BSS_OVERLAY_START__ >= __LIB_X25519_INIT_CODE_LOAD__, lderror, "live MAIN_AREA_HI file content (APP_EXTRA/APP_DATA) has grown past the APP_BSS_OVERLAY boundary — APP_BSS is laid over it and boot.s's cold-segment zero-fill would erase it at boot; raise APP_BSS_OVERLAY's start in cfg/c64-wireguard-*.cfg (which costs APP_BSS the same number of bytes) or move data back to MAIN_AREA_LO"
+.assert __APP_DATA_LOAD__ + __APP_DATA_SIZE__ <= __APP_BSS_OVERLAY_START__, lderror, "live MAIN_AREA_HI file content (APP_EXTRA/APP_DATA) has grown past the APP_BSS_OVERLAY boundary — APP_BSS is laid over that RAM and boot.s's cold-segment zero-fill would erase part of it at boot; raise APP_BSS_OVERLAY's start in cfg/c64-wireguard-*.cfg (which costs APP_BSS the same number of bytes) or move data back to MAIN_AREA_LO"
 
 ; The overlay must be a SUBSET of MAIN_AREA_HI and must end with it. A gap at
 ; the top would strand RAM no region owns; an overlay extending past $9FFF
@@ -276,10 +278,19 @@ WG_REU_BANKS_USED = $00
 .assert __APP_BSS_OVERLAY_START__ >= __MAIN_AREA_HI_START__, lderror, "APP_BSS_OVERLAY starts below MAIN_AREA_HI — it is meant to overlay the top of that region, not extend it downward into the sqtab window"
 .assert __APP_BSS_OVERLAY_START__ + __APP_BSS_OVERLAY_SIZE__ = __MAIN_AREA_HI_START__ + __MAIN_AREA_HI_SIZE__, lderror, "APP_BSS_OVERLAY and MAIN_AREA_HI no longer end together — either APP_BSS runs past $9FFF into the ip65 blob's BSS, or the top of MAIN_AREA_HI is stranded with no segment able to use it"
 
-; The cold span boot.s zeroes must lie inside the overlay. If it did not, the
-; zero-fill would be writing over whatever else happened to be at those
-; addresses, and the reclaim would not actually be giving APP_BSS anything.
+; The rest only exists when the x25519 archive is in the link. Under
+; USE_X25519_SIBLING=0 the segment is `optional = yes` and empty, so
+; ld65 defines none of its symbols and importing them is an unresolved
+; external, not a satisfied assert.
+.ifdef USE_X25519_SIBLING
+.import __LIB_X25519_INIT_CODE_LOAD__, __LIB_X25519_INIT_CODE_SIZE__
+
+; The cold segment must sit after every live byte (it is what boot.s erases)
+; and must not run past the overlay (or the zero-fill would be writing over
+; addresses the overlay does not reclaim).
+.assert __LIB_X25519_INIT_CODE_LOAD__ >= __APP_DATA_LOAD__ + __APP_DATA_SIZE__, lderror, "LIB_X25519_INIT_CODE is no longer the last file-emitting segment in MAIN_AREA_HI — live data now sits inside the span boot.s zeroes at the end of the table build"
 .assert __LIB_X25519_INIT_CODE_LOAD__ + __LIB_X25519_INIT_CODE_SIZE__ <= __APP_BSS_OVERLAY_START__ + __APP_BSS_OVERLAY_SIZE__, lderror, "LIB_X25519_INIT_CODE runs past the end of APP_BSS_OVERLAY — boot.s would zero bytes outside the region the overlay reclaims"
+.endif
 
 ; --- §13.8 network-backend capability fit (SPEC v0.12.0 §13.3 / §13.8) -------
 ;
