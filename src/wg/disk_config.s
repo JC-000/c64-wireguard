@@ -1,7 +1,9 @@
 ; =============================================================================
 ; wg/disk_config.s - SEQ file configuration reader (ca65)
 ;
-; ca65 port of src/disk_config.asm. No logic changes; syntax translation only.
+; ca65 port of src/disk_config.asm. Was a syntax-only translation until #88,
+; which made hex_digit case-insensitive and made a non-hex character a
+; reported error rather than a silent conversion.
 ;
 ; Reads WireGuard configuration from "WG.CFG" on disk using KERNAL I/O.
 ; BASIC ROM is banked out; KERNAL ROM is available.
@@ -16,6 +18,11 @@
 ;   Line 7: ping target IP (dotted decimal)
 ;   Line 8: preshared key (64 hex chars) - optional, zeros if omitted
 ;   Line 9: Unix timestamp (decimal, up to 10 digits) - optional, zeros if omitted
+;
+; Hex fields accept '0'-'9', 'A'-'F' and 'a'-'f' interchangeably; any other
+; character aborts the read with C=1, which boot.s reports as CONFIG ERROR.
+; (The decimal fields on lines 4-7 and 9 still convert whatever they are
+; given -- they are not part of #88.)
 ;
 ; Interface:
 ;   config_read_file  - read and parse entire config file
@@ -69,47 +76,53 @@ config_read_file:
 
         ; OPEN
         jsr open
-        bcc @open_ok
-        jmp @fail
-@open_ok:
+        bcs @fail
 
         ; CHKIN: set input channel to logical file 2
         ldx #2
         jsr chkin
-        bcc @chkin_ok
-        jmp @close_fail
-@chkin_ok:
+        bcs @close_fail
 
         ; --- Line 1: static private key (32 bytes from 64 hex chars) ---
         lda #<cfg_static_priv
-        sta zp_ptr2
-        lda #>cfg_static_priv
-        sta zp_ptr2+1
-        lda #32
-        sta zp_tmp1
-        jsr hex_to_bytes
-        jsr chrin               ; consume CR terminator
+        ldy #>cfg_static_priv
+        jsr read_key_line
+        bcs @close_fail
 
         ; --- Line 2: static public key ---
         lda #<cfg_static_pub
-        sta zp_ptr2
-        lda #>cfg_static_pub
-        sta zp_ptr2+1
-        lda #32
-        sta zp_tmp1
-        jsr hex_to_bytes
-        jsr chrin               ; consume CR
+        ldy #>cfg_static_pub
+        jsr read_key_line
+        bcs @close_fail
 
         ; --- Line 3: peer public key ---
         lda #<cfg_peer_pub
-        sta zp_ptr2
-        lda #>cfg_peer_pub
-        sta zp_ptr2+1
-        lda #32
-        sta zp_tmp1
-        jsr hex_to_bytes
-        jsr chrin               ; consume CR
+        ldy #>cfg_peer_pub
+        jsr read_key_line
+        bcs @close_fail
 
+        jmp @lines_4_to_7
+
+        ; --- Failure epilogue, parked mid-routine ---------------------------
+        ; It sits here, not after the success path, so that every key line
+        ; (including the optional PSK, ~70 bytes below) reaches it with a
+        ; 2-byte `bcs`. Four `bcc @next / jmp @close_fail` pairs instead would
+        ; cost 12 bytes more, and APP_DATA ends 3 bytes short of the align=$100
+        ; boundary at $4B00 that LIB_CHACHA20_POLY1305_CODE sits on: crossing
+        ; it moves every later segment up a page and overruns MAIN_AREA_LO by
+        ; 42 bytes. That budget is why read_key_line exists at all — folding
+        ; the four copies of the key-line preamble into one helper paid for
+        ; the validation added here. Measure with `build/wireguard.map` before
+        ; growing anything in this file.
+@close_fail:
+        jsr clrchn
+@fail:
+        lda #2
+        jsr close
+        sec                     ; C=1 failure
+        rts
+
+@lines_4_to_7:
         ; --- Line 4: endpoint IP ---
         lda #<cfg_peer_endpoint_ip
         sta zp_ptr1
@@ -144,13 +157,9 @@ config_read_file:
         bne @skip_psk
 
         lda #<cfg_preshared_key
-        sta zp_ptr2
-        lda #>cfg_preshared_key
-        sta zp_ptr2+1
-        lda #32
-        sta zp_tmp1
-        jsr hex_to_bytes
-        jsr chrin               ; consume CR
+        ldy #>cfg_preshared_key
+        jsr read_key_line
+        bcs @close_fail
         jmp @psk_done
 @skip_psk:
         ldx #31
@@ -184,13 +193,27 @@ config_read_file:
         clc                     ; C=0 success
         rts
 
-@close_fail:
-        jsr clrchn
-@fail:
-        lda #2
-        jsr close
-        sec                     ; C=1 failure
-        rts
+; =============================================================================
+; read_key_line - Read one 64-hex-char key line plus its CR terminator
+;
+; Input:  A = low byte of destination buffer
+;         Y = high byte of destination buffer
+; Output: 32 bytes written; C=0 success, C=1 if any character was not a
+;         hex digit (in which case the buffer holds a partial decode and the
+;         file is left mid-line -- the caller must abandon the read)
+; Clobbers: A, X, Y
+; =============================================================================
+read_key_line:
+        sta zp_ptr2
+        sty zp_ptr2+1
+        lda #32                 ; 32 bytes = 64 hex characters
+        sta zp_tmp1
+        jsr hex_to_bytes
+        bcs @bad
+        jsr chrin               ; consume CR terminator
+        clc                     ; C=0 success
+@bad:
+        rts                     ; C=1 already set by hex_to_bytes
 
 ; =============================================================================
 ; hex_to_bytes - Read hex characters from CHRIN and convert to bytes
@@ -198,6 +221,8 @@ config_read_file:
 ; Input: zp_ptr2 = output buffer pointer
 ;        zp_tmp1 = number of bytes to read (each byte = 2 hex chars)
 ; Output: buffer filled with decoded bytes
+;         C=0 success, C=1 if any character was not a hex digit (the buffer
+;         then holds a partial decode; the caller must abandon the read)
 ; Clobbers: A, X, Y
 ; =============================================================================
 hex_to_bytes:
@@ -205,7 +230,8 @@ hex_to_bytes:
 @loop:
         ; Read high nibble
         jsr chrin
-        jsr hex_digit          ; A = high nibble value
+        jsr hex_digit           ; A = high nibble value
+        bcs @not_hex
         asl
         asl
         asl
@@ -214,23 +240,67 @@ hex_to_bytes:
 
         ; Read low nibble
         jsr chrin
-        jsr hex_digit          ; A = low nibble value
+        jsr hex_digit           ; A = low nibble value
+        bcs @not_hex
         ora zp_tmp2             ; combine high | low
 
         sta (zp_ptr2),y
         iny
         dec zp_tmp1
         bne @loop
-        rts
+        clc                     ; C=0 success
+@not_hex:
+        rts                     ; on the error path C=1 is already set
 
-; Convert ASCII/PETSCII hex digit in A to 0-15
+; =============================================================================
+; hex_digit - Convert one ASCII hex digit in A to its value 0-15
+;
+; Accepts '0'-'9', 'A'-'F' and 'a'-'f'. Everything else is REPORTED, not
+; converted: C=1 on return and A is undefined.
+;
+; Output: C=0 and A = 0..15, or C=1 for a non-hex character
+; Clobbers: A
+; Preserves: X, Y  (relied on by hex_to_bytes' output index in Y)
+;
+; Issue #88. This used to be `sbc #$30 / cmp #10 / bcc done / sbc #$07`, which
+; decodes uppercase only -- the $07 adjustment is calibrated for 'A'-'F'
+; ($41-$30-$07 = $0A). Lowercase 'a' is $61, so $61-$30 = $31 and $31-$07 =
+; $2A: bit 5 survives, and every byte whose LOW nibble is a-f came out wrong.
+; "ca" decoded to $EA rather than $CA. Nothing validated the result, so the
+; only symptom was a handshake that never completed -- indistinguishable from
+; a genuine protocol defect. Lowercase is what `bytes.hex()`, `xxd -p`,
+; `openssl` and `wg pubkey | base64 -d | xxd -p` all emit, and README asked
+; only for "64 hex chars", so lowercase is the likely file, not the odd one.
+;
+; The fold is `and #$df` applied AFTER the '0' subtraction, which is exact
+; rather than approximate: for X = c - $30, X & $DF lands in $11..$16 if and
+; only if X is $11..$16 or $31..$36, i.e. c is 'A'-'F' or 'a'-'f'. No other
+; character folds into range, so accepting lowercase costs nothing in
+; strictness. `and` leaves C alone, so the carry `cmp #10` set is still live
+; for the `sbc` below.
+;
+; Deliberately NOT accepted: shifted-PETSCII letters ($C1-$C6, what a file
+; typed on the C64 in lower/uppercase display mode contains). They now raise
+; CONFIG ERROR instead of decoding to garbage, which is the point of the
+; carry: a config error the user can see beats key material that is silently
+; wrong. Same for a stray CR/LF from a CRLF-terminated file -- which used to
+; shift the whole remaining parse.
+; =============================================================================
 hex_digit:
         sec
         sbc #$30                ; subtract '0'
+        bcc @not_hex            ; below '0'
         cmp #10
-        bcc @done               ; 0-9 already correct
-        sbc #$07                ; A-F: $41-$30=$11, -$07=$0A
+        bcc @done               ; '0'-'9' already correct, C=0
+        and #$df                ; fold 'a'-'f' onto 'A'-'F' (clears bit 5)
+        sbc #$11                ; C=1 here; 'A'-'F' -> 0-5
+        cmp #6
+        bcs @not_hex            ; anything else in the >= 10 range
+        adc #10                 ; C=0 here; 0-5 -> 10-15, and leaves C=0
 @done:
+        rts
+@not_hex:
+        sec                     ; C=1: not a hex digit
         rts
 
 ; =============================================================================
