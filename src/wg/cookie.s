@@ -160,10 +160,13 @@ hchacha20:
 ;
 ;    (b) hs_mac1_valid != 0 — wireguard-go cookie.go ConsumeReply's
 ;        `if !st.mac2.hasLastMAC1 { return false }`. The AAD below is
-;        hs_packet+116, and until we have sent an initiation that is 16
-;        zero bytes on a freshly loaded PRG (ld65 fills the file gap that
-;        covers APP_BSS), i.e. a constant an attacker who has observed
+;        hs_packet+116, and until we have sent an initiation that is
+;        16 zero bytes -- a constant an attacker who has observed
 ;        NOTHING can encrypt against.
+;        Zero by ld65 region fill where APP_BSS is plain file-backed,
+;        and by boot.s's cold-segment zero-fill where it is overlaid
+;        on LIB_X25519_INIT_CODE (#107) -- assert the observable, not
+;        the mechanism; both have applied to hs_packet in turn.
 ;
 ; 1. Derive cookie_key = BLAKE2s-256("cookie--" || cfg_peer_pub)
 ; 2. HChaCha20(cookie_key, nonce[0..15]) -> subkey

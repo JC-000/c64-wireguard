@@ -173,7 +173,7 @@ class Results:
             for name, secs in timings:
                 print(f"  {name:5s} {secs:8.1f}s")
             if setup is not None:
-                print(f"  {'boot':5s} {setup:8.1f}s  (VICE boot + reu_mul_init)")
+                print(f"  {'boot':5s} {setup:8.1f}s  (VICE launch + boot_ready)")
             print(f"  {'TOTAL':5s} {sum(t for _, t in timings):8.1f}s (groups)")
             print(f"{'='*72}")
         print(f"{len(self.rows) - len(bad)}/{len(self.rows)} expectations met")
@@ -231,12 +231,31 @@ def deliver(transport, labels, pkt, state, timeout=120.0):
 # ---------------------------------------------------------------------------
 
 def t1_post_load_window(transport, labels, res):
-    """hs_packet is declared bss, but the PRG spans the file gap that covers
-    APP_BSS and ld65 fills it, so at load hs_packet+116 (the cookie-reply AAD)
-    and hs_sender_idx are sixteen and four ZERO bytes — values an attacker who
-    has observed nothing at all can encrypt against.  Guard (b) is the only
-    thing standing in that window, because guard (a) compares against an index
-    that is itself the well-known zero.
+    """hs_packet is declared bss, yet at the moment the program starts running
+    hs_packet+116 (the cookie-reply AAD) and hs_sender_idx are sixteen and four
+    ZERO bytes — values an attacker who has observed nothing at all can encrypt
+    against.  Guard (b) is the only thing standing in that window, because
+    guard (a) compares against an index that is itself the well-known zero.
+
+    ASSERT THE OBSERVABLE, NOT THE MECHANISM — there are two, and which one
+    applies to hs_packet depends on where APP_BSS lands:
+
+      * ld65's region fill, for the part of APP_BSS that is plain file-backed
+        (the PRG spans the gap and fill = yes stamps it);
+      * boot.s's explicit cold-segment zero-fill, for the part overlaid on
+        LIB_X25519_INIT_CODE once #107 reclaimed it — there the PRG file holds
+        cold init CODE at those addresses, and the loop that runs after the
+        table build is what makes them zero.
+
+    Measured on b4ca1d8 (REU=1), where hs_packet = $8930 sits inside the
+    reclaimed span $87BB-$8AF4: the PRG file byte at $89A4 is $A9, not $00,
+    and the runtime value is still sixteen zeros.  So the mechanism flipped
+    under this test and the finding was unaffected.  T1a asserting the runtime
+    bytes, and T1c re-issuing the SAME zero-AAD packet and requiring the AEAD
+    to accept it, are between them what keep this honest: if the region ever
+    stopped being zero at run time, T1a fails outright and T1c fails too
+    (the AAD would no longer match) rather than T1b going green because the
+    AEAD rejected a forgery the guard was supposed to catch.
 
     This must run FIRST: it is the only test that reads the machine's genuine
     boot state, and its own control then sets hs_mac1_valid.
@@ -767,8 +786,14 @@ def main():
             print("FATAL: boot_ready never set")
             sys.exit(1)
         write_bytes(transport, IDLE_LOOP, bytes([0x4C, 0x39, 0x03]))
-        if "reu_mul_init" in labels:
-            jsr(transport, labels["reu_mul_init"], timeout=180.0)
+        # NO reu_mul_init re-run here. This suite inherited that call from the
+        # pre-#107 tools/test_type2_slow.py pattern, and #107 removed it from
+        # every suite that had it: LIB_X25519_INIT_CODE is now reclaimed as
+        # APP_BSS and zero-filled by boot.s once the tables are built, so
+        # reu_mul_init's address holds $00 (BRK) and calling it wedges the
+        # machine. Measured on b4ca1d8 REU=1 before this line was removed:
+        # a 180 s timeout and no usable session. Nothing here needs it — the
+        # fast group runs no X25519 at all.
         setup = time.monotonic() - t_boot
         print(f"VICE ready ({setup:.1f}s).\n")
 

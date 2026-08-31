@@ -618,10 +618,14 @@ hs_mac1_valid:
                                ; CookieChecker mac2.hasLastMAC1: a cookie
                                ; reply is AEAD-bound to that MAC1 as AAD, so
                                ; before the first initiation the AAD is a
-                               ; value everybody knows. hs_packet is declared
-                               ; bss, but the PRG spans the file gap and ld65
-                               ; fills it, so "uninitialised" means "sixteen
-                               ; zero bytes at load", not "unpredictable".
+                               ; value everybody knows. "Uninitialised" here
+                               ; means "sixteen zero bytes when the program
+                               ; starts", not "unpredictable" -- by ld65's
+                               ; region fill where APP_BSS is plain
+                               ; file-backed, and by boot.s's cold-segment
+                               ; zero-fill where it is overlaid on
+                               ; LIB_X25519_INIT_CODE (#107). Measured both
+                               ; ways; the observable does not change.
                                ; Set once by hs_create_initiation; like
                                ; upstream's flag it is never cleared.
 
