@@ -61,6 +61,14 @@ TESTS = [
     # from can be checked without hardware — and if it breaks, every one of
     # them breaks while this gate stays green. Import-only, milliseconds.
     ("live_seams",     ["tools/test_live_tool_seams.py"]),
+    # Issue #109. Enforcement for the cold-init trap that #107 created and
+    # that has now caught three suites (type2_slow, hs_recovery, issue_94),
+    # every one by copy-paste from a sibling that predated the reclaim.
+    # Source-level and emulator-free, so it fires at edit time rather than
+    # the first time someone runs the suite on a REU build; the runtime
+    # symptom it replaces is an unattributed 180 s TimeoutError. Reads the
+    # span from labels.txt, so the gate must have built first — which it has.
+    ("cold_init_seam", ["tools/test_cold_init_seam.py"]),
     # Issue #103. LIB_X25519_INIT_CODE is now reclaimed as APP_BSS rather
     # than merely documented as reclaimable, which is only safe while the
     # cold init is genuinely dead after boot. This suite is the red/green
