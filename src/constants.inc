@@ -65,11 +65,15 @@ REKEY_COUNTER_B7    = $0F
 ;
 ; Today (UCI, U64E fw 3.15): min(892, 1472) - 32 = 860, SEND-bound. The
 ; receive side already takes 1472, so the only thing that moves this number
-; is the send ceiling: a firmware WRITE_SOCKET_MORE (chunked push, filed as
-; GideonZ/1541ultimate#802) would lift NET_UDP_SEND_MAX to ~1440 and this
-; equate follows it with no edit here. Under ip65 both caps are 1472 and
-; WG_MTU is 1440. Every length on the path is 16-bit (contract §13.3), so
-; nothing else in the tree needs to change when the caps do.
+; is the send ceiling. With UCI_CHUNKED_WRITE=1 (issue #70) the adapter uses
+; the firmware's chunked NET_CMD_WRITE_SOCKET_CHUNK ($16,
+; GideonZ/1541ultimate#807 — a spike firmware, not stock 3.15),
+; NET_UDP_SEND_MAX becomes 1472, WG_DATAGRAM_CAP below follows, and this
+; equate comes out as 1440 with no edit here. Under ip65 both caps are 1472
+; but WG_DATAGRAM_CAP clamps it back to 860. Every length on the path is
+; 16-bit (contract §13.3), so nothing else in the tree changes when the
+; caps do — the ONLY consumer that cares is the host, which must read the
+; built value from build/labels.txt (WG_MTU is exported; tools/c64_caps.py).
 ;
 ; HISTORY. This was 480, documented as a measured "hardware ceiling" of
 ; 512 - 32. The 512 was this project's own Phase 3 MVP read size; having
@@ -93,14 +97,20 @@ WG_DATA_OVERHEAD    = 32        ; 16 B Type-4 header + 16 B Poly1305 tag
 ; WG_DATAGRAM_CAP is THIS CONSUMER's ceiling, independent of the backend
 ; (a consumer MAY clamp below the backend's caps — c64-lib-contract PR #143,
 ; v0.12.1; udp_recv_buf must still hold NET_UDP_RECV_MAX, see §13.8 assert): the
-; largest Type-4 datagram the RAM budget can hold. ip_packet_buf + msg_input_buf
-; + udp_recv_buf must fit MAIN_AREA_HI; at 892 they leave ~137 B (UCI map,
-; 2026-08-27). The ip65 backend advertises 1472/1472 and would otherwise derive
-; a 1440 MTU whose buffers overflow HI by ~1 KB. Raising this — e.g. once the
-; UCI send side reaches 1440 via WRITE_SOCKET_MORE (GideonZ/1541ultimate#802) —
-; means sharing msg_input_buf with ip_packet_buf (build in place), not just
-; editing the number: the §13.8 asserts and the linker will refuse otherwise.
+; largest Type-4 datagram the RAM budget can hold. ip_packet_buf + udp_recv_buf
+; (+ the rest of APP_BSS) must fit MAIN_AREA_HI. The keyboard text is typed in
+; place inside ip_packet_buf (issue #70; there is no msg_input_buf), which is
+; what leaves room for a 1472-byte datagram: with a private text buffer the
+; 1440 MTU overflowed APP_BSS by ~1 KB. The ip65 backend advertises 1472/1472
+; but stays at 892 here (its RR-Net path is unmeasured at 1472, and #80 is
+; open); the UCI backend lifts it to 1472 under UCI_CHUNKED_WRITE (#70, the
+; Makefile refuses that flag for ip65). The §13.8 asserts and the linker
+; refuse a cap the buffers cannot hold.
+.ifdef UCI_CHUNKED_WRITE
+WG_DATAGRAM_CAP     = 1472
+.else
 WG_DATAGRAM_CAP     = 892
+.endif
 ; WG_NET_UDP_MAX = min(NET_UDP_SEND_MAX, NET_UDP_RECV_MAX, WG_DATAGRAM_CAP)
 .if NET_UDP_SEND_MAX < NET_UDP_RECV_MAX
 WG_NET_BACKEND_MAX  = NET_UDP_SEND_MAX

@@ -129,11 +129,83 @@ our side. The 3.14d notes are kept because the other quirks still apply.
   (`IP_REASSEMBLY = 0`, device-wide).
   `NET_UDP_RECV_MAX = 1472` in `src/net/uci/net_caps.inc`.
 - **SOCKET_WRITE: 892 bytes per datagram, and this is what pins the MTU
-  (2026-08-27).** There is no `WRITE_SOCKET_MORE` (GideonZ/1541ultimate#802),
-  so anything larger goes out as two datagrams and the peer drops both. Hence
+  (2026-08-27).** Stock 3.15 has no continuation command, so anything larger
+  goes out as two datagrams and the peer drops both. Hence
   `NET_UDP_SEND_MAX = 892` and `WG_MTU = 892 − 32 = 860` (not 861, which was
-  read-side arithmetic). The host tools take these from the .inc files via
-  `tools/c64_caps.py`; do not hardcode them.
+  read-side arithmetic). The host tools take these from `build/labels.txt`
+  via `tools/c64_caps.py` (the .inc files are only a fallback, and they
+  describe the DEFAULT build); do not hardcode them.
+- **Chunked send, `make BACKEND=uci REU=0 UCI_CHUNKED_WRITE=1` (issue #70,
+  device = the GideonZ/1541ultimate#807 spike firmware ONLY).** Every
+  datagram goes out as `$16` parts of ≤ 888 bytes (`uci_send_part`, present
+  in labels.txt only for this build); the firmware emits one wire datagram of
+  up to 1472, so `NET_UDP_SEND_MAX = 1472`, `WG_MTU = 1440`, peer `MTU =
+  1440`. Build ONCE and run every live tool with `C64_SKIP_BUILD=1` — the
+  live tools rebuild without the flag otherwise; check the PRG fingerprint
+  line. On stock 3.15 the first send fails with `$8E` (`21,UNKNOWN
+  COMMAND`) and the screen prints `SEND FAILED, NET ERR $8E`. After a
+  non-completing part the adapter leaves `uci_resp_count` / `uci_write_resp`
+  / `uci_status_buf` readable over DMA: `uci_resp_count` should read 0 if the
+  spec's "no reply for a non-completing part" holds — that is the one reply
+  semantic the bench did not verify, so read it.
+
+- **Receive-side fix — multi-block `SOCKET_READ` race, ALL builds
+  (`9fa1923`, PR #112, 2026-09-03).** `net_poll`'s continuation path acked a
+  `Data More` reply block and then sampled interface STATE **once** to
+  decide whether another block was coming. On the firmware side the next
+  block is staged by an interrupt, a FreeRTOS queue post, a task switch and
+  a memcpy — a window unrelated to the 6510's clock: ~17 ms of surrounding
+  `uci_fence` hides it at 1 MHz, but at 48 MHz turbo (~340 µs) the sample
+  routinely landed on stale `01` (Command Busy), read as "reply complete",
+  and the adapter delivered only the first 893-byte block while
+  `udp_recv_len` still reported the full (larger) total — a silent
+  truncation, not an error. Fixed by `uci_wait_reply_staged` (TOD-bounded,
+  1 s, `$89` on expiry), which spins on STATE between blocks instead of
+  sampling once. See `UCI_STATE_*` in `src/net/uci/uci_regs.inc` and the
+  `@block_end` comments in `net.s`. Applies to every build, chunked or not.
+
+  Verify on the **default** build:
+
+  ```bash
+  make clean && make BACKEND=uci REU=0
+  C64_SKIP_BUILD=1 ECHO_TURBO_MHZ=48 ECHO_REPLY_LEN=893,894,1452,1472 \
+      U64_ALLOW_MUTATE=1 python3 tools/test_uci_udp_echo_live.py
+  ```
+
+  Expected: all four reply lengths (893, 894, 1452, 1472) received
+  byte-exact at 48 MHz. Before the fix the same four sizes passed 58/60 at
+  48 MHz (60/60 at 1 and 8 MHz) — the two failures were the silent
+  truncation above, not flakiness.
+
+- **Chunked build, bidirectional, at turbo (issue #70, PR #112,
+  2026-09-03, GideonZ/1541ultimate#807 spike firmware ONLY).** With the
+  receive-side fix in place:
+
+  ```bash
+  make clean && make BACKEND=uci REU=0 UCI_CHUNKED_WRITE=1
+  C64_SKIP_BUILD=1 python3 tools/test_wire_encryption_live.py --turbo 48
+  ```
+
+  Run twice against the Python responder **left at WireGuard's own default
+  MTU of 1420** (no per-peer MTU configuration): **60/60 both times**.
+  Outbound text of 828-1412 characters produced datagrams of 888, 889, 891,
+  892, 893, 1452 and 1472 bytes, each exactly one wire datagram; inbound
+  860/861/1420/1440-character messages arrived and displayed correctly. A
+  companion echo sweep on the same build and speed round-tripped every size
+  from 888 to 1472 bytes as one datagram each; 1473 was refused locally
+  (`$8C`) with nothing sent. Net result: WireGuard runs bidirectionally at
+  MTU 1440 with the peer untouched at 1420, because 1420 already fits under
+  the C64's 1440 ceiling.
+
+  Tool knobs used by these two procedures: `ECHO_TURBO_MHZ`,
+  `ECHO_REPLY_LEN`, `ECHO_PAYLOAD_SWEEP` (`tools/test_uci_udp_echo_live.py`);
+  `C64_UCI_CHUNKED_WRITE=1` selects the flag build for tools that build for
+  you; `C64_SKIP_BUILD=1` **always** after a manual flag build — otherwise
+  the live tools rebuild WITHOUT the flag and silently test the wrong PRG,
+  so check the fingerprint line every run; `wg_c64_input.send_message_dma`
+  stages a long outbound message over DMA instead of hand-typing it;
+  `tools/c64_caps.py` reads `build/labels.txt` before falling back to the
+  `.inc` files, so its numbers reflect whichever build actually shipped.
 
   **The red-screen incident (PR #62) was the sentinel, not an over-claim.**
   `net_poll` trusted the response header as a byte count and fed it to an

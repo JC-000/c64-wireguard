@@ -49,6 +49,15 @@
 .assert NET_UDP_SEND_MAX <= UCI_DATA_QUEUE_MAX, error, "net_caps.inc NET_UDP_SEND_MAX exceeds UCI_DATA_QUEUE_MAX: the adapter would fragment a datagram it promised to send whole"
 .assert (WG_MTU + WG_DATA_OVERHEAD) <= NET_UDP_SEND_MAX, error, "WG_MTU + overhead exceeds NET_UDP_SEND_MAX: outbound datagrams would be silently fragmented into multiple UDP packets"
 
+.ifdef UCI_CHUNKED_WRITE
+; Chunked send (issue #70): a $16 part carries at most 895 - 7 bytes. Offering
+; 889+ would be truncated at the command-buffer fencepost with a clean status,
+; the 893-style silent loss all over again — so the cap is pinned here too.
+.assert UCI_CHUNK_PART_MAX <= 888, error, "UCI_CHUNK_PART_MAX above 888: a $16 part would be truncated at the 895-byte command buffer"
+.assert NET_UDP_SEND_MAX <= 1472, error, "NET_UDP_SEND_MAX above 1472: the firmware refuses a larger announced total (82,PARAMETER(S) OUT OF RANGE)"
+.export uci_send_part
+.endif
+
 ; --- net_abi.inc contract ---
 .export net_init
 .export net_dhcp_acquire
@@ -77,6 +86,7 @@
 ; --- primitives from uci_cmd.s ---
 .import uci_abort
 .import uci_wait_idle
+.import uci_wait_reply_staged
 .import uci_tod_start
 .import uci_wait_not_busy
 .import uci_begin_cmd
@@ -303,11 +313,26 @@ net_udp_listen:
 ;     on RESP_DATA and compare it to the requested length; a mismatch is
 ;     UCI_ERR_SHORT_WRITE, a $FFFF (lwip -1) is UCI_ERR_SEND_FAIL.
 ;
+; UCI_CHUNKED_WRITE=1 (issue #70, GideonZ/1541ultimate#807 spike firmware):
+;   - NET_UDP_SEND_MAX is 1472 and EVERY datagram — the 148-byte Type-1
+;     included — goes out as NET_CMD_WRITE_SOCKET_CHUNK ($16) parts of at
+;     most UCI_CHUNK_PART_MAX (888) bytes, one uci_send_part call each.
+;     One code path; and on a firmware without $16 (stock 3.15) the first
+;     send fails loudly with UCI_ERR_CMD_UNKNOWN ($8E) instead of the
+;     tunnel half-working up to 892 bytes.
+;   - The completing part is judged exactly like a SOCKET_WRITE (2-byte
+;     count == total). A non-completing part is judged on the STATUS line
+;     only (absent or "00" = queued); see uci_send_part for how its reply,
+;     which the bench did not characterise, is captured for the host.
+;
 ; Output: C=0 on success, C=1 on failure (net_last_error populated).
 ;   $8C SEND_TOO_LONG  — refused pre-push (nothing on the wire)
 ;   $89 WAIT_TIMEOUT   — a bounded wait expired (state unknown)
-;   $85 SEND_FAIL      — error bit set, or written count $FFFF
+;   $85 SEND_FAIL      — error bit set, written count $FFFF, or (chunked)
+;                        a part refused on the STATUS line (81/82)
 ;   $87 SHORT_WRITE    — no count / count != length (datagram not whole)
+;   $8E CMD_UNKNOWN    — (chunked only) STATUS said `21,UNKNOWN COMMAND`:
+;                        this firmware has no $16, rebuild without the flag
 ; Clobbers: A, X, Y
 ; =============================================================================
 net_udp_send:
@@ -333,7 +358,9 @@ net_udp_send:
 
 @check_fits:
         ; PRE-CHECK (c64-lib-contract#142): REFUSE anything that will not fit
-        ; in ONE SOCKET_WRITE, BEFORE any UCI register is touched.
+        ; in ONE SOCKET_WRITE, BEFORE any UCI register is touched. (Under
+        ; UCI_CHUNKED_WRITE the same compare is against 1472, the largest
+        ; total the firmware's $16 accepts — issue #70.)
         ;
         ; This loop used to chunk, on the belief recorded here that "each
         ; SOCKET_WRITE on a connected UDP socket queues bytes into the same
@@ -382,6 +409,280 @@ net_udp_send:
         sta uci_socket_open
 
 @fits_len:
+.ifdef UCI_CHUNKED_WRITE
+        ; -------------------------------------------------------------------
+        ; CHUNKED SEND (issue #70). Walk the datagram in parts; uci_send_part
+        ; advances uci_chunk_off by the part it pushed and returns C=1 with
+        ; net_last_error set (queues drained and acked) on any failure. The
+        ; loop ends when the offset reaches the total, i.e. after the
+        ; completing part, whose count check is inside uci_send_part.
+        ; -------------------------------------------------------------------
+        lda #$00
+        sta uci_chunk_off+0
+        sta uci_chunk_off+1
+@part_loop:
+        jsr uci_send_part
+        bcs @part_fail
+        lda uci_chunk_off+0
+        cmp uci_send_rem+0
+        bne @part_loop
+        lda uci_chunk_off+1
+        cmp uci_send_rem+1
+        bne @part_loop
+        clc
+        rts
+@part_fail:
+        rts                     ; C=1, net_last_error already named the cause
+
+; =============================================================================
+; uci_send_part — push ONE NET_CMD_WRITE_SOCKET_CHUNK ($16) part of the
+; datagram at net_udp_send_ptr / uci_send_rem, starting at uci_chunk_off.
+;
+; Exported (it lands in labels.txt) so a build can be PROVEN chunked by the
+; label's presence, and so hardware tests can call it directly.
+;
+; Part length = min(total - offset, UCI_CHUNK_PART_MAX). Command layout:
+;   $03 $16 socket_id off_lo off_hi total_lo total_hi <part bytes>
+; The offset is advanced BEFORE the push so the completing-part test after
+; the push is "offset == total".
+;
+; Reply semantics. COMPLETING part: the firmware emits the datagram and
+; answers with the 2-byte total on RESP_DATA — judged exactly as the plain
+; SOCKET_WRITE path judges its count. NON-COMPLETING part: the spec says no
+; RESP_DATA reply, and that is the one thing the #807 bench did not verify,
+; so this routine MEASURES instead of assuming: once CMD_BUSY has cleared,
+; if DATA_AV is already up the first two bytes are captured into
+; uci_write_resp exactly as for a completing part, else uci_resp_count is
+; set to 0 — WITHOUT paying uci_read_resp_bytes' 1 s per-part wait budget.
+; Either way, after any part the host can read uci_resp_count,
+; uci_write_resp and uci_status_buf/uci_status_seen and see what the
+; firmware actually said. The verdict for a non-completing part comes from
+; the STATUS line alone: no line, or a leading "00", means queued; any
+; other code (81 overrun, 82 total out of range, 21 unknown command) is a
+; refusal and the datagram will never leave whole.
+;
+; Output: C=0 part accepted, uci_chunk_off advanced.
+;         C=1 failure, net_last_error set ($85 / $87 / $89 / $8E as
+;         documented at net_udp_send); the transaction has been acked.
+; Clobbers: A, X, Y
+; =============================================================================
+uci_send_part:
+        jsr uci_wait_idle
+        bcc @sp_go              ; wedged before the part went out — bail
+        rts                     ; with C=1 so the caller does not count it as sent
+@sp_go:
+        ; uci_chunk_len = total - offset, clamped to UCI_CHUNK_PART_MAX.
+        lda uci_send_rem+0
+        sec
+        sbc uci_chunk_off+0
+        sta uci_chunk_len+0
+        lda uci_send_rem+1
+        sbc uci_chunk_off+1
+        sta uci_chunk_len+1
+        cmp #>UCI_CHUNK_PART_MAX
+        bcc @sp_len_ok          ; hi < cap_hi -> fits in one part
+        bne @sp_clamp           ; hi > cap_hi -> clamp
+        lda uci_chunk_len+0
+        cmp #<UCI_CHUNK_PART_MAX
+        bcc @sp_len_ok
+        beq @sp_len_ok          ; exactly the cap -> fits
+@sp_clamp:
+        lda #<UCI_CHUNK_PART_MAX
+        sta uci_chunk_len+0
+        lda #>UCI_CHUNK_PART_MAX
+        sta uci_chunk_len+1
+@sp_len_ok:
+        lda #UCI_TARGET_NETWORK
+        jsr uci_begin_cmd
+        lda #UCI_CMD_SOCKET_WRITE_CHUNK
+        jsr uci_put_byte
+        lda uci_socket_id
+        jsr uci_put_byte
+        lda uci_chunk_off+0     ; offset of this part
+        jsr uci_put_byte
+        lda uci_chunk_off+1
+        jsr uci_put_byte
+        lda uci_send_rem+0      ; announced datagram total
+        jsr uci_put_byte
+        lda uci_send_rem+1
+        jsr uci_put_byte
+
+        ; Patch source = buffer + offset into the LDA abs,Y below.
+        lda net_udp_send_ptr+0
+        clc
+        adc uci_chunk_off+0
+        sta @sp_load+1
+        lda net_udp_send_ptr+1
+        adc uci_chunk_off+1
+        sta @sp_load+2
+
+        ; Advance the offset past this part now (the loop below consumes
+        ; uci_chunk_len, and the completing test after the push needs it).
+        lda uci_chunk_off+0
+        clc
+        adc uci_chunk_len+0
+        sta uci_chunk_off+0
+        lda uci_chunk_off+1
+        adc uci_chunk_len+1
+        sta uci_chunk_off+1
+
+        ; Push uci_chunk_len bytes — same 16-bit SMC loop as the plain path.
+        ldy #$00
+@sp_loop:
+        lda uci_chunk_len+0
+        ora uci_chunk_len+1
+        bne :+
+        jmp @sp_push
+:
+@sp_load:
+        lda $ffff,y             ; SMC: source base patched above
+        sta UCI_CMD_DATA
+        uci_fence               ; heavy fence: FIFO overruns at 48 MHz otherwise
+        iny
+        bne @sp_nohi
+        inc @sp_load+2
+@sp_nohi:
+        lda uci_chunk_len+0
+        sec
+        sbc #$01
+        sta uci_chunk_len+0
+        lda uci_chunk_len+1
+        sbc #$00
+        sta uci_chunk_len+1
+        jmp @sp_loop
+
+@sp_push:
+        jsr uci_push_wait
+        bcc :+
+        rts                     ; PUSH never went CMD_BUSY=0 — $89 already set
+:
+        jsr uci_check_err
+        bcc @sp_no_err
+        ; Hardware ERROR bit. Drain and ack first (the accept is mandatory,
+        ; see the plain path), then name the cause from the STATUS line.
+        jsr uci_drain_resp
+        bcc :+
+        rts
+:
+        jsr uci_drain_status
+        bcc :+
+        rts
+:
+        jsr uci_ack
+        lda #UCI_ERR_SEND_FAIL
+        jmp @sp_status_err
+
+@sp_no_err:
+        ; Completing part iff the advanced offset equals the total.
+        lda uci_chunk_off+0
+        cmp uci_send_rem+0
+        bne @sp_more
+        lda uci_chunk_off+1
+        cmp uci_send_rem+1
+        bne @sp_more
+
+        ; COMPLETING PART: read the 2-byte total count (bounded), drain,
+        ; ack, then judge — the same sequence and verdicts as the plain path.
+        lda #$00
+        sta uci_write_resp+0
+        sta uci_write_resp+1
+        lda #<uci_write_resp
+        sta uci_resp_dst
+        lda #>uci_write_resp
+        sta uci_resp_dst+1
+        lda #$02
+        sta uci_resp_max
+        jsr uci_read_resp_bytes
+        jsr uci_drain_resp
+        bcc :+
+        rts
+:
+        jsr uci_drain_status
+        bcc :+
+        rts
+:
+        jsr uci_ack
+        lda uci_resp_count
+        cmp #$02
+        bcc @sp_short           ; no count arrived within the budget
+        lda uci_write_resp+0
+        and uci_write_resp+1
+        cmp #$FF
+        beq @sp_send_fail       ; $FFFF = lwip_send returned -1
+        lda uci_write_resp+0
+        cmp uci_send_rem+0
+        bne @sp_short
+        lda uci_write_resp+1
+        cmp uci_send_rem+1
+        bne @sp_short
+        clc
+        rts
+@sp_short:
+        lda #UCI_ERR_SHORT_WRITE
+        jmp @sp_status_err
+@sp_send_fail:
+        lda #UCI_ERR_SEND_FAIL
+        sta net_last_error
+        sec
+        rts
+
+@sp_more:
+        ; NON-COMPLETING PART — capture whatever reply is already staged
+        ; (see the header), never wait for one.
+        lda #$00
+        sta uci_resp_count
+        sta uci_write_resp+0
+        sta uci_write_resp+1
+        lda UCI_STATUS
+        uci_fence
+        and #UCI_STAT_DATA_AV
+        beq @sp_no_resp
+        lda #<uci_write_resp
+        sta uci_resp_dst
+        lda #>uci_write_resp
+        sta uci_resp_dst+1
+        lda #$02
+        sta uci_resp_max
+        jsr uci_read_resp_bytes
+@sp_no_resp:
+        jsr uci_drain_resp
+        bcc :+
+        rts
+:
+        jsr uci_drain_status
+        bcc :+
+        rts
+:
+        jsr uci_ack
+        lda uci_status_seen
+        cmp #$02
+        bcc @sp_queued          ; no status line: the documented "no reply"
+        jsr uci_status_leading_code
+        beq @sp_queued          ; "00,..." — part queued
+        lda #UCI_ERR_SEND_FAIL  ; 81/82 refusal (21 is renamed below)
+        jmp @sp_status_err
+@sp_queued:
+        clc
+        rts
+
+@sp_status_err:
+        ; A = the generic code for this failure. If the captured STATUS line
+        ; says `21,UNKNOWN COMMAND` the real cause is a firmware without $16,
+        ; which deserves its own name ($8E) so a wrong-firmware build is
+        ; diagnosed from the screen, not from a protocol trace.
+        sta net_last_error
+        lda uci_status_seen
+        cmp #$02
+        bcc @sp_se_done
+        jsr uci_status_leading_code
+        cmp #21
+        bne @sp_se_done
+        lda #UCI_ERR_CMD_UNKNOWN
+        sta net_last_error
+@sp_se_done:
+        sec
+        rts
+.else
         jsr uci_wait_idle
         bcc @bc_go              ; wedged before the datagram went out — bail
         rts                     ; with C=1 so the caller does not count it as sent
@@ -548,6 +849,7 @@ net_udp_send:
         ; exactly the failure mode issue #58 cost days to diagnose.
         sec
         rts
+.endif ; UCI_CHUNKED_WRITE
 
 ; =============================================================================
 ; uci_udp_connect — issue UDP_CONNECT(net_udp_dest_ip, net_udp_dest_port) to pin the
@@ -835,6 +1137,9 @@ net_poll:
 
         lda #UCI_ERR_READ_FAIL
         sta net_last_error
+@poll_fail:
+        ; Shared error exit: net_last_error already holds the code. Also the
+        ; landing for a $89 from uci_wait_reply_staged below.
         jsr uci_drain_resp
         jsr uci_drain_status
         jsr uci_ack
@@ -842,8 +1147,17 @@ net_poll:
         rts
 
 @no_err:
-        ; First 2 bytes of response = actual_len (LE).
-        uci_fence               ; give firmware time to stage response
+        ; uci_push_wait returned on CMD_BUSY clearing, i.e. the firmware's
+        ; HANDSHAKE_ACCEPT_COMMAND. The reply is NOT staged yet: STATE is
+        ; still 01 until copy_result() has memcpy'd up to 895 bytes and
+        ; written VALIDATE_LAST/MORE (command_intf.cc). Sampling DATA_AV in
+        ; that window reads "no data" and abandons a block the firmware then
+        ; presents to nobody. Wait for STATE to leave 01 (bounded, $89).
+        ; Same window as the continuation race fixed at @block_end; this one
+        ; is straight-line firmware code (no task switch) and has not been
+        ; observed, so this is the defensive half of the same fix.
+        jsr uci_wait_reply_staged
+        bcs @poll_fail
         ldy #$00
 @hdr_loop:
         lda UCI_STATUS
@@ -1014,7 +1328,31 @@ net_poll:
         ; outstanding; concatenating the blocks yields exactly the datagram a
         ; single large queue would have delivered.
         ;
-        ; STATE ($30) distinguishes them: $20 = Data Last, $30 = Data More.
+        ; STATE (bits 5..4) says which, and it has FOUR values, not two
+        ; (command_protocol.vhd "Protocol"; UCI_STATE_* in uci_regs.inc):
+        ;
+        ;   $30 Data More    block drained, next one announced -> DATA_ACC,
+        ;                    then back to @byte_loop to drain it
+        ;   $10 Command Busy the firmware is still producing the next block
+        ;                    -> WAIT (bounded) for STATE to change, then back
+        ;                    to @byte_loop; $89 on expiry
+        ;   $20 Data Last    reply ended with bytes outstanding: short reply,
+        ;   $00 Idle         take what we got rather than hang
+        ;
+        ; WHY $10 IS REACHABLE HERE: our DATA_ACC on a Data More block makes
+        ; the FPGA drop STATE to 01 at once (vhdl: `state(1) <= '0'` with
+        ; state(0) still 1) and post CMD_DATA_ACCEPTED to the firmware; the
+        ; next block is then staged by an ISR, a queue post, a FreeRTOS task
+        ; switch and a memcpy (command_intf.cc run_task -> get_more_data ->
+        ; copy_result -> HANDSHAKE_VALIDATE_*). DATA_AV is 0 throughout, so
+        ; @byte_loop lands here with bytes outstanding and STATE == 01. The
+        ; previous code had only a two-way test — "$30, else Data Last" —
+        ; and a wait on CMD_BUSY (bit 0), which is already clear once a
+        ; command has been accepted and never rises for a continuation. At
+        ; 1 MHz ~17 ms of fences hid the window; at 48 MHz it was ~340 us
+        ; and every 1452/1472-byte datagram was truncated to block 1 (893
+        ; bytes) with the header's full length — measured 2026-09-01 on the
+        ; U64E (fw 3.15 + #807 spike, REU=0). Issue #70 / PR #112.
         lda uci_poll_rem+0
         ora uci_poll_rem+1
         beq @done_data          ; nothing outstanding — reply complete
@@ -1022,17 +1360,31 @@ net_poll:
         lda UCI_STATUS
         uci_fence               ; settle before testing STATE
         and #UCI_STAT_STATE
-        cmp #(UCI_STAT_STATE)   ; $30 = Data More
-        bne @done_data          ; Data Last with bytes outstanding: short
-                                ; reply, take what we got rather than hang
+        cmp #UCI_STATE_DATA_MORE
+        beq @block_more
+        cmp #UCI_STATE_BUSY
+        bne @done_data          ; Data Last / Idle with bytes outstanding:
+                                ; short reply, take what we got
 
-        ; Accept this block. Because state(0)=1 this signals the Ultimate to
-        ; produce the next one and moves the machine to Command Busy rather
-        ; than Idle, so we must wait for it to present the next block.
+        ; Command Busy: the continuation is being staged. Bounded wait for
+        ; STATE to leave 01, then resume draining into the SAME buffer
+        ; (Y/SMC intact). The wait clobbers only A.
+        jsr uci_wait_reply_staged
+        bcs @block_wedged
+        jmp @byte_loop
+
+@block_more:
+        ; Accept the drained block. state(0)=1 tells the Ultimate to produce
+        ; the next one; @byte_loop will see DATA_AV clear and come back here
+        ; in Command Busy to wait for it.
         jsr uci_ack
-        jsr uci_wait_not_busy
-        bcs @done_data          ; wedged waiting for the continuation
-        jmp @byte_loop          ; resume into the SAME buffer, Y/SMC intact
+        jmp @byte_loop
+
+@block_wedged:
+        ; $89 already in net_last_error. The datagram is unrecoverable (a
+        ; datagram socket has no "rest of it" to fetch later), so this is an
+        ; error exit, NOT a delivery of the partial buffer.
+        jmp @poll_fail
 
 @done_data:
         jsr uci_drain_resp
@@ -1226,6 +1578,9 @@ uci_socket_open:    .res 1          ; 0 = not yet opened, 1 = connected
 uci_send_rem:       .res 2          ; 16-bit requested length (kept for the count check)
 uci_chunk_len:      .res 2          ; 16-bit push countdown (consumed by the loop)
 uci_write_resp:     .res 2          ; written_lo/hi from SOCKET_WRITE (RESP_DATA)
+.ifdef UCI_CHUNKED_WRITE
+uci_chunk_off:      .res 2          ; offset of the NEXT $16 part (issue #70)
+.endif
 
 ; --- receive state ---
 uci_read_hdr:       .res 2          ; actual_len_lo/hi from SOCKET_READ

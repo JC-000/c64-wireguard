@@ -39,6 +39,7 @@ COMMON_LABELS = (
 UCI_LABELS = (
     "net_last_error",
     "uci_abort", "uci_wait_idle", "uci_wait_not_busy",
+    "uci_wait_reply_staged",
     "uci_push_wait", "uci_read_resp_bytes", "uci_ack",
     "uci_socket_id", "uci_socket_open",
 )
@@ -171,12 +172,134 @@ def test_uci_build_does_not_require_ip65_blob():
             os.rename(backup, IP65_BIN)
 
 
+# ---------------------------------------------------------------------------
+# Issue #70: UCI_CHUNKED_WRITE build flag (1472-byte datagrams via the
+# firmware's chunked SOCKET_WRITE, WG_MTU 1440).
+#
+# Everything below is STRUCTURAL — read from labels.txt — never a byte-grep
+# of the PRG. A textual check on the binary can match ciphertext, a string
+# constant or the previous build's stale file; a label either links or it
+# does not. The equates are visible because src/exports.s promotes them
+# (`.export WG_MTU, NET_UDP_SEND_MAX`); the chunk-path routine is visible
+# because it is a linked label, and only exists inside `.ifdef
+# UCI_CHUNKED_WRITE`. So the same three reads distinguish the two states
+# of the flag, and a build that ignores the flag (a Makefile that never
+# gained the knob) fails on the flag-build check with a message naming the
+# missing label rather than an exception.
+#
+# `make clean` between flag states is not optional: the #76 flag stamp
+# covers CA65FLAGS, but these checks must hold even if the stamp is ever
+# broken, since a stale object from the other flag state is exactly the
+# false green they exist to catch.
+# ---------------------------------------------------------------------------
+
+CHUNK_PATH_LABEL = "uci_send_part"     # only linked under UCI_CHUNKED_WRITE=1
+
+# (WG_MTU, NET_UDP_SEND_MAX) per flag state, from net_caps.inc/constants.inc:
+# default 892 - 32 = 860; chunked 1472 - 32 = 1440.
+EXPECT_DEFAULT = {"WG_MTU": 860, "NET_UDP_SEND_MAX": 892}
+EXPECT_CHUNKED = {"WG_MTU": 1440, "NET_UDP_SEND_MAX": 1472}
+
+
+def _label_values(names):
+    """Return {name: address-or-None} from the current labels.txt."""
+    labels = Labels.from_file(LABELS_PATH)
+    return {n: labels.address(n) for n in names}
+
+
+def _assert_exported_equates(tag, expect):
+    got = _label_values(expect)
+    missing = [n for n, v in got.items() if v is None]
+    assert not missing, (
+        f"[{tag}] equate(s) {missing} not present in labels.txt — "
+        f"src/exports.s must `.export` them (issue #70) so the build's "
+        f"MTU can be checked structurally")
+    wrong = {n: (got[n], expect[n]) for n in expect if got[n] != expect[n]}
+    assert not wrong, (
+        f"[{tag}] exported equates disagree with the flag state: "
+        + ", ".join(f"{n} = {g} (expected {e})" for n, (g, e) in wrong.items()))
+
+
+def test_uci_default_build_has_no_chunk_path():
+    """Default `make BACKEND=uci`: plain 892-byte SOCKET_WRITE, MTU 860,
+    and the chunk-path routine is NOT linked."""
+    _build_backend("uci")
+    _assert_valid_labels()
+    _assert_exported_equates("uci default", EXPECT_DEFAULT)
+    present = _label_values([CHUNK_PATH_LABEL])[CHUNK_PATH_LABEL]
+    assert present is None, (
+        f"[uci default] {CHUNK_PATH_LABEL} is linked at ${present:04X} in a "
+        f"build WITHOUT UCI_CHUNKED_WRITE=1 — the chunk path must live "
+        f"inside `.ifdef UCI_CHUNKED_WRITE`")
+    print(f"[uci default] WG_MTU=860 NET_UDP_SEND_MAX=892, "
+          f"{CHUNK_PATH_LABEL} absent")
+
+
+def test_uci_chunked_write_flag_build():
+    """`make BACKEND=uci UCI_CHUNKED_WRITE=1`: links; WG_MTU 1440,
+    NET_UDP_SEND_MAX 1472; the chunk-path routine IS linked."""
+    clean = _run_make("clean")
+    assert clean.returncode == 0, f"make clean failed:\n{clean.stderr}"
+    try:
+        build = _run_make("BACKEND=uci", "UCI_CHUNKED_WRITE=1")
+        assert build.returncode == 0, (
+            "[uci chunked] make BACKEND=uci UCI_CHUNKED_WRITE=1 failed "
+            f"({build.returncode}) — the flag build does not link:\n"
+            f"STDOUT:\n{build.stdout}\nSTDERR:\n{build.stderr}")
+        _assert_valid_prg()
+        _assert_valid_labels()
+        _check_labels_present("uci")
+        present = _label_values([CHUNK_PATH_LABEL])[CHUNK_PATH_LABEL]
+        assert present is not None, (
+            f"[uci chunked] {CHUNK_PATH_LABEL} not in labels.txt after "
+            f"`make BACKEND=uci UCI_CHUNKED_WRITE=1` — either the Makefile "
+            f"has no UCI_CHUNKED_WRITE knob (flag silently ignored) or the "
+            f"chunk path is not exported under that name")
+        _assert_exported_equates("uci chunked", EXPECT_CHUNKED)
+        print(f"[uci chunked] build OK, WG_MTU=1440 NET_UDP_SEND_MAX=1472, "
+              f"{CHUNK_PATH_LABEL} at ${present:04X}")
+    finally:
+        # Never leave a flag-state tree behind for the next check.
+        _run_make("clean")
+
+
+def test_ip65_rejects_chunked_write_flag():
+    """`make BACKEND=ip65 UCI_CHUNKED_WRITE=1` must refuse: the flag names
+    a UCI firmware command, and ip65 keeps its 892 cap."""
+    _run_make("clean")
+    try:
+        result = _run_make("BACKEND=ip65", "UCI_CHUNKED_WRITE=1")
+        assert result.returncode != 0, (
+            "make BACKEND=ip65 UCI_CHUNKED_WRITE=1 unexpectedly SUCCEEDED — "
+            "the Makefile must $(error ...) on that combination (issue #70)")
+        combined = (result.stderr or "") + (result.stdout or "")
+        assert "UCI_CHUNKED_WRITE" in combined, (
+            "ip65 + UCI_CHUNKED_WRITE=1 failed, but not with a diagnostic "
+            f"naming the flag:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}")
+        for bad in ("Traceback", "Segmentation fault"):
+            assert bad not in combined, (
+                f"make BACKEND=ip65 UCI_CHUNKED_WRITE=1 produced {bad!r}:\n"
+                f"{combined}")
+        print("[ip65+chunked] rejected cleanly with a UCI_CHUNKED_WRITE "
+              "diagnostic")
+    finally:
+        _run_make("clean")
+
+
 def _main():
     checks = [
         ("ip65 build + labels", lambda: _check_backend("ip65")),
         ("uci build + labels", lambda: _check_backend("uci")),
         ("unknown BACKEND rejected cleanly", test_unknown_backend_fails_cleanly),
         ("uci build without ip65 blob", test_uci_build_does_not_require_ip65_blob),
+        # Issue #70 — serial by construction (each rebuilds the tree), and
+        # each `make clean`s on its way out.
+        ("uci default: no chunk path, MTU 860",
+         test_uci_default_build_has_no_chunk_path),
+        ("uci UCI_CHUNKED_WRITE=1: links, MTU 1440, chunk path present",
+         test_uci_chunked_write_flag_build),
+        ("ip65 UCI_CHUNKED_WRITE=1 refused",
+         test_ip65_rejects_chunked_write_flag),
     ]
     failures = []
     for name, fn in checks:

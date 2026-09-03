@@ -95,6 +95,67 @@ def send_message(tr, text: str, timeout: float = 30.0) -> bool:
     return press_key(tr, "\r", timeout)
 
 
+IP_UDP_HDR_LEN = 28     # read_input_line stages text at ip_packet_buf + 28
+DMA_CHUNK = 64          # U64E /v1/machine:writemem 404s above 64 bytes
+
+
+def input_max_from_labels(L) -> int:
+    """MSG_TEXT_MAX of the loaded build, derived structurally.
+
+    ip_packet_buf is `.res WG_MTU` and ip_pkt_len is declared right after
+    it (src/wg/data.s), so their distance is WG_MTU whatever the build
+    flags were; the text area is what remains after the 28 header bytes.
+    Falls back to C64_INPUT_MAX when the labels are not there.
+    """
+    try:
+        return L["ip_pkt_len"] - L["ip_packet_buf"] - IP_UDP_HDR_LEN
+    except (KeyError, TypeError):
+        return C64_INPUT_MAX
+
+
+def send_message_dma(tr, text: str, L, timeout: float = 30.0) -> bool:
+    """Send *text* down the tunnel by DMA-ing it into the input line.
+
+    The keyboard path (send_message) types ten characters per KERNAL
+    queue and waits for each to drain, which is fine for a sentence and
+    hopeless for the 1412-character messages the 1472-byte datagram needs
+    (issue #70). This does what read_input_line would have done with the
+    keystrokes, without the keystrokes:
+
+      1. press M — do_message_input prints the prompt and enters
+         read_input_line, which zeroes msg_input_len and blocks in GETIN;
+      2. wait for the queue to drain and the prompt to print;
+      3. DMA the text to ip_packet_buf + 28, where read_input_line stores
+         it (issue #70 dropped msg_input_buf: the line is built in place);
+      4. DMA msg_input_len, the 16-bit count read_input_line hands back;
+      5. press RETURN — read_input_line returns, and do_message_input runs
+         udp_tunnel_build + transport_send on what we staged.
+
+    Nothing else touches ip_packet_buf while the C64 is parked in
+    read_input_line, so the staging cannot race the main loop. The order
+    of 3 and 4 matters only for a human watching: RETURN is the commit.
+
+    *L* is the labels mapping (needs ip_packet_buf, ip_pkt_len and
+    msg_input_len). Raises ValueError rather than truncating an over-long
+    text: a size test that silently shrank would prove the wrong thing.
+    """
+    payload = text.upper().encode("ascii", errors="replace")
+    limit = input_max_from_labels(L)
+    if len(payload) > limit:
+        raise ValueError(f"{len(payload)} chars exceeds this build's "
+                         f"MSG_TEXT_MAX of {limit}")
+    if not press_key(tr, "M", timeout):
+        return False
+    if not _wait_drained(tr, timeout):
+        return False
+    time.sleep(0.3)                     # let the prompt print
+    base = L["ip_packet_buf"] + IP_UDP_HDR_LEN
+    for i in range(0, len(payload), DMA_CHUNK):
+        tr.write_memory(base + i, payload[i:i + DMA_CHUNK])
+    tr.write_memory(L["msg_input_len"], len(payload).to_bytes(2, "little"))
+    return press_key(tr, "\r", timeout)
+
+
 def wait_for_state(tr, wg_state_addr: int, want: int,
                    timeout: float, poll: float = 1.0) -> bool:
     """Poll wg_state until it equals *want*."""

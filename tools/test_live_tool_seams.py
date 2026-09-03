@@ -180,6 +180,80 @@ def main() -> int:
         except Exception as exc:                              # noqa: BLE001
             check(f"{mod_name} imports and builds its hook", False, repr(exc))
 
+    print("\n=== size tables (#70) ===")
+    # A size above the build's MSG_TEXT_MAX must be SKIPPED, never failed:
+    # the default build (832) is not making the 1472-byte claim, and its
+    # 9/9 must not become 9/12 because the flag build's sizes are listed.
+    try:
+        import test_wire_encryption_live as wire
+        run, skipped = wire.partition_outbound_sizes(832)
+        check("default build (MSG_TEXT_MAX=832) skips the sizes above it",
+              skipped == (833, 1392, 1412) and 833 not in run,
+              f"run={run} skipped={skipped}")
+        check("default build still runs the sizes at and below 832",
+              run == (828, 829, 831, 832), f"run={run}")
+        run, skipped = wire.partition_outbound_sizes(1412)
+        check("chunked build (MSG_TEXT_MAX=1412) skips nothing",
+              skipped == () and run == wire.OUTBOUND_TEXT_SIZES,
+              f"run={run} skipped={skipped}")
+    except Exception as exc:                                  # noqa: BLE001
+        check("test_wire_encryption_live exposes partition_outbound_sizes",
+              False, repr(exc))
+
+    print("\n=== payload/message randomisation (standing directive, 2026-09-03) ===")
+    # Red/green tests that send data across the wire must randomise their
+    # initial words/payload per run, seeded and reproducible via
+    # --seed/TEST_SEED, with disjoint alphabets per direction so an echo
+    # cannot satisfy a reply check. This is a static check of the
+    # generators themselves — same seed -> identical, two seeds -> almost
+    # certainly different, and the two alphabets never overlap — with no
+    # hardware involved.
+    try:
+        import test_wire_encryption_live as wire
+        w1 = wire.random_words(12345, wire.REQUEST_ALPHABET)
+        w2 = wire.random_words(12345, wire.REQUEST_ALPHABET)
+        w3 = wire.random_words(67890, wire.REQUEST_ALPHABET)
+        check("wire tool: same seed -> identical leading words",
+              w1 == w2, f"{w1!r} != {w2!r}")
+        check("wire tool: two different seeds -> different leading words",
+              w1 != w3, f"both produced {w1!r}")
+        check("wire tool: request/reply alphabets are disjoint",
+              not (set(wire.REQUEST_ALPHABET) & set(wire.REPLY_ALPHABET)),
+              f"REQUEST={wire.REQUEST_ALPHABET!r} REPLY={wire.REPLY_ALPHABET!r}")
+        t1 = wire._sized_text("OUT", 888, 12345, wire.REQUEST_ALPHABET)
+        t2 = wire._sized_text("OUT", 888, 12345, wire.REQUEST_ALPHABET)
+        t3 = wire._sized_text("OUT", 888, 67890, wire.REQUEST_ALPHABET)
+        check("wire tool: same seed -> identical sized-probe text",
+              t1 == t2, f"{t1!r} != {t2!r}")
+        check("wire tool: two different seeds -> different sized-probe text",
+              t1 != t3, f"both produced {t1!r}")
+    except Exception as exc:                                  # noqa: BLE001
+        check("test_wire_encryption_live exposes the randomisation API",
+              False, repr(exc))
+
+    try:
+        import test_uci_udp_echo_live as echo
+        p1 = echo._payload(64, 12345)
+        p2 = echo._payload(64, 12345)
+        p3 = echo._payload(64, 67890)
+        check("echo tool: same seed -> identical payload bytes",
+              p1 == p2, f"{p1.hex()} != {p2.hex()}")
+        check("echo tool: two different seeds -> different payload bytes",
+              p1 != p3, f"both produced {p1.hex()}")
+        r1 = echo._reply(64, 12345)
+        check("echo tool: request/reply byte alphabets are disjoint",
+              not (set(echo.REQUEST_BYTE_ALPHABET)
+                   & set(echo.REPLY_BYTE_ALPHABET)),
+              f"REQUEST={echo.REQUEST_BYTE_ALPHABET!r} "
+              f"REPLY={echo.REPLY_BYTE_ALPHABET!r}")
+        check("echo tool: a reply never satisfies the request alphabet "
+              "(no byte overlap in these samples)",
+              not (set(p1) & set(r1)) if p1 and r1 else True,
+              f"payload={p1.hex()} reply={r1.hex()}")
+    except Exception as exc:                                  # noqa: BLE001
+        check("test_uci_udp_echo_live exposes the randomisation API",
+              False, repr(exc))
+
     total = passed + failed
     print(f"\nResults: {passed}/{total} passed, {failed} failed")
     return 0 if failed == 0 else 1

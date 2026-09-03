@@ -218,7 +218,6 @@
 
 ; --- Messaging ---
 .export msg_port
-.export msg_input_buf
 .export msg_input_len
 .export msg_recv_ptr
 .export msg_recv_len
@@ -335,8 +334,26 @@ ip_hdr_template:
 ; --- Messaging default UDP port ($270f = 9999, big-endian in memory) ---
 ; Initialised here because callers (ip_build) read msg_port directly without
 ; a runtime setup hook. ACME data.asm initialised it with !word $270f.
+;
+; NOTE (test/warp-interop, issue #87 spike): the "big-endian in memory"
+; claim above does not hold for `.word` — ca65 emits `.word $270f` as
+; bytes $0f,$27 (low,high), while ip_build.s's src/dst-port copy
+; (msg_port -> ip_packet_buf+20/22, msg_port+1 -> +21/23) treats byte 0
+; as the WIRE-FIRST (high) byte, matching the UDP-length field's proven
+; high-byte-at-lower-offset convention a few lines below. So the actual
+; on-wire port for the untouched default is $0f27 = 3879, not 9999 —
+; never surfaced because prior tests only ever round-tripped this value
+; against itself. Not fixed here (out of scope / behavior-preserving);
+; the MSG_PORT override below is written in the CORRECT byte order so a
+; caller asking for a specific real-world port (e.g. 53 for DNS) gets
+; that port on the wire.
+.ifdef MSG_PORT
+msg_port:
+        .byte >MSG_PORT, <MSG_PORT
+.else
 msg_port:
         .word $270f
+.endif
 
 ; --- Disk I/O ---
 config_filename:
@@ -737,10 +754,18 @@ ip_cksum_result:
 ; --- Messaging (msg_port is in APP_DATA; remaining msg_* state is mutable) ---
 ; Sized from the tunnel MTU (constants.inc), never from literals: a message
 ; is text + 28 bytes of IP/UDP framing and the whole thing must fit in one
-; Type-4 payload, so the text buffer is MSG_TEXT_MAX = WG_MTU - 28 and the
-; packet buffer is exactly WG_MTU. All lengths are 16-bit (contract §13.3).
-msg_input_buf:
-        .res MSG_TEXT_MAX, 0   ; keyboard input buffer (fills one tunnel packet)
+; Type-4 payload, so the packet buffer is exactly WG_MTU and the text is at
+; most MSG_TEXT_MAX = WG_MTU - 28. All lengths are 16-bit (contract §13.3).
+;
+; THERE IS NO SEPARATE KEYBOARD BUFFER (issue #70). read_input_line types
+; straight into ip_packet_buf + IP_UDP_HDR_LEN, i.e. where udp_tunnel_build
+; would have copied the text to anyway; with source == destination that
+; byte-forward copy is an identity and the 28-byte header is prepended in
+; place. This is what makes a 1472-byte datagram fit: a private
+; msg_input_buf of MSG_TEXT_MAX bytes overflowed APP_BSS by ~1 KB at
+; WG_MTU = 1440. Nothing touches ip_packet_buf while a line is being typed
+; (main_loop is blocked inside read_input_line), and the MSG_TEXT_MAX clamp
+; in read_input_line keeps the text inside the WG_MTU-byte buffer.
 msg_input_len:
         .res 2                 ; input length (16-bit)
 msg_recv_ptr:
@@ -753,7 +778,7 @@ ip_packet_buf:
         .res WG_MTU, 0         ; outgoing IP packet (28 B headers + MSG_TEXT_MAX)
 ip_pkt_len:
         .res 2                 ; IP packet length (16-bit)
-.assert WG_MTU = IP_UDP_HDR_LEN + MSG_TEXT_MAX, error, "ip_packet_buf and msg_input_buf sizes disagree"
+.assert WG_MTU = IP_UDP_HDR_LEN + MSG_TEXT_MAX, error, "MSG_TEXT_MAX must be WG_MTU - IP_UDP_HDR_LEN: the text is typed in place inside ip_packet_buf"
 
 ; --- Cookie state ---
 cookie_buf:

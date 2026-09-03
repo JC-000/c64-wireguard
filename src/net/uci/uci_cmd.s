@@ -37,6 +37,7 @@
 .export uci_wait_idle
 .export uci_tod_start
 .export uci_wait_not_busy
+.export uci_wait_reply_staged
 .export uci_begin_cmd
 .export uci_put_byte
 .export uci_push_wait
@@ -253,6 +254,71 @@ uci_wait_not_busy:
         rts
 @wnb_last_tenths: .byte 0
 @wnb_elapsed:     .byte 0
+
+; =============================================================================
+; uci_wait_reply_staged — spin while STATE == Command Busy ($10), wall-clock
+; bounded. Returns as soon as the firmware has VALIDATEd a reply block (STATE
+; becomes Data More $30 or Data Last $20) or the interface is Idle ($00).
+;
+; This is the wait for "the Ultimate is producing the reply", which is a
+; DIFFERENT condition from uci_wait_not_busy's CMD_BUSY bit. Per
+; command_protocol.vhd: a PUSH_CMD sets handshake_in(0) (= CMD_BUSY) and
+; STATE 01; the firmware's HANDSHAKE_ACCEPT_COMMAND clears CMD_BUSY while
+; STATE stays 01 until copy_result() has memcpy'd the block and written
+; HANDSHAKE_VALIDATE_*. And on a DATA_ACC from Data More the FPGA drops
+; STATE to 01 with CMD_BUSY already clear — the continuation is then staged
+; by an interrupt, a FreeRTOS queue post, a task switch and a memcpy
+; (command_intf.cc run_task -> get_more_data -> copy_result). Neither
+; window is visible to CMD_BUSY at all; both are exactly STATE == 01.
+; Measured consequence (issue #70, 2026-09-01, U64E fw 3.15 + #807 spike,
+; 48 MHz): net_poll acked block 1 of a 1472-byte datagram, "waited" on
+; CMD_BUSY (already clear), read STATE 01, took "not Data More" as
+; Data Last, and delivered 893 bytes with a 1472 header. At 1 MHz the
+; fences alone (~17 ms) hid the race.
+;
+; Budget: UCI_RESP_WAIT_BUDGET_TENTHS (1 s). Nothing on the network is
+; involved — the datagram was received before the firmware accepted the
+; command — so this only expires on a wedged firmware task, and §13.4
+; wants a named $89 rather than a stall.
+;
+; Output: C=0 when STATE != $10; C=1 on timeout (net_last_error =
+;         UCI_ERR_WAIT_TIMEOUT). Clobbers: A
+; =============================================================================
+uci_wait_reply_staged:
+        lda CIA_TOD_HOUR
+        lda CIA_TOD_TENTHS
+        sta @wrs_last_tenths
+        lda #$00
+        sta @wrs_elapsed
+@wrs_loop:
+        lda UCI_STATUS
+        uci_fence                   ; settle read before testing bits
+        and #UCI_STAT_STATE
+        cmp #UCI_STATE_BUSY
+        bne @wrs_done               ; Data More / Data Last / Idle
+
+        ; Check TOD for elapsed tenths. Latch (HOUR) then read TENTHS.
+        lda CIA_TOD_HOUR
+        lda CIA_TOD_TENTHS
+        cmp @wrs_last_tenths
+        beq @wrs_loop_long          ; no change — keep spinning
+        sta @wrs_last_tenths
+        inc @wrs_elapsed
+        lda @wrs_elapsed
+        cmp #UCI_RESP_WAIT_BUDGET_TENTHS
+        bcc @wrs_loop_long          ; under budget — continue
+        ; Budget exhausted.
+        lda #UCI_ERR_WAIT_TIMEOUT
+        sta net_last_error
+        sec
+        rts
+@wrs_loop_long:
+        jmp @wrs_loop               ; long branch: fence too wide for BCC/BEQ
+@wrs_done:
+        clc
+        rts
+@wrs_last_tenths: .byte 0
+@wrs_elapsed:     .byte 0
 
 ; =============================================================================
 ; uci_begin_cmd — entry: A = target id (e.g. UCI_TARGET_NETWORK = $03)

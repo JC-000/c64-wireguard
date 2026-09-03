@@ -93,6 +93,38 @@ ifeq ($(REU),0)
 CA65FLAGS += -D WG_NO_REU=1
 endif
 
+# --- UCI chunked send (issue #70) ---
+# UCI_CHUNKED_WRITE=1 makes the UCI adapter send every datagram with the
+# firmware's chunked NET_CMD_WRITE_SOCKET_CHUNK ($16, GideonZ/1541ultimate#807
+# spike builds; NOT in stock 3.15) in parts of at most 888 bytes, lifting
+# NET_UDP_SEND_MAX from 892 to 1472 and the tunnel MTU from 860 to 1440.
+# Default 0: the shipped adapter uses plain SOCKET_WRITE and the default
+# build is byte-identical to a tree without this flag. UCI only — ip65 has
+# no chunked path and its caps are already 1472/1472 (clamped by
+# WG_DATAGRAM_CAP for RAM, see src/constants.inc).
+UCI_CHUNKED_WRITE ?= 0
+ifeq ($(UCI_CHUNKED_WRITE),1)
+ifneq ($(BACKEND),uci)
+$(error UCI_CHUNKED_WRITE=1 requires BACKEND=uci: the chunked SOCKET_WRITE is a UCI firmware command, ip65 has no equivalent)
+endif
+CA65FLAGS += -D UCI_CHUNKED_WRITE=1
+endif
+
+# --- MSG_PORT (test/warp-interop, issue #87) ---
+# Overrides the compile-time msg_port used by the chat message / ping
+# path in src/wg/data.s (src/wg/ip_build.s uses it as BOTH src and dst
+# UDP port for the inner tunnel packet). Only meaningful for interop
+# testing against a real peer where the message needs to land on a
+# specific real-world port (e.g. 53 for DNS). Default 9999 is NOT passed
+# through to ca65 at all — the -D flag is only emitted when MSG_PORT is
+# overridden away from the default — so an unadorned `make` keeps
+# data.s on its untouched `.ifndef MSG_PORT` .word $270f path and
+# produces a byte-identical PRG to a tree without this knob.
+MSG_PORT ?= 9999
+ifneq ($(MSG_PORT),9999)
+CA65FLAGS += -D MSG_PORT=$(MSG_PORT)
+endif
+
 # Common ca65 source set — shared by every backend. The in-tree crypto
 # modules that the siblings replace are filtered out below.
 COMMON_SRCS_ALL = $(SRC_DIR)/loadaddr.s \

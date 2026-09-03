@@ -39,8 +39,10 @@
         .import tp_payload_len
         .import ip_packet_buf
         .import ip_pkt_len
-        .import msg_input_buf
         .import msg_input_len
+.ifdef UCI_CHUNKED_WRITE
+        .import net_last_error          ; UCI adapter only (issue #70)
+.endif
 
 ; --- Imports: strings from src/wg/strings.s ------------------------------
         .import title_msg
@@ -519,10 +521,13 @@ do_message_input:
         ldy     #>msg_prompt
         jsr     print_string
         jsr     read_input_line
-        ; build UDP tunnel packet
-        lda     #<msg_input_buf
+        ; build UDP tunnel packet IN PLACE: the text was typed straight into
+        ; the payload slot of ip_packet_buf (issue #70), so udp_tunnel_build's
+        ; byte-forward copy from (zp_ptr1) is an identity here and only the
+        ; 28-byte IP/UDP header is written.
+        lda     #<(ip_packet_buf+IP_UDP_HDR_LEN)
         sta     zp_ptr1
-        lda     #>msg_input_buf
+        lda     #>(ip_packet_buf+IP_UDP_HDR_LEN)
         sta     zp_ptr1+1
         lda     msg_input_len
         sta     zp_tmp1                 ; text length, 16-bit
@@ -539,11 +544,48 @@ do_message_input:
         lda     ip_pkt_len+1
         sta     tp_payload_len+1
         jsr     transport_send
+.ifdef UCI_CHUNKED_WRITE
+        bcs     @msg_send_fail
+.endif
         jsr     timer_mark_send
         lda     #<send_ok_msg
         ldy     #>send_ok_msg
         jsr     print_string
         rts
+.ifdef UCI_CHUNKED_WRITE
+@msg_send_fail:
+        ; transport_send said C=1. In a chunked build (issue #70) that is
+        ; how a firmware WITHOUT the $16 command shows up — every send fails
+        ; with net_last_error = $8E — so print the code instead of the
+        ; unconditional "PACKET SENT OK" the default build shows. (The
+        ; default build is left as it was so its PRG stays byte-identical;
+        ; ip65 has no net_last_error to print.)
+        lda     #<@msg_send_err_str
+        ldy     #>@msg_send_err_str
+        jsr     print_string
+        lda     net_last_error
+        pha
+        lsr     a
+        lsr     a
+        lsr     a
+        lsr     a
+        jsr     @msg_hex_nibble
+        pla
+        and     #$0f
+        jsr     @msg_hex_nibble
+        lda     #$0d
+        jsr     chrout
+        rts
+@msg_hex_nibble:
+        cmp     #10
+        bcc     :+
+        adc     #6                      ; C=1 here: +7, so 10 -> 'A' after '0'
+:
+        adc     #'0'
+        jmp     chrout
+@msg_send_err_str:
+        .byte   "SEND FAILED, NET ERR $", 0
+.endif
 
 ; =============================================================================
 ; do_load_config - load configuration from disk
@@ -566,7 +608,18 @@ do_load_config:
 
 ; =============================================================================
 ; read_input_line - read a line of text from keyboard
-; Output: msg_input_buf filled, msg_input_len set
+; Output: text at ip_packet_buf + IP_UDP_HDR_LEN, msg_input_len set
+;
+; THE TEXT IS TYPED IN PLACE (issue #70). There is no msg_input_buf any
+; more: characters land directly in the payload slot of ip_packet_buf, the
+; 28 bytes past its start that udp_tunnel_build reserves for the IP/UDP
+; header. do_message_input then hands udp_tunnel_build that same address
+; as its source, so the text copy is an identity and only the header is
+; written. This removed a MSG_TEXT_MAX-byte buffer from APP_BSS — the one
+; that made a 1472-byte datagram (WG_MTU 1440) fail to link. Safe because
+; nothing else writes ip_packet_buf while this routine is blocking the
+; main loop, and because the MSG_TEXT_MAX clamp below is exactly
+; WG_MTU - IP_UDP_HDR_LEN, so the text can never run past the buffer.
 ;
 ; THE INDEX MUST NOT LIVE IN Y ACROSS getin. KERNAL GETIN ($FFE4) does not
 ; preserve Y: its keyboard-buffer fetch loads the character with LDY $0277,
@@ -595,7 +648,7 @@ do_load_config:
 ; one full tunnel packet's worth of text, which is past what an 8-bit index
 ; reaches. Each character is stored through a pointer rebuilt from the
 ; position, so no register carries state across getin/chrout.
-; Output: msg_input_buf filled, msg_input_len set (16-bit)
+; Output: text at ip_packet_buf + IP_UDP_HDR_LEN, msg_input_len set (16-bit)
 ; =============================================================================
 read_input_line:
         lda     #0
@@ -618,11 +671,13 @@ read_input_line:
         cmp     #<MSG_TEXT_MAX
         bcs     @ril_loop               ; low byte at/above: full, ignore
 @ril_store:
-        lda     #<msg_input_buf         ; zp_ptr1 = msg_input_buf + position
+        ; zp_ptr1 = ip_packet_buf + IP_UDP_HDR_LEN + position: the text goes
+        ; straight into the packet's payload slot (no msg_input_buf, #70).
+        lda     #<(ip_packet_buf+IP_UDP_HDR_LEN)
         clc
         adc     msg_input_len
         sta     zp_ptr1
-        lda     #>msg_input_buf
+        lda     #>(ip_packet_buf+IP_UDP_HDR_LEN)
         adc     msg_input_len+1
         sta     zp_ptr1+1
         ldy     #0

@@ -175,6 +175,11 @@ sqtab_hi = WG_SQTAB_HI
 .export max_input_len
 .export wg_default_port, WG_ICMP_ID, IP_PROTO_ICMP, IP_PROTO_UDP
 .export REJECT_COUNTER_B7, REKEY_COUNTER_B7
+; Datagram caps as BUILT (issue #70): the tunnel MTU and the backend's §13.3
+; send/receive guarantees depend on BACKEND and UCI_CHUNKED_WRITE, so the host
+; tools (tools/c64_caps.py) read them from build/labels.txt rather than
+; guessing which .ifdef branch a PRG was assembled with.
+.export WG_MTU, WG_DATA_OVERHEAD, NET_UDP_SEND_MAX, NET_UDP_RECV_MAX
 
 ; --- Kernal routines (exported for completeness; tests rarely need these
 ;     by name, but symmetry with ACME's vicelabels output helps) ---

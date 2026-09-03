@@ -921,9 +921,20 @@ def main(argv: list[str] | None = None) -> int:
         # refuse the combination that cannot work.
         prg_sha = hashlib.sha256(prg_bytes).hexdigest()
         has_reu_init = "reu_mul_init" in L
-        log.info("PRG fingerprint: sha256=%s reu_mul_init=%s -> %s build",
-                 prg_sha[:32], has_reu_init,
-                 "REU" if has_reu_init else "onchip/REU=0")
+        # Issue #70: the chunked-write path (uci_send_part) is linked only
+        # under UCI_CHUNKED_WRITE=1; its presence is what says whether this
+        # binary sends 1472-byte datagrams or the plain 892-byte ones. The
+        # MTU is read structurally (ip_packet_buf is .res WG_MTU, ip_pkt_len
+        # follows it), so a build that never exported WG_MTU still reports.
+        has_chunk = "uci_send_part" in L
+        mtu = (L["ip_pkt_len"] - L["ip_packet_buf"]
+               if "ip_pkt_len" in L and "ip_packet_buf" in L else -1)
+        log.info("PRG fingerprint: sha256=%s reu_mul_init=%s uci_send_part=%s "
+                 "WG_MTU=%d -> %s build, %s send path",
+                 prg_sha[:32], has_reu_init, has_chunk, mtu,
+                 "REU" if has_reu_init else "onchip/REU=0",
+                 "chunked (1472 B datagrams)" if has_chunk
+                 else "plain (892 B datagrams)")
         if has_reu_init and args.reu == "off":
             _skip("refusing to run: this is a REU build (reu_mul_init "
                   "present) but --reu off detached the REU. reu_mul_init "
