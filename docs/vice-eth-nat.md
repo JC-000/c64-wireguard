@@ -290,3 +290,48 @@ warp-cli connect
 - `/dev/bpf*` is left world-readable by the rig script (it reverts on reboot).
 - The rig's `10.0.65.0/24` is shared with c64-test-harness, which reserves
   `.1`–`.3`; the DHCP pool starts at `.100` for that reason. Do not narrow it.
+
+## 6. Two rig failures that look like something else
+
+Both of these cost multiple runs and one false defect report during the #120 work. Neither is
+diagnosable from the C64's own output, which is exactly why they are written down here.
+
+### An exhausted capture device looks like a broken network adapter
+
+This bench has **four world-rw `/dev/bpf` nodes**, shared by every lane, and each VICE instance
+needs one — as does each `tcpdump` tap. Oversubscribe them and `ip65_init` fails, the C64 prints
+`NET INIT FAILED`, and (since #120) it also sets `net_last_error = $41 NET_ERR_IP65_INIT`.
+
+**An oversubscribed rig and a genuine adapter fault are indistinguishable at the C64 end.** Before
+concluding anything about the firmware, the driver or the build, count the live capture consumers:
+
+```sh
+pgrep -fl 'x64sc|tcpdump' | wc -l      # every one of these may hold a node
+```
+
+The nodes are made world-readable by the rig script and the permission **reverts on reboot**, so a
+first run after a restart can fail this way with nothing else changed.
+
+### A killed test driver orphans two processes, and the next run dies identically
+
+Killing a runner leaves both `x64sc` **and** its `tcpdump` behind, still holding the interface and a
+capture node. The next run then fails at launch in exactly the same way, which invites the
+conclusion that the change under test broke something.
+
+Reap by worktree, never with a broad pattern kill — a blanket `pkill -f x64sc` destroyed another
+lane's run during this work:
+
+```sh
+for p in $(pgrep x64sc); do
+  printf '%s -> %s\n' "$p" "$(lsof -a -p "$p" -d cwd -Fn | sed -n 's/^n//p')"
+done
+```
+
+Kill by PID once you have matched the working directory to your own worktree. `tools/vice_eth_rig.py`
+refuses to launch when another instance is bound to the interface and names the owning worktree
+rather than terminating it; leave it that way.
+
+Two further notes for anyone driving the emulator directly. Every ip65 build uses the same default
+MAC address, so two instances on one interface are a live duplicate-address node rather than two
+independent machines. And the process can change between a preflight check and a launch — observed
+here — so re-check immediately before starting, not only at preflight.

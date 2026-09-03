@@ -65,18 +65,110 @@
 ; (see src/boot.s) rather than through the shared ABI surface, so the
 ; dependency is visible at the call site instead of implied by this header.
 
-; KNOWN §13.1 NON-CONFORMANCE — net_local_ip / net_last_error.
-; §13.1 puts both in NET_FAMILY_CORE and this header should declare them.
-; It does not, because the UCI backend exports both and the ip65 backend
-; exports NEITHER: ip65's driver reports only a carry, so there is no error
-; channel to expose. Declaring them here would break the ip65 link the
-; moment a consumer referenced them.
+; NOT DECLARED HERE — net_local_ip and net_last_error.
+; Both belong to the lifecycle surface above and neither is declared.
 ;
-; This is the same gap c64-https closed as its P1 (their #70/#142) by giving
-; ip65 a real error channel with codes from the §13.2 ip65 family range
-; ($40-$7F). Ours wants the same treatment, and per the allocate-in-the-
-; table-first rule added in c64-lib-contract#139 the codes get filed against
-; §13.2 before they are used here.
+; net_last_error: BOTH backends now export it. The ip65 side got its own
+; error channel in issue #120 (src/net/ip65/net.s) — the same gap c64-https
+; closed as its P1 (their #70/#142). It is still not declared here only
+; because net_local_ip is not, and a half-declared surface is worse than an
+; honest omission.
+;
+; net_local_ip: the UCI backend exports it, ip65 does not — ip65's address
+; lives in the blob at ip65_cfg_ip and is read through ip65_symbols.inc, not
+; through a WG-owned label. Declaring it here would break the ip65 link the
+; moment a consumer referenced it. That is the one remaining blocker.
+
+; =============================================================================
+; RULE — a transient send failure is not a send failure.
+;
+; A backend's net_udp_send either puts the datagram on the wire or reports a
+; REAL failure. A next hop that is merely UNRESOLVED is not a real failure:
+; a backend whose driver reports one MUST resolve and retry within a bounded
+; wall-clock budget before giving up, and only then report.
+;
+; This is written here because there is nowhere upstream to write it. The
+; retired c64-lib-contract §13 had no category for it — its error model
+; offered terminal (C=1) and advisory (C=0) and nothing in between, and
+; net_udp_send's whole normative definition was a single table row; a search
+; of that repository for `arp`, `link-layer`, `non-block`, `retry` or
+; `transient` returns no normative hit. The silence let both of our backends
+; be conformant while disagreeing about something that decides whether the
+; product works: the UCI adapter blocks until the firmware has taken the
+; datagram, while ip65 returned failure the instant ARP was cold. Because
+; the off-subnet case resolves on the second attempt, the ip65 backend could
+; never complete a first handshake with a real peer, and that went unnoticed
+; for the life of the backend — every Ethernet test used an on-subnet peer
+; with a pre-warmed cache. Incident: c64-wireguard#120; fix in
+; src/net/ip65/net.s:net_arp_pump.
+;
+; =============================================================================
+; net_last_error REGISTRY — canonical for this repository.
+;
+; Both backends write one byte, and this is the only place the whole set is
+; written down. $00 is always "no error". A code is added HERE first, then in
+; the emitting adapter (src/net/uci/uci_errors.inc, src/net/ip65/net.s), each
+; of which points back at this table.
+;
+; ONE RULE, and it is the only one that ever mattered: A PUBLISHED VALUE IS
+; NEVER REASSIGNED. Not renumbered to close a gap, not reused because a code
+; turned out unreachable, not "tidied" when a range looks sparse. The reason
+; is on the record: c64-wireguard once allocated $88 for UCI_ERR_LONG_READ
+; while c64-https had long emitted $88 as UCI_ERR_NO_SOCKET, and one byte
+; meant two things for four days with neither side doing anything wrong.
+; Gaps below ($43-$45, $47) are deliberate and stay.
+;
+; That rule is not folklore here: THIS BRANCH broke it and was caught. The
+; first commit of #120 minted $40-$44 for the ip65 channel by picking
+; free-looking bytes out of the family range, and $41-$45 were already
+; c64-https's — a live collision, in review, three weeks after the $88
+; incident that motivated the table. It was remapped to the values below
+; before merge. Any later reading that says "the codes were not remapped,
+; nothing collided" is describing the post-remap history only.
+;
+; PROVENANCE. Most values were allocated against c64-lib-contract SPEC §13.2,
+; a cross-repo registry RETIRED wholesale at contract v1.0.0 — a network
+; backend is source in its consumer's own tree, compiled into that consumer's
+; binary, never an artifact one party builds and another links, so the shared
+; registry had no mechanism behind it. No value CHANGED at that release; the
+; retired text is permanent at `git show v0.17.1:SPEC.md`. So the numbers
+; below are exactly the published ones and still read correctly to anyone who
+; remembers the table. Only ownership moved: this file is now the registry.
+;
+;   Code  Name                        Origin
+;   ----  --------------------------  --------------------------------------
+;   $01   NET_ERR_TIMEBASE_STOPPED    retired table, contract-generic
+;   $41   NET_ERR_IP65_INIT           retired table, c64-https; we emit too
+;   $42   NET_ERR_IP65_DHCP           retired table, c64-https; we emit too
+;   $43   NET_ERR_IP65_DNS            retired table, c64-https — WE DO NOT EMIT
+;   $44   NET_ERR_IP65_CONNECT        retired table, c64-https — WE DO NOT EMIT
+;   $45   NET_ERR_IP65_SEND           retired table, c64-https — WE DO NOT EMIT
+;   $46   NET_ERR_IP65_UDP_LISTEN     retired table, ours
+;   $47   NET_ERR_IP65_UDP_SEND       retired table, ours — RESERVED, never
+;                                     emitted; net.s defines and exports the
+;                                     equate plus asserts so the value cannot
+;                                     be quietly reused (see #120)
+;   $48   NET_ERR_IP65_WAIT_TIMEOUT   OURS, minted here (issue #120)
+;   $49   NET_ERR_IP65_UDP_UNBIND     OURS, minted here (issue #120)
+;   $81   UCI_ERR_NOT_PRESENT         retired table, c64-https (grandfathered)
+;   $82   UCI_ERR_CMD_FAILED          retired table, c64-https (grandfathered)
+;   $83   UCI_ERR_NO_IP               retired table, c64-https (grandfathered)
+;   $84   UCI_ERR_CONNECT_FAIL        retired table, c64-https (grandfathered)
+;   $85   UCI_ERR_SEND_FAIL           retired table, c64-https (grandfathered)
+;   $86   UCI_ERR_READ_FAIL           retired table, c64-https (grandfathered)
+;   $87   UCI_ERR_SHORT_WRITE         retired table, c64-https (grandfathered)
+;   $88   UCI_ERR_NO_SOCKET           retired table, c64-https (grandfathered)
+;   $89   UCI_ERR_WAIT_TIMEOUT        retired table, c64-https (grandfathered)
+;   $8A   UCI_ERR_LONG_READ           retired table, ours (moved off $88)
+;   $8B   UCI_ERR_BAD_READ_HDR        retired table, c64-https — WE DO NOT EMIT
+;   $8C   UCI_ERR_SEND_TOO_LONG       retired table, ours
+;   $8D   UCI_ERR_OPEN_REFUSED        retired table, ours
+;   $8E   UCI_ERR_CMD_UNKNOWN         OURS, minted here (PR #112)
+;
+; This table is names, values and ownership only. The per-code reasoning —
+; what triggers each one, what a consumer should do about it — stays in
+; uci_errors.inc and src/net/ip65/net.s, which point back here.
+; =============================================================================
 ;
 ; It is also why src/net/<backend>/net_manifest.s and net_abi_asserts.s are
 ; NOT in this branch yet: a NET_FAMILY_CORE claim asserted over an absent

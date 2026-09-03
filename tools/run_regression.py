@@ -20,6 +20,15 @@ import sys
 import time
 
 TESTS = [
+    # FIRST because it is the cheapest and the most diagnostic: it imports
+    # every tools/test_*.py and fails on an ImportError, a missing symbol, or
+    # anything else raised at import time. A suite that raises before its
+    # first line looks exactly like a suite with nothing to say —
+    # test_ip65_listener_leak.py was in that state from c3fe7aa, and
+    # test_uci_udp_size_probe.py from f021458, with nothing reporting either.
+    # Build-tree independent (verified against a tree with no build/ at all),
+    # so it is safe in the parallel pool alongside the mutators.
+    ("suite_imports", ["tools/test_suite_imports.py"]),
     ("session",    ["tools/test_session.py", "--seed", "51820", "--verbose"]),
     ("transport",  ["tools/test_transport.py", "--seed", "7539"]),
     ("blake2s",    ["tools/test_blake2s.py", "--seed", "7539"]),
