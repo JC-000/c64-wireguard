@@ -266,13 +266,26 @@ def bridged_rig_problems(vice_bin: str, iface: str) -> list[str]:
                         "bridged mode needs a WIRED NIC on a real LAN with a "
                         "DHCP server (see docs/vice-eth-nat.md for why Wi-Fi "
                         "is not usable)")
+    # Match the EMULATOR, not the string. `pgrep -f "ethernetioif en4"` also
+    # matches any shell whose own command line mentions it — a `pgrep` in a
+    # wait loop matches itself, and this preflight then reports a busy rig
+    # against a rig that is idle (measured while writing this suite). Require
+    # an x64sc binary in argv[0] and drop our own process tree.
     r = subprocess.run(["pgrep", "-fl", f"ethernetioif {iface}"],
                        capture_output=True, text=True)
-    if r.stdout.strip():
+    holders = []
+    for line in r.stdout.splitlines():
+        pid, _, cmd = line.partition(" ")
+        if not pid.isdigit() or int(pid) == os.getpid():
+            continue
+        if os.path.basename(cmd.split()[0] if cmd.split() else "") \
+                .startswith("x64"):
+            holders.append(line)
+    if holders:
         problems.append(
             f"another VICE is already attached to {iface} (every ip65 "
             f"instance uses the same default MAC, so it is a live "
-            f"duplicate-MAC node):\n      {r.stdout.strip()}")
+            f"duplicate-MAC node):\n      " + "\n      ".join(holders))
     return problems
 
 
@@ -539,7 +552,9 @@ def main() -> int:
         log(f"  ALARM PROOF: arp_cache forced to ${args.arp_cache_addr:04X} "
             f"instead of the derived ${cache:04X}")
         cache = args.arp_cache_addr
-    log(f"  arp_cache = ${cache:04X} (ip65 map: arp_ip ${cache - 4:04X} + 4)")
+    else:
+        log(f"  arp_cache = ${cache:04X} "
+            f"(ip65 map: arp_ip ${cache - 4:04X} + 4)")
     # Optional observability the ip65 adapter grows with the #120 fix. Each
     # is probed, never assumed: on the unfixed tree the label is absent and
     # the assertions that use it say so instead of failing for the wrong
@@ -623,14 +638,26 @@ def main() -> int:
             udp_before = tap.udp(src=c64, dst=dest_ip)
             log(f"  ip65 arp_cache rows before: {len(rows_before)} "
                 f"{rows_before if rows_before else ''}")
-            if gw_before or gw_spoke:
+            # The AUTHORITATIVE cold signal is ip65's own cache, not the tap.
+            # A real LAN's router broadcasts ARP requests of its own, and
+            # ip65's arp_process caches the SENDER of any ARP frame it sees
+            # (ip65/ip65/arp.s), so those can warm the gateway row without the
+            # C64 ever asking for it. When that happens the defect genuinely
+            # cannot fire and there is no verdict to give.
+            if gw_before:
                 inconclusive(
-                    "the ARP cache was NOT cold at the first send: "
-                    f"gateway rows in ip65's cache = {gw_before}, ARP frames "
-                    f"from the gateway seen before the send = {len(gw_spoke)}. "
-                    "Something on the LAN warmed it (a router that ARPs its "
-                    "clients will). Re-run; if it persists, the LAN cannot "
-                    "host this measurement.")
+                    "the ARP cache was NOT cold at the first send: ip65's "
+                    f"arp_cache already holds {gw_before} for the gateway. "
+                    f"Something on the LAN warmed it ({len(gw_spoke)} ARP "
+                    "frame(s) from the gateway crossed the tap before the "
+                    "send, and a router that ARPs its clients will do that). "
+                    "Re-run; if it persists, this LAN cannot host the "
+                    "measurement.")
+            if gw_spoke:
+                log(f"  note: {len(gw_spoke)} ARP frame(s) from {gw} crossed "
+                    "the tap before the send, but ip65's cache holds no "
+                    "gateway row, so the cache is cold on the signal that "
+                    "decides the outcome")
             check(not gw_before and not asked_for_gw and not udp_before,
                   "precondition: ARP cache cold for the gateway and no prior "
                   "traffic from the C64 to the destination",
