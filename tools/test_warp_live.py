@@ -22,6 +22,25 @@ Stages:
       SESSION_ACTIVE (real Cloudflare Type-2). Records handshake wall time.
   B — ping (P) through the tunnel to 1.1.1.1, then a keyboard chat message
       (M) to the same target (no reply expected).
+  R — (--rekey N, default 0) after Stage B, on the SAME session, press H
+      (menu rekey) N times in sequence. Recording hs_timestamp[0..11]
+      (label `hs_timestamp`, a 12-byte big-endian TAI64N: 8-byte seconds
+      then 4-byte nanoseconds) BEFORE the press is processed is not
+      possible from the host, so each attempt instead waits for wg_state
+      to LEAVE ACTIVE first (do_handshake finishes building the Type-1,
+      and hence the new hs_timestamp, before session_initiate stores
+      SESSION_HS_SENT — see wg_c64_input.rekey's docstring) and reads
+      hs_timestamp then, asserting it is a strictly greater 96-bit integer
+      than the previous initiation's. It then waits (<=120s at 48MHz) for
+      wg_state to return to ACTIVE and asserts that too. Both are real
+      `assert` statements: on failure they raise, which is deliberate —
+      against Cloudflare WARP this is the exact #87 scenario, where the
+      unfixed firmware's second handshake NEVER reaches ACTIVE because
+      Cloudflare silently drops the repeated/stale timestamp. So on master
+      this stage is RED BY CONSTRUCTION, not a soft failure, and the
+      result carries `rekey_expected_red_on_unfixed: true`. Skipped
+      (recorded, not attempted) when --rekey 0 (the default) or when
+      Stage A/B never reached ACTIVE.
   C — msg_port=53 build: a FRESH run_prg + FRESH handshake (new tai64n
       base time), then two real DNS queries (host-crafted wire bytes,
       staged raw over DMA into the message-input path) to 1.1.1.1:53 —
@@ -299,6 +318,95 @@ def run_stage_ab(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
     return result
 
 
+def hs_timestamp_gt(new: bytes, old: bytes) -> bool:
+    """True iff *new* is a strictly greater 96-bit TAI64N than *old*.
+
+    hs_timestamp is 12 bytes big-endian: [0..7] seconds, [8..11]
+    nanoseconds, each field itself big-endian (src/wg/handshake.s,
+    src/wg/tai64n.s). Treating the whole 12 bytes as ONE big-endian
+    integer is exactly the right comparison — the 8 seconds bytes sit at
+    the high end and the 4 nanosecond bytes at the low end, so seconds
+    dominate and nanoseconds only break a tie, which is TAI64N ordering.
+    Strict: two identical stamps compare False, never True.
+    """
+    if len(new) != 12 or len(old) != 12:
+        raise ValueError(
+            f"hs_timestamp must be 12 bytes, got {len(new)} / {len(old)}")
+    return int.from_bytes(new, "big") > int.from_bytes(old, "big")
+
+
+def run_stage_rekey(tr: Ultimate64Transport, L: dict, n: int,
+                    initial_ts: bytes, out: dict) -> None:
+    """Press H (rekey) *n* times in sequence, mutating *out* in place.
+
+    See the module docstring's Stage R for the read-timing rationale and
+    why this stage is RED BY CONSTRUCTION on unfixed firmware against
+    Cloudflare WARP (issue #87). Both invariants below are real `assert`
+    statements — on failure they raise AssertionError, which propagates
+    out of this call. *out* is mutated as we go (not just returned) so the
+    caller still has per-attempt data — including wall time, logged via
+    `log.info` before each assert — even when a later attempt raises.
+    """
+    out["stage"] = "rekey"
+    out["rekey_expected_red_on_unfixed"] = True
+    out["attempts"] = []
+    prev_ts = initial_ts
+    for i in range(1, n + 1):
+        attempt: dict = {"index": i}
+        out["attempts"].append(attempt)
+        t0 = time.monotonic()
+
+        pressed = ki.press_key(tr, "H", timeout=15.0)
+        attempt["press_ok"] = pressed
+        assert pressed, f"rekey {i}: press H (rekey) not consumed"
+
+        left = ki.wait_while_state(tr, L["wg_state"], SESSION_ACTIVE,
+                                   HS_POLL_TIMEOUT, poll=1.0)
+        attempt["left_active"] = left
+        if not left:
+            _dump_failure(tr, L, f"rekey-{i}-no-leave")
+        assert left, (f"rekey {i}: wg_state never left ACTIVE within "
+                      f"{HS_POLL_TIMEOUT}s of pressing H")
+
+        # do_handshake has finished building the new Type-1 (and hence the
+        # new hs_timestamp) by the time wg_state leaves ACTIVE — see
+        # wg_c64_input.rekey's docstring — so this read cannot still be
+        # looking at the PREVIOUS session's timestamp.
+        new_ts = bytes(tr.read_memory(L["hs_timestamp"], 12))
+        attempt["hs_timestamp_prev_hex"] = prev_ts.hex()
+        attempt["hs_timestamp_new_hex"] = new_ts.hex()
+        increased = hs_timestamp_gt(new_ts, prev_ts)
+        attempt["hs_timestamp_increased"] = increased
+        if not increased:
+            log.error("rekey %d: hs_timestamp did not increase: "
+                     "prev=%s new=%s", i, prev_ts.hex(), new_ts.hex())
+        assert increased, (
+            f"rekey {i}: hs_timestamp {new_ts.hex()} is not strictly "
+            f"greater than the previous initiation's {prev_ts.hex()}")
+
+        active = ki.wait_for_state(tr, L["wg_state"], SESSION_ACTIVE,
+                                   HS_POLL_TIMEOUT, poll=1.0)
+        elapsed = time.monotonic() - t0
+        attempt["active"] = active
+        attempt["handshake_seconds"] = round(elapsed, 1)
+        log.info("rekey %d: hs_timestamp_increased=%s active=%s (%.1fs)",
+                i, increased, active, elapsed)
+        if not active:
+            _dump_failure(tr, L, f"rekey-{i}-no-return")
+        # issue #87: against Cloudflare WARP, THIS is the assertion
+        # expected to fail on unfixed firmware — Cloudflare silently drops
+        # the repeated/stale timestamp, the Type-2 response never arrives,
+        # and wg_state never returns to ACTIVE.
+        assert active, (
+            f"rekey {i}: wg_state never returned to ACTIVE within "
+            f"{HS_POLL_TIMEOUT}s — issue #87 on unfixed firmware")
+
+        prev_ts = new_ts
+
+    out["all_increased"] = all(a["hs_timestamp_increased"] for a in out["attempts"])
+    out["all_active"] = all(a["active"] for a in out["attempts"])
+
+
 def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
                 c64_priv: bytes, c64_pub: bytes, resp_pub: bytes,
                 seed: int) -> dict:
@@ -400,6 +508,12 @@ def main() -> int:
     p.add_argument("--host", default=os.environ.get("U64_HOST", DEFAULT_HOST))
     p.add_argument("--turbo", type=int, default=48)
     p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--rekey", type=int, default=0, metavar="N",
+                   help="After Stage B, press H (rekey) N times in "
+                        "sequence, asserting hs_timestamp strictly "
+                        "increases and wg_state returns to ACTIVE each "
+                        "time (issue #87). RED BY CONSTRUCTION (raises) "
+                        "against Cloudflare WARP on unfixed firmware.")
     args = p.parse_args()
 
     seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
@@ -432,6 +546,7 @@ def main() -> int:
     results: dict = {"seed": seed}
     turbo_restored = False
     reu_restored = False
+    client = None
     try:
         client = Ultimate64Client(host=args.host, timeout=30.0)
         tr = Ultimate64Transport(host=args.host, timeout=30.0, client=client)
@@ -464,21 +579,53 @@ def main() -> int:
         ab = run_stage_ab(tr, client, L_A, c64_priv, c64_pub, resp_pub, seed)
         results["stage_ab"] = ab
 
+        # --- Stage R: rekey (issue #87) ---
+        if args.rekey > 0:
+            rekey_result: dict = {"stage": "rekey",
+                                  "rekey_expected_red_on_unfixed": True,
+                                  "attempts": []}
+            results["stage_rekey"] = rekey_result
+            if not ab.get("active"):
+                rekey_result["skipped"] = "stage A/B did not reach ACTIVE"
+                log.warning("skipping rekey stage: Stage A/B never reached "
+                          "ACTIVE")
+            else:
+                initial_ts = bytes(tr.read_memory(L_A["hs_timestamp"], 12))
+                try:
+                    run_stage_rekey(tr, L_A, args.rekey, initial_ts,
+                                    rekey_result)
+                except AssertionError as exc:
+                    import json as _json
+                    log.error(
+                        "rekey stage FAILED (issue #87; expected on "
+                        "unfixed firmware against Cloudflare WARP): %s\n"
+                        "RESULTS SO FAR:\n%s", exc,
+                        _json.dumps(results, indent=2, default=str))
+                    raise
+
         # --- Stage C ---
         L_C = dict(Labels.from_file(str(LABELS_C)))
         c = run_stage_c(tr, client, L_C, c64_priv, c64_pub, resp_pub, seed)
         results["stage_c"] = c
 
-        # --- Stage D: restore ---
-        set_turbo_mhz(client, 1)
-        time.sleep(1.0)
-        actual1 = get_turbo_mhz(client)
-        turbo_restored = (actual1 == 1)
-        set_reu(client, False)
-        reu_restored = True
-        log.info("restore: turbo=%d MHz (restored=%s) REU off", actual1, turbo_restored)
-
     finally:
+        # Stage D: restore 1 MHz / REU off, asserted by read-back. In
+        # `finally` (not after the try body) so a raise anywhere above —
+        # notably Stage R's assertions, which are expected to raise on
+        # unfixed firmware (issue #87) — still leaves the device restored
+        # for whoever has it next.
+        if client is not None:
+            try:
+                set_turbo_mhz(client, 1)
+                time.sleep(1.0)
+                actual1 = get_turbo_mhz(client)
+                turbo_restored = (actual1 == 1)
+                set_reu(client, False)
+                reu_restored = True
+                log.info("restore: turbo=%d MHz (restored=%s) REU off",
+                        actual1, turbo_restored)
+            except Exception as exc:                              # noqa: BLE001
+                log.error("Stage D restore failed: %s", exc)
         lock.release()
         log.info("lock released")
 

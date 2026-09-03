@@ -75,6 +75,42 @@ def _handback_is_guarded(live) -> bool:
 
 
 
+def _restore_in_finally_ast(tree: ast.AST,
+                            restore_call: str = "set_turbo_mhz") -> bool:
+    """True iff some ast.Try node's `finalbody` (NOT its `body` or
+    `handlers`) contains a call to *restore_call*.
+
+    Structural, not textual: walking only `finalbody` means a restore call
+    left in the try body — with an unrelated `finally:` elsewhere in the
+    same function, e.g. one that only releases a lock — is correctly NOT
+    flagged as restored-in-finally. A keyword/substring search for
+    "finally" and the call name anywhere in the source would pass
+    vacuously on that exact shape (which is what this file looked like
+    before the fix this check exists to guard).
+    """
+    for t in ast.walk(tree):
+        if not isinstance(t, ast.Try) or not t.finalbody:
+            continue
+        for stmt in t.finalbody:
+            for sub in ast.walk(stmt):
+                if (isinstance(sub, ast.Call)
+                        and getattr(sub.func, "id",
+                                   getattr(sub.func, "attr", None))
+                        == restore_call):
+                    return True
+    return False
+
+
+def _restore_in_finally(mod, fn_name: str = "main",
+                        restore_call: str = "set_turbo_mhz") -> bool:
+    """`_restore_in_finally_ast`, sourced from a real module's function."""
+    try:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(getattr(mod, fn_name))))
+    except (OSError, SyntaxError, AttributeError, TypeError):
+        return False
+    return _restore_in_finally_ast(tree, restore_call)
+
+
 def check(label: str, cond: bool, detail: str = "") -> None:
     global passed, failed
     if cond:
@@ -253,6 +289,88 @@ def main() -> int:
     except Exception as exc:                                  # noqa: BLE001
         check("test_uci_udp_echo_live exposes the randomisation API",
               False, repr(exc))
+
+    print("\n=== warp rekey helper + restore-in-finally (#87) ===")
+    # hs_timestamp_gt: a 96-bit big-endian compare (8-byte seconds, then
+    # 4-byte nanoseconds). These three cases each rule out a specific
+    # plausible bug: a non-strict >= (equal case), comparing nanoseconds
+    # instead of/before seconds (lower-seconds/higher-nanos case), or only
+    # comparing seconds and ignoring the tie-break (covered implicitly by
+    # requiring exact 96-bit semantics, not just a seconds-only compare).
+    try:
+        import test_warp_live as warp
+        zero12 = bytes(12)
+        eq_a = (5).to_bytes(8, "big") + (100).to_bytes(4, "big")
+        eq_b = (5).to_bytes(8, "big") + (100).to_bytes(4, "big")
+        check("hs_timestamp_gt: identical stamps -> False (strict, not >=)",
+              warp.hs_timestamp_gt(eq_a, eq_b) is False)
+
+        higher_sec_lower_nanos_new = (6).to_bytes(8, "big") + (0).to_bytes(4, "big")
+        higher_sec_lower_nanos_old = (5).to_bytes(8, "big") + (999).to_bytes(4, "big")
+        check("hs_timestamp_gt: higher seconds / lower nanos -> True "
+              "(seconds dominate)",
+              warp.hs_timestamp_gt(higher_sec_lower_nanos_new,
+                                   higher_sec_lower_nanos_old) is True)
+
+        lower_sec_higher_nanos_new = (5).to_bytes(8, "big") + (999).to_bytes(4, "big")
+        lower_sec_higher_nanos_old = (6).to_bytes(8, "big") + (0).to_bytes(4, "big")
+        check("hs_timestamp_gt: lower seconds / higher nanos -> False "
+              "(nanos never outrank seconds)",
+              warp.hs_timestamp_gt(lower_sec_higher_nanos_new,
+                                   lower_sec_higher_nanos_old) is False)
+
+        check("hs_timestamp_gt: sanity zero-vs-zero -> False",
+              warp.hs_timestamp_gt(zero12, zero12) is False)
+    except Exception as exc:                                      # noqa: BLE001
+        check("test_warp_live exposes hs_timestamp_gt", False, repr(exc))
+
+    # Stage D restore (turbo 1MHz / REU off) must sit inside main()'s
+    # `finally`, so a raise anywhere above it — notably the rekey stage's
+    # asserts, expected to raise on unfixed firmware — still restores the
+    # device (today's failure mode before this fix: only lock.release()
+    # was in finally, so the device was left at 48 MHz / turbo stuck).
+    try:
+        import test_warp_live as warp
+        check("test_warp_live.main(): Stage D restore call is inside "
+              "the outer try/finally's `finally:` block",
+              _restore_in_finally(warp),
+              "set_turbo_mhz(client, 1) must be reachable even when an "
+              "earlier stage (e.g. rekey) raises")
+
+        # Alarm-proof: parse two synthetic ASTs directly (bypassing
+        # inspect.getsource, which needs a real backing file) with
+        # _restore_in_finally_ast — the same function the real check
+        # above calls. The "bad" shape is exactly the REGRESSION this
+        # check exists to catch: set_turbo_mhz called in the try body,
+        # with an unrelated finally (just lock.release(), as it was in
+        # this file before this change) alongside it. If the detector
+        # can't tell that apart from the real fix, it is vacuous.
+        bad_src = (
+            "def main():\n"
+            "    try:\n"
+            "        set_turbo_mhz(client, 1)\n"
+            "    finally:\n"
+            "        lock.release()\n"
+        )
+        check("alarm-proof: restore-in-try-body (not finally) is "
+              "correctly flagged as NOT restored-in-finally",
+              _restore_in_finally_ast(ast.parse(bad_src)) is False,
+              "the detector must distinguish this from the real fix, or "
+              "it would pass vacuously on the pre-fix code")
+
+        good_src = (
+            "def main():\n"
+            "    try:\n"
+            "        pass\n"
+            "    finally:\n"
+            "        set_turbo_mhz(client, 1)\n"
+            "        lock.release()\n"
+        )
+        check("alarm-proof: restore-in-finally IS detected",
+              _restore_in_finally_ast(ast.parse(good_src)) is True)
+    except Exception as exc:                                      # noqa: BLE001
+        check("test_warp_live.main() restore-in-finally check runs", False,
+              repr(exc))
 
     total = passed + failed
     print(f"\nResults: {passed}/{total} passed, {failed} failed")
