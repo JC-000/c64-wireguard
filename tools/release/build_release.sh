@@ -37,9 +37,12 @@
 # Every build/labels.txt is checked structurally after each variant is
 # built (not by grepping PRG bytes): the default variants must come out
 # with WG_MTU == $035C and no uci_send_part symbol; the mtu1440 variants
-# must come out with WG_MTU == $05A0 and uci_send_part present. A mismatch
-# fails the script — see the CA65FLAGS staleness trap in the Makefile,
-# which is why `make clean` runs between every variant below.
+# must come out with WG_MTU == $05A0 and uci_send_part present; and every
+# variant must carry its own backend's private label (net_arp_pump for
+# ip65, uci_tod_start for uci) and not the other's, so a BACKEND that
+# silently fell back cannot ship green. A mismatch fails the script — see
+# the CA65FLAGS staleness trap in the Makefile, which is why `make clean`
+# runs between every variant below.
 #
 # Usage: bash tools/release/build_release.sh
 # (invoked by `make release`; every variant is a clean build)
@@ -60,16 +63,52 @@ rm -rf "$REL"
 mkdir -p "$REL"
 
 # --- Structural label assertions -------------------------------------------
-# $1 = artifact name (for error messages), $2 = "default" | "mtu1440"
+# has_label <symbol> — true if labels.txt exports that symbol.
+has_label() { grep -qE "\\.$1\$" "$LABELS"; }
+
+# $1 = artifact name (for error messages), $2 = "default" | "mtu1440",
+# $3 = expected backend ("ip65" | "uci")
+#
+# The backend check is not cosmetic. `uci_send_part` alone cannot tell an ip65
+# build from a uci one: under BACKEND=ip65 no UCI translation unit links at
+# all, so "uci_send_part absent" is satisfied for a reason that has nothing to
+# do with UCI_CHUNKED_WRITE, and `build_variant ip65 1 0` and
+# `build_variant uci 1 0` produced identical verdicts — a BACKEND that
+# silently fell back to the other adapter would have shipped green. So each
+# variant also asserts one label that only its own backend defines, and the
+# absence of the other backend's:
+#   ip65 only  net_arp_pump      (src/net/ip65/net.s — the #120 ARP pump)
+#   uci  only  uci_tod_start     (src/net/uci/uci_cmd.s — the CIA1 TOD start)
+# `net_last_error` is deliberately NOT used: since #122 both backends export
+# it, so it discriminates nothing.
 assert_labels() {
-    local out="$1" kind="$2"
+    local out="$1" kind="$2" backend="$3"
     [ -f "$LABELS" ] || { echo "ERROR: $LABELS missing after building $out" >&2; exit 1; }
 
-    local mtu_line mtu_hex send_part_present=0
+    local mtu_line mtu_hex send_part_present=0 arp_pump=0 tod_start=0
     mtu_line=$(grep -E '^al C:[0-9A-Fa-f]{4} \.WG_MTU$' "$LABELS" || true)
     [ -n "$mtu_line" ] || { echo "ERROR: $out: WG_MTU label missing from labels.txt" >&2; exit 1; }
     mtu_hex=$(sed -E 's/^al C:([0-9A-Fa-f]{4}) \.WG_MTU$/\1/' <<<"$mtu_line" | tr '[:lower:]' '[:upper:]')
-    grep -qE '\.uci_send_part$' "$LABELS" && send_part_present=1
+    if has_label uci_send_part; then send_part_present=1; fi
+    if has_label net_arp_pump;  then arp_pump=1;          fi
+    if has_label uci_tod_start; then tod_start=1;         fi
+
+    case "$backend" in
+        ip65)
+            [ "$arp_pump" -eq 1 ] || {
+                echo "ERROR: $out: net_arp_pump missing — this is not an ip65 build" >&2; exit 1; }
+            [ "$tod_start" -eq 0 ] || {
+                echo "ERROR: $out: uci_tod_start present — a uci unit linked into an ip65 build" >&2; exit 1; }
+            ;;
+        uci)
+            [ "$tod_start" -eq 1 ] || {
+                echo "ERROR: $out: uci_tod_start missing — this is not a uci build" >&2; exit 1; }
+            [ "$arp_pump" -eq 0 ] || {
+                echo "ERROR: $out: net_arp_pump present — an ip65 unit linked into a uci build" >&2; exit 1; }
+            ;;
+        *)
+            echo "ERROR: assert_labels: unknown backend '$backend'" >&2; exit 1 ;;
+    esac
 
     case "$kind" in
         default)
@@ -87,7 +126,8 @@ assert_labels() {
         *)
             echo "ERROR: assert_labels: unknown kind '$kind'" >&2; exit 1 ;;
     esac
-    echo "    labels OK: WG_MTU=\$$mtu_hex uci_send_part=$([ "$send_part_present" -eq 1 ] && echo present || echo absent)"
+    echo "    labels OK: WG_MTU=\$$mtu_hex uci_send_part=$([ "$send_part_present" -eq 1 ] && echo present || echo absent)" \
+         "backend=$backend (net_arp_pump=$arp_pump uci_tod_start=$tod_start)"
 }
 
 # $1 = backend, $2 = REU, $3 = chunked (0|1), $4 = output filename
@@ -102,7 +142,7 @@ build_variant() {
     echo "=== $out (BACKEND=$backend REU=$reu${chunked:+ UCI_CHUNKED_WRITE=$chunked}) ==="
     make clean >/dev/null
     make BACKEND="$backend" REU="$reu" "${extra[@]}" >/dev/null
-    assert_labels "$out" "$kind"
+    assert_labels "$out" "$kind" "$backend"
     cp build/wireguard.prg "$REL/$out"
 }
 

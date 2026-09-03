@@ -24,7 +24,10 @@ project's own Python responder, on **both** backends.
     little-endian. Every datagram from an ip65 build therefore left
     for the byte-swapped port — for the default peer port 51820, that
     is 27850. **The RR-Net build had never completed a handshake on
-    the wire in its life.** It stayed invisible because no ip65 build
+    the wire in its life** against any peer whose port's two bytes
+    differ; the swap is a no-op only for the 256 ports whose two bytes
+    are equal, and WireGuard's default is not one of them. It stayed
+    invisible because no ip65 build
     has ever run on hardware and every existing Ethernet-VICE suite
     measured things that do not depend on the destination port. Found
     by a new VICE-Ethernet echo suite via `tcpdump`, then confirmed in
@@ -58,7 +61,9 @@ project's own Python responder, on **both** backends.
   alone suffices: ip65's caps are natively 1472/1472, so no firmware
   is involved. Measured at both REU settings with 371 B free in
   `MAIN_AREA_HI`, highest application address `$9E8C`, clear of the
-  ip65 blob's BSS at `$A000-$AF3F`. This is a build option, not a
+  ip65 blob's BSS, which occupies `$A000-$AF3F` inside the
+  `$A000-$BFFF` the `IP65_BSS` region reserves for it
+  (`__IP65_BSS_SIZE__ = $2000`). This is a build option, not a
   shipped artefact — the `wireguard-rrnet-*.prg` files in this
   release are the default 860-byte-MTU builds.
 - **2026-08-31 security sweep** — nine issues closed, most severe is
@@ -127,11 +132,14 @@ project's own Python responder, on **both** backends.
 of these notes carried "VICE-verified only" in that firmware column,
 which was wrong in both directions. The `wireguard-rrnet-*.prg` files
 **as built before this release could not complete a handshake with any
-real peer**: every datagram left for a byte-swapped destination port
-([#118](https://github.com/JC-000/c64-wireguard/issues/118)), and the
-first send to any off-subnet peer was reported to the session layer as
-a fatal failure
-([#120](https://github.com/JC-000/c64-wireguard/issues/120)). The
+real peer whose port's two bytes differ** — the WireGuard default 51820
+among them: every datagram left for a byte-swapped destination port
+([#118](https://github.com/JC-000/c64-wireguard/issues/118)), which is
+a no-op only for the rare port whose two bytes are equal. The first
+send to any off-subnet peer was additionally reported to the session
+layer as a fatal failure
+([#120](https://github.com/JC-000/c64-wireguard/issues/120)); that one
+alone was not fatal, since the second attempt succeeded. The
 files in *this* release have a real WireGuard handshake with
 Cloudflare's production edge behind them, over the internet, with a
 ping reply carried through the tunnel — see "Real-peer interop" below.
@@ -227,7 +235,7 @@ firewall rules, no VPN change.
 |---|---|
 | Handshake | `ACTIVE` in 454.5 s; Type-1 on the wire `10.43.23.225:51820 → 162.159.192.1:2408` |
 | Ping | reply from `1.1.1.1` **through the tunnel** |
-| DNS | both queries answered and structurally validated on the C64 |
+| DNS | both queries received a structurally validated response on the C64 (`github.com` came back `TC=1` with zero answers) |
 | Rekey ×2 | `ACTIVE` both times, at 184.9 s and 193.6 s |
 | Fragments | **zero**, throughout |
 
@@ -262,13 +270,14 @@ direction of this release's MTU story:
 Both were validated structurally rather than by length alone — inner
 header `1.1.1.1:53 → 172.16.0.2:53`, transaction id, QR bit, question
 echoed, and the length agreeing with the inner UDP header's own field.
-The ceiling is **Cloudflare's resolver policy, not an MTU or path
-effect**: we advertised a 1412-byte EDNS buffer derived from the
-build, so our own request was demonstrably not the binding limit, and
-the C64's direct path behaved identically to the host's, which rules
-out the host tunnel. 1278 B is the largest datagram this run could
-observe, and it is resolver-limited. That closes the question rather
-than answering it the way we hoped.
+Nothing above 1280 B arrived while we advertised a 1412-byte EDNS
+buffer, so our own request was not the binding limit, and the C64's
+direct path matched the host's, so the host's WARP tunnel is not the
+cause either. What this run does **not** separate is Cloudflare's
+resolver policy from a limit imposed inside WARP itself: both paths
+terminate at WARP, so either explanation predicts the agreement we
+saw. 1278 B is the largest inbound tunnel datagram observed, and only
+one name was ever truncated.
 
 Honest notes on the run: a reporting bug counted DNS replies across
 queries (fixed in `4e050ec`; no assertion depended on it); a test-side
