@@ -210,6 +210,16 @@ submodule commits at this release, not asserted from memory.
 
 ## Checksums
 
+**Release procedure:** create the annotated tag first, on a clean tree, then build — `VERSION` and the `SHA256SUMS` header are stamped from `git describe --tags --dirty`, so without the tag (or with a modified tracked file such as the `ip65` symlink) they read `v1.0.0-N-g…` or `…-dirty`:
+
+```
+git tag -a v1.1.0 -m "c64-wireguard v1.1.0"
+make release
+gh release create v1.1.0 --draft --target master --title "c64-wireguard v1.1.0" \
+  --notes-file docs/RELEASE_NOTES_v1.1.0.md build/release/*
+```
+
+
 `SHA256SUMS` is attached to this release and covers every other
 attached file. Its first line is a comment naming the release version
 (`git describe --tags --always --dirty`); verify with `shasum -c
