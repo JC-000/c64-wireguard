@@ -416,7 +416,7 @@ WARP_PROFILE=/path/to/wgcf-profile.conf U64_HOST=<device-ip> \
     python3 tools/test_warp_live.py
 ```
 
-Expected stage output (2026-09-03, U64E, fw 3.15 + [#807](https://github.com/GideonZ/1541ultimate/issues/807) spike):
+Expected stage output (2026-09-03, U64E, upstream test-merge `d33b7802` + the [#807](https://github.com/GideonZ/1541ultimate/issues/807) spike, reporting fw 3.15 / fpga 124 / core 1.4F):
 
 - Stage A/B: `Stage A: ACTIVE in 48.5s` (log line), then `PING REPLY OK` on screen.
 - Stage C: a fresh `ACTIVE in ~48s` on the `MSG_PORT=53` PRG, then `reply_recv_len=1278` for the `namecheap.com` TXT query (the second query, above ~1280 B, is truncated by `1.1.1.1` inside WARP itself — expected, not a failure of this tool).
