@@ -262,11 +262,19 @@ def parse_map_exports(path: str) -> dict[str, int]:
     """{symbol: value} from an ld65 map's `Exports list by name:`.
 
     Rows carry two symbols per line: ``name  00A000 RLA   other  00B000 RLA``.
+
+    The terminator is spelled ``[^\\n]*`` rather than ``.*``: under re.S a
+    dot matches newlines too, so ``^\\S.*:`` used to match the underline
+    row right beneath the header and run on to the next colon anywhere in
+    the file, leaving the body a single "\\n". This function raised
+    "parsed no exports" on EVERY ld65 map — measured on both
+    build/wireguard.map and ip65-build/ip65-c64.map — and had no caller to
+    notice until issue #120's suite wanted arp_ip.
     """
     with open(path) as fh:
         text = fh.read()
-    m = re.search(r"^Exports list by name:\s*$(.*?)^\S.*:\s*$", text,
-                  re.S | re.M)
+    m = re.search(r"^Exports list by name:[^\n]*\n(.*?)^\S[^\n]*:[^\n]*$",
+                  text, re.S | re.M)
     if not m:
         raise RuntimeError(f"{path}: no 'Exports list by name:' section")
     out: dict[str, int] = {}
@@ -359,10 +367,15 @@ class EthVice:
     """
 
     def __init__(self, vice_bin: str, port: int = 0, prg_path: str = PRG_PATH,
-                 reu: bool = True):
+                 reu: bool = True, iface: str = ETH_IFACE):
         self.vice_bin = vice_bin
         self.prg_path = prg_path
         self.reu = reu
+        # The feth rig's VICE side by default; a BRIDGED run passes a real
+        # NIC name instead (e.g. "en4"), which puts the C64 on the real LAN
+        # with its own DHCP lease. VICE binds a libpcap interface by name,
+        # so the NIC IS the bridge — see docs/vice-eth-nat.md.
+        self.iface = iface
         self._allocator = PortAllocator(port_range_start=6570,
                                         port_range_end=6590)
         self._own_port = port == 0
@@ -384,7 +397,7 @@ class EthVice:
             minimize=True,
             ethernet=True,
             ethernet_mode="rrnet",
-            ethernet_interface=ETH_IFACE,
+            ethernet_interface=self.iface,
             ethernet_driver="pcap",
             ethernet_executable=self.vice_bin,
             run_as_root=False,        # the BPF nodes are world-rw on this rig
@@ -393,7 +406,7 @@ class EthVice:
         self.proc = ViceProcess(config)
         self.proc.start()
         log(f"=== VICE pid={self.proc._proc.pid if self.proc._proc else '?'} "
-            f"port={self.port} iface={ETH_IFACE} (warp OFF) ===")
+            f"port={self.port} iface={self.iface} (warp OFF) ===")
         self.tr = self._connect()
         return self
 
@@ -665,7 +678,11 @@ class Tap:
         r"IP (\d+\.\d+\.\d+\.\d+)\.(\d+) > (\d+\.\d+\.\d+\.\d+)\.(\d+): "
         r"UDP, length (\d+)")
 
-    def __init__(self, bpf_filter: str):
+    def __init__(self, bpf_filter: str, iface: str = HOST_IFACE):
+        # feth1 (the host end of the rig pair) by default; a BRIDGED run
+        # taps the same NIC VICE injects on, where the host's own BPF sees
+        # both the C64's frames and the LAN's answers.
+        self.iface = iface
         self.filter = f"({bpf_filter}) or (ip[6:2] & 0x1fff != 0)"
         self.records: list[UdpRec] = []
         self.frags: list[str] = []
@@ -675,7 +692,7 @@ class Tap:
 
     def __enter__(self) -> "Tap":
         self._proc = subprocess.Popen(
-            ["tcpdump", "-i", HOST_IFACE, "-l", "-n", "-q", "-U", self.filter],
+            ["tcpdump", "-i", self.iface, "-l", "-n", "-q", "-U", self.filter],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         threading.Thread(target=self._pump, daemon=True).start()
         deadline = time.monotonic() + 5.0
@@ -685,7 +702,7 @@ class Tap:
                 return self
             if not line and self._proc.poll() is not None:
                 break
-        raise RuntimeError("tcpdump did not start listening on " + HOST_IFACE)
+        raise RuntimeError("tcpdump did not start listening on " + self.iface)
 
     def __exit__(self, *exc) -> None:
         if self._proc is not None:
