@@ -257,10 +257,17 @@ net_udp_send:
         lda #<net_udp_dest_ip
         ldx #>net_udp_dest_ip
         jsr ip65_set_udp_dest
-        ; set dest port (big-endian in ip65)
-        lda net_udp_dest_port
+        ; set dest port. net_udp_dest_port is BIG-endian (net_abi.inc §13.1,
+        ; the UCI backend swaps it on push too); ip65 keeps udp_send_dest_port
+        ; LITTLE-endian in memory and builds the wire header from +1 then +0
+        ; (ip65/udp.s udp_send). A raw copy therefore byte-swapped every
+        ; destination port on the wire: a peer configured on 51820 ($CA6C)
+        ; was sent the Type-1 on 27850 ($6CCA), so no responder ever saw an
+        ; ip65 handshake (measured on the VICE-eth rig 2026-09-03, tcpdump
+        ; showed dst port 0x99B7 for a staged $B7 $99). Swap on copy.
+        lda net_udp_dest_port+1     ; BE low byte -> ip65 LE byte 0
         sta ip65_udp_snd_dport
-        lda net_udp_dest_port+1
+        lda net_udp_dest_port       ; BE high byte -> ip65 LE byte 1
         sta ip65_udp_snd_dport+1
         ; set source port
         lda wg_local_port

@@ -143,6 +143,22 @@ SERIAL_TESTS = [
     # flag, with net_udp_send stubbed (VICE has no UCI). Serial for the same
     # reason as both_backends: it rebuilds the shared tree.
     ("chunked_send",   ["tools/test_chunked_send_boundary.py"]),
+    # Issue #70, ip65 half: the WG_MTU1440=1 knob. Builds ip65 and uci with
+    # and without it, reads WG_MTU / NET_UDP_*_MAX back through
+    # tools/c64_caps.py's labels path, requires `BACKEND=uci WG_MTU1440=1`
+    # (no chunked flag) to be REFUSED, and pins the defaults byte-identical
+    # to a knob-less tree. Serial: it rebuilds the tree five times.
+    ("build_mtu1440",  ["tools/test_build_mtu1440.py"]),
+    # Issue #80, the structural guard. The link-time asserts in
+    # src/net/ip65/ip65_blob.s compare the §13.7 equate to the consumer
+    # cfg; neither is the blob, so a relink of ip65-build/ip65.cfg back to
+    # $4000 links CLEAN (measured 2026-09-03). This reads the blob's own
+    # map. Serial: needs a BACKEND=ip65 tree and builds one. Retires the
+    # FATAL path of tools/test_ip65_bss_corruption.py (rig-only, opt-in).
+    ("ip65_bss_guard", ["tools/test_ip65_bss_guard.py"]),
+    # NOT listed, deliberately: tools/test_ip65_udp_echo_vice.py and
+    # tools/test_ip65_handshake_vice.py need the ethernet VICE rig (feth
+    # pair + dnsmasq + a pcap-capable x64sc); they exit 77 without it.
 ]
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")

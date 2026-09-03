@@ -102,12 +102,45 @@ endif
 # build is byte-identical to a tree without this flag. UCI only — ip65 has
 # no chunked path and its caps are already 1472/1472 (clamped by
 # WG_DATAGRAM_CAP for RAM, see src/constants.inc).
+# The knob $(error) guards below fire at parse time, which would also refuse
+# `make clean BACKEND=uci WG_MTU1440=1`. KNOB_GUARDS is non-empty whenever
+# something other than `clean` is going to be built (an empty goal list means
+# the default target), so clean always works and every build is still guarded.
+KNOB_GUARDS := $(if $(MAKECMDGOALS),$(filter-out clean,$(MAKECMDGOALS)),all)
 UCI_CHUNKED_WRITE ?= 0
 ifeq ($(UCI_CHUNKED_WRITE),1)
 ifneq ($(BACKEND),uci)
+ifneq ($(KNOB_GUARDS),)
 $(error UCI_CHUNKED_WRITE=1 requires BACKEND=uci: the chunked SOCKET_WRITE is a UCI firmware command, ip65 has no equivalent)
 endif
+endif
 CA65FLAGS += -D UCI_CHUNKED_WRITE=1
+endif
+
+# --- WG_MTU1440 (issue #70) ---
+# WG_MTU1440=1 is the generic, backend-agnostic opt-in that lifts
+# WG_DATAGRAM_CAP (src/constants.inc) from 892 to 1472 and hence the tunnel
+# MTU from 860 to 1440. Default 0: BOTH backends keep 892 and the default
+# build is byte-identical to a tree without this flag. ip65 already
+# advertises NET_UDP_SEND_MAX/RECV_MAX 1472/1472, so under BACKEND=ip65 the
+# flag alone is enough (its RR-Net path is unmeasured at 1472 and #80 is
+# open, hence opt-in). Under BACKEND=uci only the chunked SOCKET_WRITE path
+# raises NET_UDP_SEND_MAX to 1472, so a uci build with WG_MTU1440=1 but
+# without UCI_CHUNKED_WRITE=1 can never carry a 1440-byte MTU: the §13.3
+# capability fit (WG_MTU + 32 <= NET_UDP_SEND_MAX, src/contract_asserts.s)
+# is kept by constants.inc clamping WG_MTU back to 860, i.e. the flag would
+# be a SILENT no-op — refuse the pairing here, at parse time, with the fix
+# spelled out.
+WG_MTU1440 ?= 0
+ifeq ($(WG_MTU1440),1)
+ifeq ($(BACKEND),uci)
+ifneq ($(UCI_CHUNKED_WRITE),1)
+ifneq ($(KNOB_GUARDS),)
+$(error WG_MTU1440=1 with BACKEND=uci needs the chunked send path: add UCI_CHUNKED_WRITE=1 (requires GideonZ/1541ultimate#807 spike firmware), or use BACKEND=ip65 where the 1472-byte caps are native)
+endif
+endif
+endif
+CA65FLAGS += -D WG_MTU1440=1
 endif
 
 # --- MSG_PORT (test/warp-interop, issue #87) ---
@@ -281,11 +314,13 @@ $(LIB_DIR):
 .PHONY: FORCE
 FORCE:
 
+# OUT_DIR follows $(LIB_DIR) so a BUILD_DIR override gets its own archives
+# (the scripts default to build/lib when run by hand).
 $(X25519_ARCHIVE): FORCE | $(LIB_DIR)
-	bash tools/integration/build_x25519.sh
+	OUT_DIR=$(abspath $(LIB_DIR)) bash tools/integration/build_x25519.sh
 
 $(CHACHA_ARCHIVE): FORCE | $(LIB_DIR)
-	bash tools/integration/build_chacha20poly1305.sh
+	OUT_DIR=$(abspath $(LIB_DIR)) bash tools/integration/build_chacha20poly1305.sh
 
 # --- Assembler-flag dependency tracking (issue #76) ---
 # The .d fragments record which FILES an object read, not which FLAGS it was
