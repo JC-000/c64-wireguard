@@ -26,8 +26,10 @@ Hunt, in this order, and say for each whether you CONFIRMED it or only SUSPECT i
    network_target.cc) rather than trusting comments; "not X means done" predicates.
 5. Default-build identity: if a change is behind a flag, the default PRG must be
    byte-identical (sha256 at REU=0 and REU=1); say which labels moved and why.
-6. Space: map segment diffs; MAIN_AREA_LO alignment cliff (CRYPTO_BSS align $100);
-   BOOT_CODE margin before LIB_X25519_DATA at $E00; APP_EXTRA 47 B.
+6. Space: MEASURE from the map of an isolated build, never from cfg comments (they go
+   stale). Known cliffs to re-measure: MAIN_AREA_LO (CRYPTO_BSS align $100); BOOT_CODE
+   before LIB_X25519_DATA (align $100; was at $E00 with 64-67 B margin in the flag
+   build, 2026-09-03); APP_EXTRA+APP_DATA before the $8800 overlay (47 B, same date).
 7. Tests: for every new assertion ask whether it could pass by COINCIDENCE (a fixed
    string, a zero-filled buffer, content equality that hides a torn datagram, a label
    that would also be absent for an unrelated reason, `tp_payload_len` which is set
