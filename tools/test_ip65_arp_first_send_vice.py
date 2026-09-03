@@ -1433,6 +1433,35 @@ def main() -> int:
                     "it needs a driver that")
                 log("  lets the app's main loop run — a different suite "
                     "shape, not a knob here.")
+                log("")
+                log("  HOW TO COVER IT, for whoever builds that suite. Do NOT "
+                    "aim at the first send")
+                log("  after net_init: that window opens once per boot, so a "
+                    "probe that misses cannot")
+                log("  be retried, and it overlaps the retry-loop assertions "
+                    "this suite already makes.")
+                log("  Aim at an EVICTION window instead. ip65's arp_cache is "
+                    "an 8-entry MRU list and")
+                log("  arp_process's @request leg jumps straight into "
+                    "ac_add_source (ip65/ip65/arp.s),")
+                log("  which shifts every row down ten bytes and inserts at "
+                    "the top, dropping the last.")
+                log("  That leg does NOT call findip first — only arp_add, on "
+                    "the reply path, dedupes —")
+                log("  so eight ARP requests for the C64's address evict the "
+                    "gateway row even when they")
+                log("  all come from the SAME sender. One host can do it "
+                    "alone with raw ARP frames.")
+                log("  The next send to an off-subnet peer then goes cold "
+                    "mid-session, with the app's")
+                log("  main loop running, and the window is reopenable on "
+                    "demand until the probe lands.")
+                log("  That is also the window where the drop COSTS "
+                    "something: WireGuard retransmits")
+                log("  handshake initiations but not Type 4 transport data, "
+                    "so a datagram discarded")
+                log("  during an eviction pump is simply gone — which is why "
+                    "the counter exists.")
             for ok, label in results:
                 if not ok:
                     log(f"    FAILED: {label}")
