@@ -28,10 +28,40 @@ check is at a wire tap:
             alphabet cannot satisfy this, so an echo cannot pass).
             Every reply is also counted at the tap.
 
-  RED on the default (892 / WG_MTU 860) build: the 893, 1452 and 1472
-  sends are REFUSED by transport_send's gate (C=1, nothing on the wire),
-  which is exactly the cap this suite exists to see lifted.
-  GREEN with `make BACKEND=ip65 WG_MTU1440=1` (or --mtu1440).
+WHICH INVOCATION IS THE RED ONE
+===============================
+
+Both invocations are GREEN when the tree is correct, because each asserts
+what its own build promises:
+
+  python3 tools/test_ip65_udp_echo_vice.py              (default build)
+      WG_MTU 860. 888-892 must go out whole; 893/1452/1472 must be
+      REFUSED by transport_send's 16-bit gate — C=1, tp_packet_len
+      untouched, send counter unconsumed, nothing on the wire. A build
+      that accepted them would be claiming a capacity it does not have.
+
+  python3 tools/test_ip65_udp_echo_vice.py --mtu1440    (WG_MTU1440=1)
+      WG_MTU 1440. ALL SEVEN sizes must go out as exactly one datagram.
+
+Both expectations are derived from the BUILD's own exported WG_MTU, so
+what this suite actually discriminates is the build's CLAIM against the
+WIRE. The reproducible RED is therefore:
+
+    C64_SKIP_BUILD=1 python3 tools/test_ip65_udp_echo_vice.py
+
+over a tree whose labels.txt says WG_MTU = 1440 but whose backend cannot
+deliver it — a knob that raised the equates without raising
+WG_DATAGRAM_CAP, a transport_send gate left at 860, a torn or clamped
+send. Every size is then expected to go out whole and the shortfall is
+named per size. That is the failure this suite exists to catch; whether
+the Makefile has the knob at all is test_build_mtu1440.py's job.
+
+Historical red, for the record: on master fa5b11a — before the #70 port
+fix and under this suite's pre-#118 unconditional "must send" assertion —
+the default build scored 42/52, the 893/1452/1472 rows refused by the 860
+gate and every accepted datagram leaving for a byte-swapped destination
+port (src/net/ip65/net.s copied the big-endian net_udp_dest_port raw into
+ip65's little-endian cell). The port assertion below still guards that.
 
 Sizes are UDP payload sizes on the wire, i.e. Type-4 datagram sizes:
 888/889/891/892 sit at the old UCI ceiling, 893 is the first byte past
@@ -87,9 +117,9 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305  # noqa
 
 from c64_test_harness import Labels, jsr, read_bytes, write_bytes  # noqa: E402
 from vice_eth_rig import (  # noqa: E402
-    DEFAULT_VICE_BIN, HOST_IP, LABELS_PATH, PRG_PATH, EthVice, Tap,
-    assert_ip65_build, boot_and_net_init, build_ip65, c64_ip, log,
-    skip_if_rig_down,
+    CLASSIFIER_CASES, DEFAULT_VICE_BIN, HOST_IP, LABELS_PATH, PRG_PATH,
+    EthVice, Tap, assert_ip65_build, boot_and_net_init, build_ip65, c64_ip,
+    log, selftest_classifier, skip_if_rig_down,
 )
 
 SIZES = (888, 889, 891, 892, 893, 1452, 1472)      # datagram (UDP payload)
@@ -337,12 +367,38 @@ def transport_send(tr, L, payload: bytes, key: bytes, recv_idx: bytes,
 # The sweep
 # ============================================================================
 
+def draw_port(rng: random.Random) -> int:
+    """A port whose byte-swap is also bindable and distinct.
+
+    EchoHost binds both `port` and `swapped(port)` (see its docstring),
+    so the draw has to exclude two families that would crash the run
+    rather than measure anything — roughly 2% of seeds:
+
+      * low byte 0-3  -> swapped(port) < 1024, a privileged port:
+                         PermissionError on bind as uid 501.
+      * low byte == high byte -> swapped(port) == port: the second bind
+                         is the same address and fails EADDRINUSE.
+
+    Also keeps side_port (= port + 1, the ARP warm-up) out of the pair so
+    the warm-up datagrams cannot be counted by the sweep's tap filter.
+    """
+    while True:
+        p = rng.randint(40000, 60000)
+        alt = swapped(p)
+        if alt >= 1024 and alt != p and p + 1 != alt:
+            return p
+
+
 def run_sweep(tr, L, rng: random.Random, mtu: int) -> None:
     c64 = c64_ip(tr, L)
-    port = rng.randint(40000, 60000)
+    port = draw_port(rng)
     side_port = port + 1
-    log(f"  C64 at {c64} (ip65 cfg_ip); echo host {HOST_IP}:{port}; "
+    log(f"  C64 at {c64} (ip65 cfg_ip); echo host {HOST_IP}:{port} "
+        f"(+ byte-swap diagnostic :{swapped(port)}); "
         f"ARP warm-up on :{side_port}")
+
+    local_port = int.from_bytes(read_bytes(tr, L["wg_local_port"], 2), "little")
+    log(f"  C64 listening on wg_local_port {local_port}")
 
     key = bytes(rng.randint(0, 255) for _ in range(32))
     recv_idx = bytes(rng.randint(0, 255) for _ in range(4))
@@ -385,16 +441,39 @@ def run_sweep(tr, L, rng: random.Random, mtu: int) -> None:
                 run_free(tr, WIRE_SETTLE)      # NIC flushes only while running
                 outs = tap.udp(c64, HOST_IP)[before_out:]
 
+                if expected_refusal:
+                    # On a build whose WG_MTU cannot carry this payload, the
+                    # REFUSAL is the correct behaviour and therefore the PASS:
+                    # transport_send's 16-bit gate must return C=1 and nothing
+                    # may reach the wire. Asserting C=0 here regardless (as
+                    # this suite did until the #118 review) made a plain run
+                    # fail four checks by construction on the default build,
+                    # which trains the reader to expect red. The red proof for
+                    # the knob lives in running this suite WITHOUT --mtu1440
+                    # against a tree that claims 1440: see the header.
+                    check(c == 1,
+                          f"{size}: refused (C=1) — {size - WG_DATA_OVERHEAD} "
+                          f"B payload is over this build's WG_MTU {mtu}",
+                          f"C={c}: accepted a payload this build cannot carry")
+                    check(not outs,
+                          f"{size}: nothing reached the wire after the refusal",
+                          f"tap (dport, len) after this send: {outs}")
+                    check(tp_len == 0xEEEE,
+                          f"{size}: tp_packet_len untouched (no encrypt ran)",
+                          f"tp_packet_len = {tp_len}")
+                    check(counter_after == counter,
+                          f"{size}: send counter not consumed by a refusal",
+                          f"{counter} -> {counter_after}")
+                    continue
+
                 ok = check(c == 0,
                            f"{size}: transport_send accepted (C=0)",
-                           (f"C=1: refused by the WG_MTU gate — this build's "
-                            f"WG_MTU is {mtu}, the payload is "
-                            f"{size - WG_DATA_OVERHEAD}"
-                            + (" (expected on the 892 build; build with "
-                               "WG_MTU1440=1)" if expected_refusal else "")))
-                check(len(outs) == 1 and outs[0][1] == size,
+                           f"C=1: refused by the WG_MTU gate — this build's "
+                           f"WG_MTU is {mtu}, the payload is "
+                           f"{size - WG_DATA_OVERHEAD}")
+                check(len(outs) == 1 and outs[0].length == size,
                       f"{size}: tap saw EXACTLY one {size}-byte datagram "
-                      f"C64->host", f"tap (dport, len) after this send: {outs}; "
+                      f"C64->host", f"tap rows after this send: {outs}; "
                       f"fragments so far: {tap.fragments()}")
                 if not ok:
                     continue
@@ -403,12 +482,19 @@ def run_sweep(tr, L, rng: random.Random, mtu: int) -> None:
                 # net_udp_dest_port is big-endian; the UCI backend swaps on
                 # push). A datagram at swapped(port) is the ip65 backend
                 # copying it raw into ip65's little-endian udp_send_dest_port.
-                check(bool(outs) and outs[0][0] == port,
+                check(bool(outs) and outs[0].dport == port,
                       f"{size}: datagram went to the staged port {port} "
                       f"(not byte-swapped {alt})",
-                      f"wire dport = {outs[0][0] if outs else None}: "
+                      f"wire dport = {outs[0].dport if outs else None}: "
                       "src/net/ip65/net.s copies net_udp_dest_port raw into "
                       "ip65's LITTLE-endian udp_send_dest_port")
+                # wg_local_port is the one LITTLE-endian port cell in the
+                # tree; a byte-order slip there would flip send and listen
+                # together and leave every size/content check green.
+                check(bool(outs) and outs[0].sport == local_port,
+                      f"{size}: datagram left FROM the listening port "
+                      f"{local_port}",
+                      f"wire sport = {outs[0].sport if outs else None}")
                 sent_ok += 1
                 check(tp_len == size, f"{size}: tp_packet_len == {size}",
                       f"got {tp_len}")
@@ -440,9 +526,9 @@ def run_sweep(tr, L, rng: random.Random, mtu: int) -> None:
                 got_in = wait_recv(tr, L)
                 time.sleep(0.5)
                 ins = tap.udp(HOST_IP, c64)[before_in:]
-                check(len(ins) == 1 and ins[0][1] == reply_len,
+                check(len(ins) == 1 and ins[0].length == reply_len,
                       f"{size}: tap saw exactly one {reply_len}-byte reply "
-                      "host->C64", f"tap (dport, len): {ins}")
+                      "host->C64", f"tap rows: {ins}")
                 if got_in is None:
                     check(False, f"{size}: C64 received the {reply_len}-byte "
                           "reply", f"udp_recv_ready never set in {RECV_POLLS} "
@@ -492,6 +578,12 @@ def main() -> int:
     log("test_ip65_udp_echo_vice.py — issue #70 (ip65 datagram sizes)")
     log(f"Random seed: {seed} (reproduce with --seed {seed})")
 
+    bad = selftest_classifier()
+    check(not bad, "wire-tap fragment classifier passes its alarm proof "
+          f"({len(CLASSIFIER_CASES)} captured line shapes)", "\n".join(bad))
+    if bad:
+        return 1
+
     skip_if_rig_down(args.vice_bin)
 
     build_ip65(["WG_MTU1440=1"] if args.mtu1440 else [])
@@ -508,6 +600,7 @@ def main() -> int:
                 "wg_peer_port", "hs_transport_send", "tp_peer_recv_idx",
                 "tp_send_counter", "tp_payload_ptr", "tp_payload_len",
                 "tp_packet_len", "WG_MTU"]
+    required.append("wg_local_port")
     missing = [n for n in required if L.address(n) is None]
     if missing:
         log(f"FATAL: labels missing: {missing}")

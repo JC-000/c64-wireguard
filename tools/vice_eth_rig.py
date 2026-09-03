@@ -29,6 +29,25 @@ and looks exactly like a hang (issue #54/#55). Every helper here does.
 ``ResumingTransport`` wraps a transport so host-side helpers written for
 hardware (tools/wg_c64_input.py, which polls with plain read_memory +
 time.sleep) keep working under VICE unchanged.
+
+KNOWN HAZARD — jsr() LEAKS STACK WHEN IT PRE-EMPTS AN INTERRUPT. The
+harness's ``jsr()`` forces the PC to its trampoline without saving or
+restoring SP. If the machine happens to be halted inside the KERNAL's IRQ
+handler when a call is made, the 3-byte frame that handler pushed (PC +
+status) is abandoned, and the I flag it was running under stays set. The
+stack pointer therefore descends a few bytes per unlucky call. The echo
+suite issues on the order of 1400 ``net_poll`` calls in a sweep, so over
+a long enough run the 6510 stack can wrap and the jiffy IRQ can stop
+firing.
+
+Nothing in these suites depends on interrupts: every measurement is taken
+by DMA or at the wire tap, the C64 is driven by explicit ``jsr()`` calls
+rather than by main_loop, and the KERNAL keyboard queue is only used
+before the takeover (while the machine is still running its own loop).
+The suites are also short — a sweep is ~60 s of wall clock. So this is
+documented rather than worked around; a suite that grows to depend on the
+jiffy clock, on ``timer_check``, or on running for minutes under takeover
+must reset the machine between phases instead of assuming SP is intact.
 """
 
 from __future__ import annotations
@@ -40,6 +59,7 @@ import subprocess
 import sys
 import threading
 import time
+from typing import NamedTuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -534,6 +554,104 @@ def boot_and_net_init(tr, labels: Labels, *, boot_timeout: float = BOOT_TIMEOUT,
     return elapsed
 
 
+class UdpRec(NamedTuple):
+    """One whole UDP datagram seen at the tap."""
+    src: str
+    sport: int
+    dst: str
+    dport: int
+    length: int
+
+
+# A `-q -n` full datagram row:
+#   12:03:01.548 IP 10.0.65.130.51820 > 10.0.65.1.39351: UDP, length 1472
+_TCPDUMP_UDP = re.compile(
+    r"IP (\d+\.\d+\.\d+\.\d+)\.(\d+) > (\d+\.\d+\.\d+\.\d+)\.(\d+): "
+    r"UDP, length (\d+)")
+# A `-q -n` NON-FIRST fragment: no ports, because there is no UDP header in
+# it — two bare addresses and a protocol word. This is the shape the BPF
+# fragment clause admits and the shape the old substring test missed.
+_TCPDUMP_FRAG_Q = re.compile(
+    r"IP (\d+\.\d+\.\d+\.\d+) > (\d+\.\d+\.\d+\.\d+): "
+    r"(?:udp|ip-proto-17|ip-proto-udp)\b")
+# The `-v` header line, when a caller runs tcpdump verbosely: a datagram is
+# fragmented iff More-Fragments is set or this piece sits at a non-zero
+# offset.
+_TCPDUMP_V_FLAGS = re.compile(r"flags \[([^\]]*)\]")
+_TCPDUMP_V_OFFSET = re.compile(r"offset (\d+)")
+
+
+def classify_tcpdump_line(line: str):
+    """Classify one tcpdump line: ("udp", UdpRec) | ("frag", line) | (None, None).
+
+    Pure, so it can be proven against captured line shapes without a
+    network — see selftest_classifier(). A torn send is the thing these
+    suites exist to catch, so the fragment arm must not be able to score
+    zero for the wrong reason.
+    """
+    m = _TCPDUMP_UDP.search(line)
+    if m:
+        return "udp", UdpRec(m.group(1), int(m.group(2)), m.group(3),
+                             int(m.group(4)), int(m.group(5)))
+    fl = _TCPDUMP_V_FLAGS.search(line)
+    off = _TCPDUMP_V_OFFSET.search(line)
+    if (fl and "+" in fl.group(1)) or (off and int(off.group(1)) > 0):
+        return "frag", line.rstrip()
+    if _TCPDUMP_FRAG_Q.search(line):
+        return "frag", line.rstrip()
+    if "ip-proto-17" in line or "frag" in line:
+        return "frag", line.rstrip()
+    return None, None
+
+
+#: (line, expected kind) — real shapes, kept next to the classifier so a
+#: regex edit that stops recognising one of them fails loudly.
+CLASSIFIER_CASES = [
+    ("12:03:01.548844 IP 10.0.65.130.51820 > 10.0.65.1.39351: UDP, length 1472",
+     "udp"),
+    ("12:02:57.162390 IP 10.0.65.1.46341 > 10.0.65.130.51820: UDP, length 1452",
+     "udp"),
+    # -q -n non-first fragment: no ports at all.
+    ("12:03:04.572762 IP 10.0.65.130 > 10.0.65.1: udp", "frag"),
+    ("12:03:04.572762 IP 10.0.65.130 > 10.0.65.1: ip-proto-17", "frag"),
+    # -v header lines: More-Fragments set, and a non-zero offset.
+    ("12:03:04.5 IP (tos 0x0, ttl 64, id 4, offset 0, flags [+], "
+     "proto UDP (17), length 1500)", "frag"),
+    ("12:03:04.5 IP (tos 0x0, ttl 64, id 4, offset 1480, flags [none], "
+     "proto UDP (17), length 20)", "frag"),
+    # Unfragmented -v header must NOT be called a fragment.
+    ("12:03:04.5 IP (tos 0x0, ttl 64, id 4, offset 0, flags [DF], "
+     "proto UDP (17), length 1500)", None),
+    ("12:03:04.5 IP (tos 0x0, ttl 64, id 4, offset 0, flags [none], "
+     "proto UDP (17), length 90)", None),
+    ("tcpdump: listening on feth1, link-type EN10MB (Ethernet)", None),
+    ("12:03:04.5 ARP, Request who-has 10.0.65.130 tell 10.0.65.1", None),
+]
+
+
+def selftest_classifier() -> list[str]:
+    """Return a list of failure messages; empty means the detector works.
+
+    This is the fragment arm's alarm proof. Without it, `fragments() == 0`
+    is a claim no evidence supports: the pre-#118 detector scored the
+    `-q -n` fragment shape as nothing, so the assertion passed on a
+    capture full of torn datagrams.
+    """
+    bad: list[str] = []
+    for line, want in CLASSIFIER_CASES:
+        got, value = classify_tcpdump_line(line)
+        if got != want:
+            bad.append(f"classifier said {got!r}, expected {want!r}, for: "
+                       f"{line.strip()[:88]}")
+        if got == "udp" and value.length <= 0:
+            bad.append(f"parsed a non-positive length from: {line.strip()}")
+    rec = classify_tcpdump_line(CLASSIFIER_CASES[0][0])[1]
+    if (rec.src, rec.sport, rec.dst, rec.dport, rec.length) != (
+            "10.0.65.130", 51820, "10.0.65.1", 39351, 1472):
+        bad.append(f"parsed the wrong fields from a known row: {rec}")
+    return bad
+
+
 class Tap:
     """tcpdump on feth1, parsed into UDP records (src, sport, dst, dport, len).
 
@@ -549,7 +667,8 @@ class Tap:
 
     def __init__(self, bpf_filter: str):
         self.filter = f"({bpf_filter}) or (ip[6:2] & 0x1fff != 0)"
-        self.records: list[tuple[str, int, str, int, int]] = []
+        self.records: list[UdpRec] = []
+        self.frags: list[str] = []
         self.raw: list[str] = []
         self._lock = threading.Lock()
         self._proc: subprocess.Popen | None = None
@@ -579,28 +698,46 @@ class Tap:
     def _pump(self) -> None:
         assert self._proc is not None and self._proc.stdout is not None
         for line in self._proc.stdout:
+            kind, value = classify_tcpdump_line(line)
             with self._lock:
                 self.raw.append(line.rstrip())
-                m = self._LINE.search(line)
-                if m:
-                    self.records.append((m.group(1), int(m.group(2)),
-                                         m.group(3), int(m.group(4)),
-                                         int(m.group(5))))
-                elif "ip-proto-17" in line or "frag" in line:
-                    self.records.append(("?", 0, "?", 0, -1))
+                if kind == "udp":
+                    self.records.append(value)
+                elif kind == "frag":
+                    self.frags.append(line.rstrip())
 
     def udp(self, src: str | None = None, dst: str | None = None,
-            dport: int | None = None) -> list[tuple[int, int]]:
-        """(dport, length) of UDP records matching the direction."""
+            dport: int | None = None) -> list[UdpRec]:
+        """Whole-datagram UDP records matching the direction.
+
+        Each is a UdpRec(src, sport, dst, dport, length) — the SOURCE port
+        is carried because it is load-bearing and otherwise unasserted:
+        wg_local_port is the single little-endian port cell among four
+        big-endian ones (src/wg/data.s; net_abi.inc declares
+        net_udp_dest_port big-endian), and flipping its byte order would
+        flip the send and the listen together, leaving every
+        content-and-size check green. The handshake suite asserts the
+        Type-1's source port against the configured local port for
+        exactly that reason.
+        """
         with self._lock:
-            return [(dp, ln) for s, sp, d, dp, ln in self.records
-                    if ln >= 0 and (src is None or s == src)
-                    and (dst is None or d == dst)
-                    and (dport is None or dp == dport)]
+            return [r for r in self.records
+                    if (src is None or r.src == src)
+                    and (dst is None or r.dst == dst)
+                    and (dport is None or r.dport == dport)]
 
     def fragments(self) -> int:
+        """Rows the classifier identified as IP fragments.
+
+        Proven, not assumed: classify_tcpdump_line is a pure function and
+        selftest_classifier() feeds it real captured line shapes,
+        including the `-q -n` non-first fragment (two bare addresses, no
+        ports) that the previous ip-proto-17/"frag" substring test scored
+        as nothing at all — which made a `fragments() == 0` assertion pass
+        vacuously. The echo suite runs that self-test before it sweeps.
+        """
         with self._lock:
-            return sum(1 for r in self.records if r[4] == -1)
+            return len(self.frags)
 
 
 def c64_ip(tr, labels: Labels) -> str:

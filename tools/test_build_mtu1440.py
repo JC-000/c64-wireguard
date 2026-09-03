@@ -19,10 +19,22 @@ WHAT THE KNOB MUST DO
         links, WG_MTU = 1440 (the two knobs agree).
     make BACKEND=ip65 / make BACKEND=uci (no knob)
         BYTE-IDENTICAL to a tree without the knob: WG_MTU = 860 and the
-        PRG sha256 equals (a) the same build with WG_MTU1440=0 spelled out
-        and (b) the master baseline when one is supplied via
-        --baseline DIR / $WG_MTU1440_BASELINE (a directory holding
-        wireguard-ip65.prg and wireguard-uci.prg from a master build).
+        PRG sha256 equals the same build with WG_MTU1440=0 spelled out.
+
+WHAT THE GATE ACTUALLY PROVES. run_regression.py runs this with no
+--baseline, so the identity claim it enforces is the IN-COPY one: within
+one tree, `WG_MTU1440=0` produces the same bytes as no knob at all. That
+is the property a default build can lose by accident (a knob leaking into
+CA65FLAGS unconditionally), and it needs no reference artefact.
+
+Comparing against a real pre-change build is strictly extra, opt-in, and
+only meaningful with provenance: pass --baseline DIR (or
+$WG_MTU1440_BASELINE) where DIR holds wireguard-ip65.prg,
+wireguard-uci.prg AND a COMMIT file naming the sha they were built from.
+That commit must be an ancestor of HEAD and lie at or below the
+merge-base with master, or the whole mode is refused — a baseline built
+from this branch would otherwise pass trivially and prove nothing
+(#118).
 
 RED ON MASTER (measured 2026-09-03, master fa5b11a): the knob is unknown
 to the Makefile, so `make BACKEND=ip65 WG_MTU1440=1` builds the DEFAULT
@@ -138,11 +150,73 @@ def case_knob_off_identity(backend: str, default_sha: str | None) -> None:
           f"default {default_sha}\nknob=0  {sha}")
 
 
-def case_baseline(backend: str, default_sha: str | None, baseline: Path | None
-                  ) -> None:
+def baseline_provenance(baseline: Path) -> tuple[str | None, str]:
+    """The commit a baseline directory was built from, and how we know.
+
+    A baseline is only evidence if it predates the change under test. The
+    directory must therefore carry COMMIT — one line, the full sha the
+    PRGs were built from — written by whoever produced it. Without that
+    the comparison is unfalsifiable: point --baseline at a build of the
+    branch itself and it passes trivially, which is what the #118 review
+    found.
+    """
+    f = baseline / "COMMIT"
+    if not f.exists():
+        return None, (f"{f} is missing — a baseline with no recorded commit "
+                      "cannot be shown to predate this branch")
+    sha = f.read_text().split()[0] if f.read_text().split() else ""
+    if len(sha) < 7:
+        return None, f"{f} does not contain a commit sha"
+    return sha, f"baseline built from {sha[:12]}"
+
+
+def check_baseline_provenance(baseline: Path | None) -> bool:
+    """Gate the whole --baseline mode on the baseline being older than us.
+
+    Older means: the recorded commit is an ANCESTOR of this working tree's
+    HEAD and is reachable from master (i.e. it is at or below the
+    merge-base), so the PRGs really are the pre-change artefacts.
+    """
     if baseline is None:
-        print(f"        (no --baseline: {backend} default sha not compared "
-              "to a master build; see the header)")
+        return False
+    sha, why = baseline_provenance(baseline)
+    if sha is None:
+        check(False, "[baseline] provenance recorded", why)
+        return False
+
+    def git(*args: str) -> tuple[int, str]:
+        r = subprocess.run(["git", *args], cwd=PROJECT_ROOT,
+                           capture_output=True, text=True)
+        return r.returncode, r.stdout.strip()
+
+    rc, _ = git("cat-file", "-e", sha + "^{commit}")
+    if rc != 0:
+        check(False, "[baseline] recorded commit exists in this repo", why)
+        return False
+    rc, _ = git("merge-base", "--is-ancestor", sha, "HEAD")
+    if not check(rc == 0, f"[baseline] {sha[:12]} is an ancestor of HEAD",
+                 f"{why}, which is NOT in this tree's history — it cannot be "
+                 "the 'before' artefact for this branch"):
+        return False
+    rc, mb = git("merge-base", sha, "master")
+    ok = rc == 0 and mb == sha
+    check(ok, f"[baseline] {sha[:12]} is on master (at or below the "
+          "merge-base)",
+          f"merge-base({sha[:12]}, master) = {mb or 'unknown'}: the baseline "
+          "was built from a commit off master, so 'byte-identical to master' "
+          "would not be what it proves")
+    return ok
+
+
+def case_baseline(backend: str, default_sha: str | None, baseline: Path | None,
+                  usable: bool) -> None:
+    if baseline is None:
+        print(f"        (no --baseline: the {backend} default sha is compared "
+              "only to this copy's knob=0 build; see the header)")
+        return
+    if not usable:
+        print(f"        (--baseline rejected on provenance; the {backend} "
+              "comparison is NOT run)")
         return
     ref = baseline / f"wireguard-{backend}.prg"
     if not ref.exists():
@@ -241,13 +315,14 @@ def main() -> int:
     baseline = Path(args.baseline).resolve() if args.baseline else None
 
     print("test_build_mtu1440.py — issue #70 (ip65 WG_MTU1440 knob)")
+    baseline_ok = check_baseline_provenance(baseline)
     try:
         ip65_sha = case_default("ip65", expect_send=1472)
         case_knob_off_identity("ip65", ip65_sha)
-        case_baseline("ip65", ip65_sha, baseline)
+        case_baseline("ip65", ip65_sha, baseline, baseline_ok)
         uci_sha = case_default("uci", expect_send=892)
         case_knob_off_identity("uci", uci_sha)
-        case_baseline("uci", uci_sha, baseline)
+        case_baseline("uci", uci_sha, baseline, baseline_ok)
         case_ip65_knob()
         case_uci_knob_alone()
         case_uci_knob_with_chunked()

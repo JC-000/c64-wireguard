@@ -21,8 +21,9 @@ link reads it.
 
 So this suite reads it. From the two maps and the cfg, it asserts:
 
-  1. every WG segment (build/wireguard.map) ends below the IP65_BSS
-     reservation (cfg MEMORY) — nothing of ours has grown into the window;
+  1. every WG segment (build/wireguard.map) is DISJOINT from the IP65_BSS
+     reservation (cfg MEMORY) — nothing of ours has grown into the window
+     (disjointness, not a ceiling: a segment linked above $BFFF is legal);
   2. every WG segment is disjoint from the blob's MEASURED BSS
      (ip65-c64.map `BSS` row) — the #80 collision itself;
   3. the measured BSS lies inside the IP65_BSS reservation — the blob is
@@ -90,11 +91,17 @@ def check_layout(wg_segs: dict[str, tuple[int, int]],
                 "reservation that #80 introduced is gone"]
     res_lo, res_hi = regions[IP65_BSS_REGION]
 
-    # 1 + 2: our segments vs the reservation and vs the measured BSS.
+    # 1 + 2: our segments must be DISJOINT from the reservation and from
+    # the measured BSS. Disjointness, not a ceiling: the previous form
+    # flagged any segment ending at or above res_lo, which would have
+    # false-positived on a segment legitimately linked ABOVE the window
+    # (there is RAM at $C000-$CFFF, and a future cfg may use it). What
+    # matters is overlap, and only overlap. [a,b] and [c,d] are disjoint
+    # iff b < c or d < a.
     for name, (lo, hi) in sorted(wg_segs.items(), key=lambda kv: kv[1][0]):
-        if hi >= res_lo:
+        if max(lo, res_lo) <= min(hi, res_hi):
             problems.append(
-                f"WG segment {name} {_hx(lo, hi)} reaches into the "
+                f"WG segment {name} {_hx(lo, hi)} OVERLAPS the "
                 f"{IP65_BSS_REGION} reservation {_hx(res_lo, res_hi)}")
         if max(lo, bss_lo) <= min(hi, bss_hi):
             problems.append(
@@ -159,6 +166,22 @@ def self_test(wg_segs, regions, equates, verbose: bool) -> bool:
             print(f"      alarm: {p}")
     ok = any("OVERLAPS the blob's measured BSS" in p for p in problems) \
         and any("not inside the IP65_BSS reservation" in p for p in problems)
+    # And the converse, so the loosening from ceiling to disjointness in
+    # check 1 cannot silently become a no-op: a segment placed ABOVE the
+    # window is legal and must NOT be reported, while one placed INSIDE it
+    # must be.
+    above = dict(wg_segs); above["PROBE_ABOVE"] = (0xC000, 0xC0FF)
+    inside = dict(wg_segs); inside["PROBE_INSIDE"] = (0xA800, 0xA8FF)
+    p_above = [x for x in check_layout(above, (0xA000, 0xAF3F), regions, equates)
+               if "PROBE_ABOVE" in x]
+    p_inside = [x for x in check_layout(inside, (0xA000, 0xAF3F), regions, equates)
+                if "PROBE_INSIDE" in x]
+    print(f"  {'PASS' if not p_above else 'FAIL'}  self-test: a segment at "
+          "$C000-$C0FF (above the window) is NOT flagged"
+          + ("" if not p_above else f" — {p_above}"))
+    print(f"  {'PASS' if p_inside else 'FAIL'}  self-test: a segment at "
+          "$A800-$A8FF (inside the window) IS flagged")
+    ok = ok and not p_above and bool(p_inside)
     print(f"  {'PASS' if ok else 'FAIL'}  self-test: blob BSS at "
           f"$4000-$4F3F (the #80 layout) trips the checker "
           f"({len(problems)} violation(s))")

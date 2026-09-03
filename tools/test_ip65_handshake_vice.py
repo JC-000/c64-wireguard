@@ -183,7 +183,7 @@ def main() -> int:
                 "hs_timestamp", "cfg_static_priv", "cfg_static_pub",
                 "cfg_peer_pub", "cfg_preshared_key", "cfg_peer_endpoint_ip",
                 "cfg_peer_endpoint_port", "tunnel_ip", "ping_target_ip",
-                "tai64n_base_time", "WG_MTU"]
+                "tai64n_base_time", "wg_local_port", "WG_MTU"]
     missing = [n for n in required if L.address(n) is None]
     if missing:
         log(f"FATAL: labels missing: {missing}")
@@ -244,11 +244,23 @@ def main() -> int:
             # copied it raw into ip65's little-endian port (measured
             # 2026-09-03: 51820 left for 27850). Assert the wire, not the log.
             time.sleep(2.0)
-            t1 = [(dp, ln) for dp, ln in tap.udp(ip, HOST_IP) if ln == 148]
-            check(bool(t1) and t1[0][0] == WG_PORT,
+            t1 = [r for r in tap.udp(ip, HOST_IP) if r.length == 148]
+            check(bool(t1) and t1[0].dport == WG_PORT,
                   f"Type-1 (148 B) left for {HOST_IP}:{WG_PORT} on the wire",
-                  f"148-byte datagrams C64->host (dport, len): {t1}; "
+                  f"148-byte datagrams C64->host: {t1}; "
                   f"all C64->host: {tap.udp(ip, HOST_IP)}")
+            # The SOURCE port closes the other half of the byte-order
+            # question. wg_local_port is stored little-endian while all
+            # four other port cells are big-endian (net_abi.inc), so a slip
+            # there flips send and listen together: the responder still
+            # answers to whatever it saw, the session comes up, and every
+            # other check in this suite stays green. Assert the wire.
+            local = int.from_bytes(rt.read_memory(L["wg_local_port"], 2),
+                                   "little")
+            check(bool(t1) and t1[0].sport == WG_PORT and local == WG_PORT,
+                  f"Type-1 left FROM {WG_PORT} (wg_local_port = {local})",
+                  f"wire sport = {t1[0].sport if t1 else None}, "
+                  f"wg_local_port = {local}")
             active = ki.wait_for_state(rt, L["wg_state"], SESSION_ACTIVE, HS_TIMEOUT, poll=1.0)
             hs_secs = time.monotonic() - t0
             timings.append(("handshake 1 (warp)", hs_secs))
