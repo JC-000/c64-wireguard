@@ -1115,8 +1115,31 @@ def main() -> int:
             injector = None
             drop_before3 = opt_byte(tr, L, "ip65_recv_dropped") or 0
             if have_dropped:
+                # LITTLE-endian: net_udp_listen stages `lda wg_local_port /
+                # ldx wg_local_port+1` and ip65's udp_add_listener takes A as
+                # the LOW byte. Decoding this big-endian would aim the probe
+                # at a byte-swapped port and produce exactly a silent
+                # "counter never moved" — which is #118's bug (a peer on
+                # 51820 $CA6C sent to 27850 $6CCA) wearing a different hat.
+                # Both decodings are logged so the right one is eyeballable
+                # against the tap.
                 lp = read_bytes(tr, L["ip65_listen_port"], 2)
                 listen_port = lp[0] | (lp[1] << 8)
+                swapped_port = lp[1] | (lp[0] << 8)
+                log(f"  ip65_listen_port raw {lp.hex()} -> LE {listen_port} "
+                    f"(${listen_port:04X}); BE would be {swapped_port} "
+                    f"(${swapped_port:04X})")
+                # A listener that was never registered means no callback and
+                # no counter, for a completely different reason than the one
+                # this phase reports.
+                listening = opt_byte(tr, L, "ip65_listening")
+                check(listening == 1,
+                      "a listener is registered before the mid-pump probe "
+                      "(ip65_listening == 1)",
+                      f"ip65_listening = {listening} — with no registered "
+                      "port, ip65's udp_process takes its @drop leg without "
+                      "ever calling net_udp_recv_cb, so ip65_recv_dropped "
+                      "could not move whatever the pump did")
                 if listen_port == 0:
                     log("  note: ip65_listen_port is 0 — no listener to aim "
                         "at, so the mid-pump arrival is NOT attempted")
@@ -1224,6 +1247,39 @@ def main() -> int:
                             f"arrival was not inside the pump, so the counter "
                             f"is NOT asserted. ip65_recv_dropped = {drop3}")
                     else:
+                        # DISTINGUISH THE THREE OUTCOMES. A bare "counter is
+                        # 0" does not say which happened, and two of the
+                        # three are not the implementer's bug:
+                        #   dropped   -> counter moved; the disarm engaged.
+                        #   delivered -> the probe is sitting in udp_recv_buf,
+                        #                so the callback ran LIVE and the
+                        #                disarm did NOT engage during the
+                        #                pump. Different defect, opposite
+                        #                sign.
+                        #   unseen    -> on the wire but nowhere in the C64,
+                        #                so ip65 never processed the frame at
+                        #                all (eth_rx starving behind the
+                        #                loop's own ARP broadcasts is the
+                        #                candidate).
+                        rdy = opt_byte(tr, L, "udp_recv_ready")
+                        rlen_b = read_bytes(tr, L["udp_recv_len"], 2)
+                        rlen = rlen_b[0] | (rlen_b[1] << 8)
+                        rbuf = read_bytes(tr, L["udp_recv_buf"], len(probe))
+                        delivered = rbuf == probe
+                        log(f"  after the send: udp_recv_ready={rdy} "
+                            f"udp_recv_len={rlen} "
+                            f"probe bytes in udp_recv_buf: {delivered}")
+                        if delivered:
+                            log("  DIAGNOSIS: the probe was DELIVERED, not "
+                                "dropped — net_udp_recv_cb ran live during "
+                                "the pump, so ip65_send_pump was not set "
+                                "when the datagram arrived. That is a "
+                                "finding about the DISARM, not about the "
+                                "counter.")
+                        elif drop3 == drop_before3:
+                            log("  DIAGNOSIS: the probe is neither counted "
+                                "nor in udp_recv_buf — it reached the wire "
+                                "but ip65 never processed the frame.")
                         check(drop3 is not None and drop3 > drop_before3,
                               "a datagram arriving DURING the pump is counted "
                               "in ip65_recv_dropped",
