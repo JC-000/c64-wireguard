@@ -110,6 +110,21 @@ endif
 CA65FLAGS += -D UCI_CHUNKED_WRITE=1
 endif
 
+# --- MSG_PORT (test/warp-interop, issue #87) ---
+# Overrides the compile-time msg_port used by the chat message / ping
+# path in src/wg/data.s (src/wg/ip_build.s uses it as BOTH src and dst
+# UDP port for the inner tunnel packet). Only meaningful for interop
+# testing against a real peer where the message needs to land on a
+# specific real-world port (e.g. 53 for DNS). Default 9999 is NOT passed
+# through to ca65 at all — the -D flag is only emitted when MSG_PORT is
+# overridden away from the default — so an unadorned `make` keeps
+# data.s on its untouched `.ifndef MSG_PORT` .word $270f path and
+# produces a byte-identical PRG to a tree without this knob.
+MSG_PORT ?= 9999
+ifneq ($(MSG_PORT),9999)
+CA65FLAGS += -D MSG_PORT=$(MSG_PORT)
+endif
+
 # Common ca65 source set — shared by every backend. The in-tree crypto
 # modules that the siblings replace are filtered out below.
 COMMON_SRCS_ALL = $(SRC_DIR)/loadaddr.s \

@@ -334,8 +334,26 @@ ip_hdr_template:
 ; --- Messaging default UDP port ($270f = 9999, big-endian in memory) ---
 ; Initialised here because callers (ip_build) read msg_port directly without
 ; a runtime setup hook. ACME data.asm initialised it with !word $270f.
+;
+; NOTE (test/warp-interop, issue #87 spike): the "big-endian in memory"
+; claim above does not hold for `.word` — ca65 emits `.word $270f` as
+; bytes $0f,$27 (low,high), while ip_build.s's src/dst-port copy
+; (msg_port -> ip_packet_buf+20/22, msg_port+1 -> +21/23) treats byte 0
+; as the WIRE-FIRST (high) byte, matching the UDP-length field's proven
+; high-byte-at-lower-offset convention a few lines below. So the actual
+; on-wire port for the untouched default is $0f27 = 3879, not 9999 —
+; never surfaced because prior tests only ever round-tripped this value
+; against itself. Not fixed here (out of scope / behavior-preserving);
+; the MSG_PORT override below is written in the CORRECT byte order so a
+; caller asking for a specific real-world port (e.g. 53 for DNS) gets
+; that port on the wire.
+.ifdef MSG_PORT
+msg_port:
+        .byte >MSG_PORT, <MSG_PORT
+.else
 msg_port:
         .word $270f
+.endif
 
 ; --- Disk I/O ---
 config_filename:
