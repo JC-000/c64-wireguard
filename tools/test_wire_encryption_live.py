@@ -3,6 +3,20 @@
 
     U64_ALLOW_MUTATE=1 python3.13 tools/test_wire_encryption_live.py --host <ip>
 
+Issue #70 (1472-byte datagrams): build once, then never let the tool rebuild
+— the handshake tool's _build_uci would replace a chunked build with the
+plain one unless C64_SKIP_BUILD=1 (or C64_UCI_CHUNKED_WRITE=1) is set::
+
+    make clean && make BACKEND=uci REU=0 UCI_CHUNKED_WRITE=1
+    C64_SKIP_BUILD=1 U64_ALLOW_MUTATE=1 \\
+        python3.13 tools/test_wire_encryption_live.py --host <ip>
+
+Sections 1b and 4b then send each boundary size exactly once (outbound
+text 828..1412 -> datagrams 888..1472, inbound 860..1440 chars) and COUNT
+datagrams at the wire tap. The fingerprint line the handshake tool logs
+names the send path (uci_send_part present or absent) before the PRG is
+sent; read it.
+
 Until now the evidence that traffic was encrypted was INDIRECT: the host's
 noise.decrypt() succeeded, and ChaCha20-Poly1305 only yields plaintext plus a
 valid tag to someone holding the session key, so cleartext on the wire would
@@ -55,8 +69,62 @@ MARKER_HOST = _sized("QUASAR EIGHT NINE SIXTY", "END QUASAR")
 MARKER_TAMPER = "MUTANT PACKET SHOULD NOT APPEAR"
 
 T4_HDR_LEN = 16     # type(1) + reserved(3) + receiver_idx(4) + counter(8)
+IP_UDP_HDR_LEN = 28 # inner IPv4 + UDP framing that udp_tunnel_build adds
+# A message of N text chars leaves the C64 as ONE datagram of N + 60 bytes:
+# 28 inner headers + 16 Type-4 header + 16 Poly1305 tag.
+OUTBOUND_OVERHEAD = IP_UDP_HDR_LEN + T4_HDR_LEN + 16
+
+# Issue #70 size probe. Outbound text sizes chosen so the DATAGRAM lands on
+# the firmware's chunked-write boundaries (text + 60): 888 = one full part,
+# 889/891/892/893 straddle the plain 892 cap, 1452/1472 are two-part sends
+# with 1472 the datagram cap. Inbound sizes straddle the old MTU (860/861)
+# and end at the new receive ceiling (1420 -> 1452 B, 1440 -> 1472 B).
+# Each size is sent exactly once, so a hit can only come from its own send.
+OUTBOUND_TEXT_SIZES = (828, 829, 831, 832, 833, 1392, 1412)
+INBOUND_TEXT_SIZES = (860, 861, 1420, 1440)
+END_MARKER_LEN = 40     # last 40 chars of every inbound message, unique per size
+INBOUND_WINDOW = 4.0    # seconds for the C64 to poll, decrypt and print
+
+
+def _sized_text(prefix: str, n: int) -> str:
+    """Exactly n chars: a per-size prefix, filler, and a unique 40-char tail.
+
+    The tail is what the screen check looks for: a 1420-char message scrolls
+    a 1000-char screen, so only its END can be expected to be visible.
+    """
+    tail = f"END OF {n:04d} CHAR MESSAGE {prefix}".ljust(END_MARKER_LEN, "Z")
+    assert len(tail) == END_MARKER_LEN
+    head = f"{prefix} SIZE {n:04d} "
+    filler = "THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG "
+    body_len = n - len(head) - len(tail)
+    assert body_len >= 0, f"{n} is too short for the markers"
+    body = (filler * (body_len // len(filler) + 1))[:body_len]
+    text = head + body + tail
+    assert len(text) == n
+    return text
 
 results: list[tuple[bool, str]] = []
+
+
+class _WireTap:
+    """Socket proxy: records every datagram the responder's recv loop pulls.
+
+    Installed as ``rt._sock``; the thread looks the attribute up on every
+    iteration, so the swap takes effect at the next recvfrom. Only
+    ``recvfrom`` is intercepted, everything else is delegated.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.datagrams: list[bytes] = []
+
+    def recvfrom(self, n: int):
+        data, src = self._inner.recvfrom(n)
+        self.datagrams.append(bytes(data))
+        return data, src
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
 
 
 def check(ok: bool, label: str, detail: str = "") -> bool:
@@ -106,6 +174,20 @@ def build_probe():
 
         responder.decrypt_transport = tapped
 
+        # Tap BELOW decrypt as well: the responder thread reads its socket
+        # through `rt._sock` on every iteration, so wrapping that object
+        # counts every datagram the C64 emits before any interpretation. A
+        # torn two-part send is two datagrams here even though its second
+        # half is not a Type-4 and never reaches `tapped`.
+        tap = _WireTap(rt._sock)
+        rt._sock = tap
+
+        has_chunk = "uci_send_part" in L
+        text_max = wg_c64_input.input_max_from_labels(L)
+        print(f"\n  build: uci_send_part={'present' if has_chunk else 'ABSENT'}"
+              f" -> {'chunked 1472' if has_chunk else 'plain 892'} send path,"
+              f" MSG_TEXT_MAX={text_max}", flush=True)
+
         print("\n=== 1. C64 -> host: is the plaintext on the wire? ===",
               flush=True)
         if not wg_c64_input.send_message(tr, MARKER_C64):
@@ -139,6 +221,61 @@ def build_probe():
             check(len(raw) == T4_HDR_LEN + len(plain) + 16,
                   "length accounts for a 16-byte Poly1305 tag",
                   f"{len(raw)} == {T4_HDR_LEN} hdr + {len(plain)} plain + 16 tag")
+
+        print("\n=== 1b. C64 -> host at the chunked-write boundaries (#70) ===",
+              flush=True)
+        # The keyboard path above stays as the one human-shaped message;
+        # these are DMA-staged (wg_c64_input.send_message_dma) because a
+        # 1412-character line cannot be typed ten keys at a time. Same
+        # do_message_input -> udp_tunnel_build -> transport_send path.
+        for n in OUTBOUND_TEXT_SIZES:
+            text = _sized_text("OUT", n)
+            tail = text[-END_MARKER_LEN:]
+            expect_dgram = n + OUTBOUND_OVERHEAD
+            base_w, base_s = len(tap.datagrams), len(seen)
+            try:
+                accepted = wg_c64_input.send_message_dma(tr, text, L)
+            except ValueError as exc:
+                check(False, f"[out {n}] {expect_dgram}-byte datagram: "
+                      f"text fits this build", str(exc))
+                continue
+            if not check(accepted, f"[out {n}] C64 accepted the staged line"):
+                continue
+            # Wait for the decrypt of THIS message (its tail is unique),
+            # then a grace period so a straggling second fragment is counted.
+            pair, deadline = None, time.monotonic() + 30
+            while time.monotonic() < deadline and pair is None:
+                time.sleep(0.2)
+                for raw, plain in seen[base_s:]:
+                    shown = petscii_to_ascii(strip_tunnel_headers(plain))
+                    if tail in shown:
+                        pair = (raw, shown)
+                        break
+            time.sleep(1.0)
+            wire = tap.datagrams[base_w:]
+            check(len(wire) == 1,
+                  f"[out {n}] exactly ONE datagram on the wire",
+                  f"{len(wire)} datagram(s), lengths {[len(d) for d in wire]}")
+            if not wire:
+                continue
+            raw = wire[0]
+            check(len(raw) == expect_dgram,
+                  f"[out {n}] datagram is {expect_dgram} B (text + 60)",
+                  f"got {len(raw)} B")
+            check(tail.encode("ascii") not in raw
+                  and text[:64].encode("ascii") not in raw,
+                  f"[out {n}] marker ABSENT from the datagram")
+            if pair is None:
+                check(False, f"[out {n}] the datagram DECRYPTS to the text",
+                      f"{len(seen) - base_s} Type-4(s) decrypted, none "
+                      f"carrying this message's tail")
+            else:
+                check(pair[1] == text,
+                      f"[out {n}] the datagram DECRYPTS to the text",
+                      f"decrypted {len(pair[1])} chars"
+                      + ("" if pair[1] == text else
+                         f", first difference at "
+                         f"{next((i for i in range(min(len(pair[1]), n)) if pair[1][i] != text[i]), min(len(pair[1]), n))}"))
 
         print("\n=== 2. host -> C64: same question, our direction ===",
               flush=True)
@@ -184,6 +321,44 @@ def build_probe():
         time.sleep(4.0)
         check(alive in _screen_text(tr),
               "session still works after the forgery was rejected")
+
+        print("\n=== 4b. host -> C64 at the receive boundaries (#70) ===",
+              flush=True)
+        # Inbound is bounded by udp_recv_buf/tp_packet (1500 B) and by what
+        # the adapter's SOCKET_READ hands back, not by WG_MTU: 1440 text
+        # chars arrive as a 1472-byte datagram, the receive ceiling.
+        # tp_payload_len is what session_handle_packet decrypted, read over
+        # DMA; the screen check is the human-visible half. Sizes are unique,
+        # so the previous message's length can never satisfy this one's.
+        tp_len_addr = L["tp_payload_len"]
+        for n in INBOUND_TEXT_SIZES:
+            text = _sized_text("IN", n)
+            tail = text[-END_MARKER_LEN:]
+            pkt = responder.encrypt_transport(ascii_to_petscii(text))
+            check(len(pkt) == n + T4_HDR_LEN + 16,
+                  f"[in {n}] datagram we transmit is {n + T4_HDR_LEN + 16} B",
+                  f"got {len(pkt)} B")
+            check(tail.encode("ascii") not in pkt,
+                  f"[in {n}] marker ABSENT from the datagram we transmit")
+            rt.send_raw(pkt)
+            got_len, deadline = -1, time.monotonic() + INBOUND_WINDOW
+            while time.monotonic() < deadline:
+                got_len = int.from_bytes(
+                    bytes(tr.read_memory(tp_len_addr, 2)), "little")
+                if got_len == n:
+                    break
+                time.sleep(0.1)
+            check(got_len == n,
+                  f"[in {n}] tp_payload_len == {n} within {INBOUND_WINDOW:.0f} s",
+                  f"last read {got_len}")
+            on_screen = False
+            while time.monotonic() < deadline + 1.0 and not on_screen:
+                on_screen = tail in _screen_text(tr)
+                if not on_screen:
+                    time.sleep(0.2)
+            check(on_screen,
+                  f"[in {n}] the 40-char END marker is in screen RAM",
+                  f"looked for {tail!r}")
 
         print("\n=== 5. what IS in the clear, by design ===", flush=True)
         if seen:

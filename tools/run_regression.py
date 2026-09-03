@@ -123,6 +123,12 @@ SERIAL_TESTS = [
     ("write_bytes",    ["tools/test_write_bytes_limit.py"]),
     ("uci_stub",       ["tools/test_uci_backend_stub.py"]),
     ("both_backends",  ["tools/test_build_both_backends.py"]),
+    # Issue #70. Needs `make BACKEND=uci UCI_CHUNKED_WRITE=1` — a third tree
+    # state neither the pool nor the two above build — and it is the only
+    # suite that exercises transport_send's 1440/1441 boundary under the
+    # flag, with net_udp_send stubbed (VICE has no UCI). Serial for the same
+    # reason as both_backends: it rebuilds the shared tree.
+    ("chunked_send",   ["tools/test_chunked_send_boundary.py"]),
 ]
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")

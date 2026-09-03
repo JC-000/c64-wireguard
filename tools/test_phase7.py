@@ -493,6 +493,31 @@ def test_icmp_parse(transport, labels):
     return passed, failed
 
 
+IP_UDP_HDR_LEN = 28     # 20 B IPv4 + 8 B UDP, the inner framing of a message
+
+
+def tunnel_mtu(labels):
+    """WG_MTU of the build under test, from labels.txt.
+
+    Two independent sources, and they must agree. `WG_MTU` is an equate
+    that src/exports.s promotes to a label (issue #70); a build predating
+    that export has no such label, but `ip_packet_buf` is `.res WG_MTU`
+    and `ip_pkt_len` is declared directly after it (src/wg/data.s), so
+    their distance IS the MTU — a structural reading that no comment can
+    drift away from. Returns (mtu, source_description).
+    """
+    structural = labels["ip_pkt_len"] - labels["ip_packet_buf"]
+    exported = labels.address("WG_MTU")
+    if exported is not None and exported != structural:
+        raise AssertionError(
+            f"WG_MTU label ({exported}) disagrees with ip_pkt_len - "
+            f"ip_packet_buf ({structural}); ip_packet_buf is no longer "
+            f".res WG_MTU, or ip_pkt_len moved")
+    if exported is not None:
+        return exported, "WG_MTU label"
+    return structural, "ip_pkt_len - ip_packet_buf (WG_MTU not exported)"
+
+
 def test_udp_build(transport, labels, rng):
     """Test udp_tunnel_build constructs correct IP/UDP packets."""
     passed = failed = 0
@@ -585,6 +610,153 @@ def test_udp_build(transport, labels, rng):
             failed += 1
             print(f"  FAIL udp_build #{i}: {'; '.join(errors)}")
 
+    # --- In-place build (issue #70) ---
+    #
+    # do_message_input stages the typed text at ip_packet_buf+28, i.e. the
+    # exact bytes udp_tunnel_build copies it INTO, so the text copy is an
+    # identity copy (src -> same address, byte-forward, so no byte is read
+    # after it was overwritten). That is what let msg_input_buf be dropped
+    # and the datagram cap grow to 1472 without new RAM.
+    #
+    # This case cannot be red on a build that still has msg_input_buf: the
+    # routine is the same either way. What it guards is the aliasing itself —
+    # a future "optimisation" that copies backwards, that clears the payload
+    # area before copying, or that writes the headers through the same pointer
+    # would corrupt an in-place text while still passing the cases above,
+    # which copy from a separate buffer. So the pattern must be NON-CONSTANT
+    # (a repeating byte would survive any shift or partial overwrite) and the
+    # length must be the full MSG_TEXT_MAX (a shorter copy never crosses the
+    # page boundaries the 16-bit copy loop has to get right).
+    mtu, mtu_src = tunnel_mtu(labels)
+    msg_text_max = mtu - IP_UDP_HDR_LEN
+    payload_addr = ip_pkt_buf + IP_UDP_HDR_LEN
+    ip_pkt_len_addr = labels["ip_pkt_len"]
+    if VERBOSE:
+        print(f"  in-place: WG_MTU={mtu} via {mtu_src}; "
+              f"MSG_TEXT_MAX={msg_text_max}; payload at ${payload_addr:04X}")
+
+    # Full-size, plus one that ends mid-page after crossing at least one page
+    # boundary — the two shapes the copy loop distinguishes.
+    for label, text_len in (("full MSG_TEXT_MAX", msg_text_max),
+                            ("page+remainder", min(msg_text_max, 300))):
+        src_ip = bytes(rng.randint(1, 254) for _ in range(4))
+        dst_ip = bytes(rng.randint(1, 254) for _ in range(4))
+        port_val = rng.randint(1024, 65534)
+        port_be = bytes([(port_val >> 8) & 0xFF, port_val & 0xFF])
+        # Every byte value, no period: a shift, a dropped page or a
+        # partial clear all change it.
+        text = bytes(rng.randint(0, 255) for _ in range(text_len))
+
+        write_bytes(transport, tunnel_ip_addr, src_ip)
+        write_bytes(transport, target_ip_addr, dst_ip)
+        write_bytes(transport, msg_port_addr, port_be)
+        # Junk in the header area: the build must overwrite all 28 bytes.
+        write_bytes(transport, ip_pkt_buf, bytes([0xA5] * IP_UDP_HDR_LEN))
+        write_bytes(transport, payload_addr, text)
+        write_bytes(transport, zp_ptr1, struct.pack('<H', payload_addr))
+        write_bytes(transport, zp_tmp1, struct.pack('<H', text_len))
+        write_bytes(transport, ip_pkt_len_addr, b'\xFF\xFF')
+
+        jsr(transport, udp_build)
+
+        total_pkt_len = IP_UDP_HDR_LEN + text_len
+        pkt = bytes(read_bytes(transport, ip_pkt_buf, total_pkt_len))
+        pkt_len = int.from_bytes(read_bytes(transport, ip_pkt_len_addr, 2),
+                                 'little')
+        errors = []
+        if pkt_len != total_pkt_len:
+            errors.append(f"ip_pkt_len={pkt_len}, expected {total_pkt_len}")
+        if text_len == msg_text_max and pkt_len != mtu:
+            errors.append(f"full text did not fill WG_MTU ({mtu})")
+        ip_total = (pkt[2] << 8) | pkt[3]
+        if ip_total != total_pkt_len:
+            errors.append(f"ip_total={ip_total}, expected {total_pkt_len}")
+        if pkt[9] != 17:
+            errors.append(f"protocol={pkt[9]}, expected 17")
+        if pkt[12:16] != src_ip or pkt[16:20] != dst_ip:
+            errors.append("src/dst ip mismatch")
+        if pkt[20:22] != port_be or pkt[22:24] != port_be:
+            errors.append("udp ports mismatch")
+        udp_len = (pkt[24] << 8) | pkt[25]
+        if udp_len != 8 + text_len:
+            errors.append(f"udp_len={udp_len}, expected {8 + text_len}")
+        if py_ip_checksum(pkt[:20]) != 0:
+            errors.append("ip_checksum invalid")
+        got = pkt[IP_UDP_HDR_LEN:]
+        if got != text:
+            bad = [k for k in range(text_len) if got[k] != text[k]]
+            errors.append(
+                f"in-place payload corrupted: {len(bad)} of {text_len} bytes "
+                f"differ, first at offset {bad[0]} "
+                f"(got ${got[bad[0]]:02X}, expected ${text[bad[0]]:02X})")
+        if errors:
+            failed += 1
+            print(f"  FAIL udp_build in-place ({label}, {text_len}B): "
+                  f"{'; '.join(errors)}")
+        else:
+            passed += 1
+            if VERBOSE:
+                print(f"  PASS udp_build in-place ({label}): {text_len}B "
+                      f"identity copy intact")
+
+    return passed, failed
+
+
+def test_read_input_line(transport, labels):
+    """read_input_line stages the typed text at ip_packet_buf+28 (issue #70).
+
+    The keyboard line is read through KERNAL GETIN, which drains the
+    10-byte queue at $0277 / $C6 — ordinary RAM, so the test types by
+    writing it (the same trick tools/wg_c64_input.py uses on hardware).
+    Nine characters and a RETURN fit in one queue.
+
+    RED on a build that still stores into msg_input_buf: the count is
+    right but the bytes are somewhere else. The address is the contract
+    do_message_input relies on when it hands zp_ptr1 = ip_packet_buf+28
+    to udp_tunnel_build, so this is the test that pins the two together.
+    """
+    passed = failed = 0
+
+    ril = labels["read_input_line"]
+    msg_input_len = labels["msg_input_len"]
+    staged = labels["ip_packet_buf"] + IP_UDP_HDR_LEN
+    typed = b"WGTEST123"                      # 9 chars, PETSCII == ASCII here
+    assert len(typed) + 1 <= 10, "must fit the KERNAL queue with its RETURN"
+
+    # Sentinels: a fresh value in the staging area so a stale match is
+    # impossible, and a non-zero count so "9" cannot be a leftover.
+    write_bytes(transport, staged, bytes([0xEE] * (len(typed) + 1)))
+    write_bytes(transport, msg_input_len, b'\x77\x77')
+    # Queue bytes FIRST, count LAST (the IRQ keyboard scan reads the count).
+    write_bytes(transport, 0x0277, typed + b'\x0D')
+    write_bytes(transport, 0x00C6, bytes([len(typed) + 1]))
+
+    jsr(transport, ril, timeout=30.0)
+
+    count = int.from_bytes(read_bytes(transport, msg_input_len, 2), 'little')
+    got = bytes(read_bytes(transport, staged, len(typed)))
+    errors = []
+    if count != len(typed):
+        errors.append(f"msg_input_len={count}, expected {len(typed)}")
+    if got != typed:
+        where = ""
+        legacy = labels.address("msg_input_buf")
+        if legacy is not None:
+            there = bytes(read_bytes(transport, legacy, len(typed)))
+            where = (f"; msg_input_buf still exists at ${legacy:04X} and "
+                     f"holds {there!r}")
+        errors.append(
+            f"text at ip_packet_buf+28 (${staged:04X}) is {got!r}, "
+            f"expected {typed!r}{where}")
+    if errors:
+        failed += 1
+        print(f"  FAIL read_input_line stages at ip_packet_buf+28: "
+              f"{'; '.join(errors)}")
+    else:
+        passed += 1
+        if VERBOSE:
+            print(f"  PASS read_input_line: {len(typed)} chars at "
+                  f"${staged:04X}, msg_input_len={count}")
     return passed, failed
 
 
@@ -1541,6 +1713,7 @@ def run_tests(transport, labels, seed):
         ("ICMP build", lambda: test_icmp_build(transport, labels, rng)),
         ("ICMP parse", lambda: test_icmp_parse(transport, labels)),
         ("UDP build", lambda: test_udp_build(transport, labels, rng)),
+        ("read_input_line", lambda: test_read_input_line(transport, labels)),
         ("UDP parse", lambda: test_udp_parse(transport, labels)),
         ("timer elapsed", lambda: test_timer_elapsed(transport, labels)),
         ("keepalive", lambda: test_keepalive(transport, labels, rng)),
@@ -1606,8 +1779,9 @@ def main():
         "hchacha20", "cookie_handle_type3", "hs_set_mac2",
         "timer_session_start", "timer_check", "timer_mark_send",
         "timer_elapsed_cmp", "config_read_file",
-        "ip_packet_buf", "cookie_valid", "cookie_buf",
+        "ip_packet_buf", "ip_pkt_len", "cookie_valid", "cookie_buf",
         "hs_sender_idx", "hs_mac1_valid",
+        "read_input_line", "msg_input_len",
         "input_buffer", "zp_ptr1", "zp_tmp1",
         "tunnel_ip", "ping_target_ip", "ping_seq",
         "ip_cksum_result", "msg_port", "msg_recv_ptr", "msg_recv_len",
