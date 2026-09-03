@@ -21,7 +21,7 @@
 .import hs_preshared_key
 .import wg_peer_ip
 .import wg_peer_port
-.import tai64n_init
+.import tai64n_sync
 .import net_udp_close
 
 ; config_load copies the peer endpoint as ONE 6-byte run over IP(4)+port(2),
@@ -129,7 +129,13 @@ config_load:
         dex
         bpl @psk
 
-        ; Initialize TAI64N epoch anchor from base time
-        jsr tai64n_init
+        ; Anchor the TAI64N timeline to the base time — but ONLY if the
+        ; base time changed (first load, or a new WG.CFG). This routine
+        ; runs at the top of every session_initiate, rekey included, and
+        ; re-anchoring unconditionally reset the Type 1 timestamp to
+        ; base || 00000001 on every handshake, which a conformant peer
+        ; rejects after the first one (issue #87). tai64n_sync keeps the
+        ; running timeline when the 8 staged bytes match the anchored copy.
+        jsr tai64n_sync
 
         rts

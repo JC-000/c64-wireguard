@@ -41,7 +41,7 @@ SESSION_ACTIVE  = 2
 ; Config / entropy / timestamp
 .import config_load
 .import entropy_fill
-.import tai64n_increment
+.import tai64n_now
 ; Handshake
 .import hs_create_initiation
 .import hs_process_response
@@ -172,8 +172,11 @@ session_initiate:
         ldy #4
         jsr entropy_fill
 
-        ; Increment timestamp for replay protection
-        jsr tai64n_increment
+        ; Fresh, strictly increasing TAI64N timestamp for replay protection
+        ; (base + elapsed since the anchor, held above the last one emitted;
+        ; issue #87 — a bare tai64n_increment on the value config_load had
+        ; just reset produced the same bytes on every initiation)
+        jsr tai64n_now
 
         ; Create Type 1 initiation packet
         jsr hs_create_initiation

@@ -242,6 +242,8 @@
 .export tai64n_base_time
 .export tai64n_init_jiffy
 .export tai64n_seq
+.export tai64n_last
+.export tai64n_init_base
 
 ; --- Disk I/O ---
 .export config_filename
@@ -813,6 +815,13 @@ tai64n_init_jiffy:
         .res 3, 0              ; jiffy clock snapshot at tai64n_init
 tai64n_seq:
         .res 4, 0              ; monotonic sub-second sequence counter (big-endian)
+tai64n_last:
+        .res 12, 0             ; last timestamp tai64n_now emitted (#87 guard);
+                               ; MUST directly follow tai64n_seq — tai64n_init
+                               ; zeroes both in one loop (asserted in tai64n.s)
+tai64n_init_base:
+        .res 8, 0              ; tai64n_base_time as of the last tai64n_init;
+                               ; tai64n_sync re-anchors only when it differs
 
 ; --- Disk I/O line buffer ---
 disk_line_buf:
