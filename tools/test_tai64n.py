@@ -40,6 +40,19 @@ def read_timestamp(transport, labels):
     return bytes(read_bytes(transport, labels["hs_timestamp"], 12))
 
 
+def cold_init(transport, labels):
+    """tai64n_init as at power-on: tai64n_last zeroed first.
+
+    Since #87 tai64n_init deliberately keeps tai64n_last (the last value
+    emitted stays the floor, so a re-anchor to a lower base cannot go
+    backwards). Every test here re-stages the base and expects the exact
+    base-relative values a cold start produces, so clear the floor the way
+    LOAD does before anchoring.
+    """
+    write_bytes(transport, labels["tai64n_last"], bytes(12))
+    jsr(transport, labels["tai64n_init"])
+
+
 # ============================================================================
 # Test cases
 # ============================================================================
@@ -50,7 +63,7 @@ def test_tai64n_init_zeros(transport, labels):
 
     # Write zeros to base time
     write_bytes(transport, labels["tai64n_base_time"], bytes(8))
-    jsr(transport, labels["tai64n_init"])
+    cold_init(transport, labels)
 
     ts = read_timestamp(transport, labels)
     seq = bytes(read_bytes(transport, labels["tai64n_seq"], 4))
@@ -82,7 +95,7 @@ def test_tai64n_init_copies_base(transport, labels):
     # As 8-byte big-endian: 00 00 00 00 65 E5 A9 00
     base_time = bytes([0x00, 0x00, 0x00, 0x00, 0x65, 0xE5, 0xA9, 0x00])
     write_bytes(transport, labels["tai64n_base_time"], base_time)
-    jsr(transport, labels["tai64n_init"])
+    cold_init(transport, labels)
 
     ts = read_timestamp(transport, labels)
 
@@ -112,7 +125,7 @@ def test_tai64n_init_snapshots_jiffy(transport, labels):
     passed = failed = 0
 
     write_bytes(transport, labels["tai64n_base_time"], bytes(8))
-    jsr(transport, labels["tai64n_init"])
+    cold_init(transport, labels)
 
     jiffy = bytes(read_bytes(transport, labels["tai64n_init_jiffy"], 3))
     jiffy_val = (jiffy[0] << 16) | (jiffy[1] << 8) | jiffy[2]
@@ -134,7 +147,7 @@ def test_tai64n_now_basic(transport, labels):
 
     base_time = bytes([0x00, 0x00, 0x00, 0x00, 0x65, 0xE5, 0xA9, 0x00])
     write_bytes(transport, labels["tai64n_base_time"], base_time)
-    jsr(transport, labels["tai64n_init"])
+    cold_init(transport, labels)
 
     # Sleep briefly so jiffies advance
     time.sleep(0.1)
@@ -174,7 +187,7 @@ def test_tai64n_now_sequence_increments(transport, labels):
 
     base_time = bytes([0x00, 0x00, 0x00, 0x00, 0x65, 0xE5, 0xA9, 0x00])
     write_bytes(transport, labels["tai64n_base_time"], base_time)
-    jsr(transport, labels["tai64n_init"])
+    cold_init(transport, labels)
 
     # First call
     jsr(transport, labels["tai64n_now"])
@@ -221,7 +234,7 @@ def test_tai64n_now_monotonic(transport, labels):
 
     base_time = bytes([0x00, 0x00, 0x00, 0x00, 0x65, 0xE5, 0xA9, 0x00])
     write_bytes(transport, labels["tai64n_base_time"], base_time)
-    jsr(transport, labels["tai64n_init"])
+    cold_init(transport, labels)
 
     timestamps = []
     for i in range(5):
@@ -326,7 +339,7 @@ def test_tai64n_now_elapsed_seconds(transport, labels):
     base_val = 1000
     base_time = base_val.to_bytes(8, 'big')
     write_bytes(transport, labels["tai64n_base_time"], base_time)
-    jsr(transport, labels["tai64n_init"])
+    cold_init(transport, labels)
 
     # Let some jiffies elapse
     time.sleep(0.1)
@@ -371,7 +384,7 @@ def test_tai64n_now_elapsed_seconds(transport, labels):
 
     cur_bytes = read_bytes(transport, 0xA0, 3)
     cur = (cur_bytes[0] << 16) | (cur_bytes[1] << 8) | cur_bytes[2]
-    fake_init = (cur - 120) & 0xFFFFFF
+    fake_init = (cur - 120) % 0x4F1A00  # KERNAL rolls the jiffy clock over at 24 h, not 2^24
     write_bytes(transport, labels["tai64n_init_jiffy"], bytes([
         (fake_init >> 16) & 0xFF,
         (fake_init >> 8) & 0xFF,
@@ -468,7 +481,7 @@ def main():
     required = [
         "tai64n_init", "tai64n_now", "tai64n_increment",
         "tai64n_base_time", "tai64n_init_jiffy", "tai64n_seq",
-        "hs_timestamp",
+        "tai64n_last", "hs_timestamp",
     ]
     for name in required:
         if labels.address(name) is None:

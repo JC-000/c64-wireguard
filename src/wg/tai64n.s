@@ -20,7 +20,10 @@
 ;   * config_load calls tai64n_sync, which re-anchors (tai64n_init) ONLY
 ;     when tai64n_base_time differs from the copy taken at the last init
 ;     (tai64n_init_base): the first load, or a genuinely new base time.
-;     A re-anchor starts a new timeline (seq and tai64n_last cleared).
+;     A re-anchor resets the anchor and seq but NOT tai64n_last: the
+;     peer only knows greatest-seen per static key, so a re-anchor to a
+;     LOWER base must still emit above what already went out, and the
+;     guard does exactly that. tai64n_last is zero only at cold start.
 ;   * session_initiate calls tai64n_now. The candidate is
 ;     base + (jiffies since the anchor) / 60 seconds, with the sub-second
 ;     sequence counter tai64n_seq (+1 per call) in the nanosecond field.
@@ -48,9 +51,6 @@
         .import tai64n_seq
         .import tai64n_last
         .import hs_timestamp
-
-; tai64n_init zeroes tai64n_seq and tai64n_last in ONE 16-byte loop.
-.assert tai64n_last = tai64n_seq + 4, lderror, "tai64n_last must directly follow tai64n_seq in data.s - tai64n_init zeroes both in one 16-byte loop"
 
         .segment "APP_CODE"
 
@@ -84,8 +84,9 @@ tai64n_sync:
 ;
 ; Snapshots the jiffy clock into tai64n_init_jiffy, copies
 ; tai64n_base_time into hs_timestamp[0..7] and tai64n_init_base,
-; zeros nanoseconds, and zeros the sub-second sequence counter and the
-; last-emitted timestamp (a new anchor is a new timeline).
+; zeros nanoseconds and the sub-second sequence counter. It does NOT
+; touch tai64n_last: what has already been emitted stays the floor for
+; everything that follows, whatever the new base is.
 ;
 ; Clobbers: A, X
 ; =============================================================================
@@ -115,9 +116,8 @@ tai64n_init:
         sta hs_timestamp+10
         sta hs_timestamp+11
 
-        ; Zero the sequence counter (4) and tai64n_last (12) in one loop;
-        ; adjacency asserted at link time above
-        ldx #15
+        ; Zero the sequence counter (tai64n_last deliberately kept)
+        ldx #3
 @zero:
         sta tai64n_seq,x
         dex
@@ -143,10 +143,11 @@ tai64n_init:
 ;   - running clock: seconds are non-decreasing for 24 h after the anchor
 ;     (the $4F1A00 correction covers the KERNAL's rollover), seq +1 -> the
 ;     candidate alone increases;
-;   - anything else (more than 24 h since the anchor, a DMA write to the
-;     clock, tai64n_init_jiffy poked by a test): the guard emits last + 1.
-;   So by induction every call emits a value > the previous one until the
-;   next tai64n_init, which deliberately starts a fresh timeline.
+;   - anything else (a re-anchor to a LOWER base time, more than 24 h
+;     since the anchor, a DMA write to the clock, tai64n_init_jiffy poked
+;     by a test): the guard emits last + 1.
+;   So by induction every call emits a value > the previous one for the
+;   whole run: tai64n_init never clears tai64n_last.
 ;
 ; Nanoseconds stay < 1e9: seq advances once per initiation, and a
 ; handshake takes tens of seconds even at 48 MHz.
