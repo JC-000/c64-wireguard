@@ -737,15 +737,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     # Stage C build).
     labels_a = Path(args.labels)
     prg_a = labels_a.parent / "wireguard.prg"
-    if not LABELS_C.exists():
-        log.error("Stage C build missing: %s — build it first: make "
-                  "BACKEND=%s REU=0 %s MSG_PORT=53 BUILD_DIR=build_msgport53",
-                  LABELS_C, args.backend,
-                  "WG_MTU1440=1" if args.backend == "ip65"
-                  else "UCI_CHUNKED_WRITE=1")
-        return 2
     try:
+        # Stage A first: a wrong --backend is the more fundamental error and
+        # must be the one reported, even when Stage C is not built yet.
         L_A = load_labels_for_backend(labels_a, args.backend)
+        if not LABELS_C.exists():
+            log.error("Stage C build missing: %s — build it first: make "
+                      "BACKEND=%s REU=0 %s MSG_PORT=53 "
+                      "BUILD_DIR=build_msgport53",
+                      LABELS_C, args.backend,
+                      "WG_MTU1440=1" if args.backend == "ip65"
+                      else "UCI_CHUNKED_WRITE=1")
+            return 2
         L_C = load_labels_for_backend(LABELS_C, args.backend)
     except BackendMismatch as exc:
         log.error("backend mismatch: %s", exc)
