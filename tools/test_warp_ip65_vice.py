@@ -762,6 +762,15 @@ def main() -> int:
     VERBOSE = args.verbose
     stages = args.stages.upper()
 
+    # Stage D rekeys the session Stage A established, and lives inside the
+    # same VICE instance, so "--stages CD" would silently run nothing for D
+    # -- a no-op that reports success. Refuse instead of no-opping.
+    if "D" in stages and args.rekey > 0 and not ("A" in stages or "B" in stages):
+        raise SystemExit(
+            "--stages %s: D rekeys the session A establishes and shares its "
+            "VICE, so it cannot run without A. Use --stages ACD (A costs one "
+            "handshake, about 8 minutes on this rig)." % stages)
+
     seed = args.seed if args.seed is not None else random.randint(1, 2**31 - 1)
     rng = random.Random(seed)
     log("test_warp_ip65_vice.py — ip65 vs Cloudflare WARP over BRIDGED VICE")
