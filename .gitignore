@@ -1,4 +1,8 @@
 build/
+# Alternate build trees selected with BUILD_DIR=... (tools/test_warp_live.py
+# uses build_msgport53; tools/test_warp_ip65_vice.py adds build_red_nomtu1440
+# for its --prove-red link).
+build_*/
 *.prg
 *.d64
 *.d71
