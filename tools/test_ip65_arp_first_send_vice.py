@@ -55,8 +55,33 @@ reporting a comfortable "0 rows" forever. The cache lives in the blob's
 BSS at $A000, which src/boot.s banks BASIC out of, so the monitor's
 CPU-view read really is RAM.
 
+Three optional labels sharpen this once the fix exports them, and are
+probed rather than assumed so the unfixed tree simply reports them SKIPPED:
+
+  net_last_error       $00 after a successful send; NET_ERR_IP65_WAIT_TIMEOUT
+                       after the unresolvable one, and specifically NOT
+                       NET_ERR_TIMEBASE_STOPPED, which would mean the budget
+                       was spent counting attempts because the jiffy clock
+                       was not ticking — an elapsed figure that is then an
+                       accident of loop cost rather than a bound. Both codes
+                       are cross-checked against the tree's own ca65 equates.
+  ip65_send_attempts   ip65_udp_send calls made by the last net_udp_send.
+                       This is the sharper red: with the cache proven cold,
+                       a first send that succeeds in ONE call was not
+                       carried by the retry loop, and a "fix" that merely
+                       pre-warmed ARP somewhere else would satisfy both C=0
+                       and a populated cache while leaving this at 1.
+  ip65_send_pump       must read 0 after every net_udp_send returns, the
+                       give-up path included; a leaked flag silently deafens
+                       the receive callback.
+
 RANDOMISED PER RUN (seeded, logged): the payload bytes and length, and the
 UDP source port. ``--seed`` / ``TEST_SEED`` reproduce a run.
+
+NOTHING IS SENT AT THE C64 while a send is in flight, deliberately: the
+retry loop's pump drops inbound UDP (the caller may still be holding
+udp_recv_buf), so a suite that echoed into a budget window would be
+measuring a documented design decision and calling it a regression.
 
 WHAT THIS CANNOT COVER: nothing here is UCI. VICE has no Ultimate command
 interface ($DF1D reads $FF), so the ip65 backend is the only one this
@@ -102,6 +127,13 @@ RTS_SCRATCH = 0x0368          # a lone RTS: the jsr() timing floor
 
 ARP_CACHE_ROWS = 8            # ip65/ip65/arp.s: ac_size
 ARP_ROW_LEN = 10              # 6 MAC + 4 IP; ac_mac = 0, ac_ip = 6
+
+# §13.2 error codes the ip65 adapter reports once it has a net_last_error.
+# These are cross-checked against the tree's own ca65 equates at run time
+# (see equate_from_sources) so a renumbering cannot leave the suite quietly
+# asserting a stale value.
+NET_ERR_TIMEBASE_STOPPED = 0x01
+NET_ERR_IP65_WAIT_TIMEOUT = 0x48
 
 WIRE_SETTLE = 2.0
 POLL_CALLS = 120              # net_poll calls used to pump one ARP exchange
@@ -327,6 +359,34 @@ def arp_rows(tr, cache: int) -> list[tuple[str, str]]:
     return out
 
 
+def equate_from_sources(name: str) -> int | None:
+    """The value of a ca65 ``name = $XX`` equate, searched across src/.
+
+    Used to cross-check this file's copies of the §13.2 error codes against
+    the tree being tested: a renumbering must break the suite loudly rather
+    than leave it asserting a value the code no longer emits.
+    """
+    root = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "src")
+    pat = re.compile(rf"^\s*{re.escape(name)}\s*=\s*\$([0-9A-Fa-f]+)", re.M)
+    for dirpath, _dirs, files in os.walk(root):
+        for fn in files:
+            if not fn.endswith((".inc", ".s")):
+                continue
+            try:
+                m = pat.search(open(os.path.join(dirpath, fn)).read())
+            except OSError:
+                continue
+            if m:
+                return int(m.group(1), 16)
+    return None
+
+
+def opt_byte(tr, L, name: str) -> int | None:
+    """One byte at an OPTIONAL label — None when the build does not export it."""
+    return read_bytes(tr, L[name], 1)[0] if name in L else None
+
+
 def install_send_tramp(tr, L) -> None:
     buf = L["udp_recv_buf"]
     ns = L["net_udp_send"]
@@ -416,6 +476,13 @@ def main() -> int:
                          f"(default {DEFAULT_BUDGET})")
     ap.add_argument("--seed", type=int,
                     default=int(os.environ.get("TEST_SEED", "0")) or None)
+    ap.add_argument("--arp-cache-addr", type=lambda s: int(s, 0), default=None,
+                    help="override the arp_cache address derived from the "
+                         "ip65 map. FOR THE ALARM PROOF ONLY: pointing it at "
+                         "the wrong address must make the control's "
+                         "'arp_cache holds the gateway' check FAIL, which is "
+                         "how we know a comfortable 'rows: 0' is evidence "
+                         "and not an artefact of reading the wrong bytes.")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
     VERBOSE = args.verbose
@@ -468,10 +535,39 @@ def main() -> int:
     log(f"  PRG: {prg_fingerprint(PRG_PATH)}")
     L = Labels.from_file(LABELS_PATH)
     cache = arp_cache_addr()
+    if args.arp_cache_addr is not None:
+        log(f"  ALARM PROOF: arp_cache forced to ${args.arp_cache_addr:04X} "
+            f"instead of the derived ${cache:04X}")
+        cache = args.arp_cache_addr
     log(f"  arp_cache = ${cache:04X} (ip65 map: arp_ip ${cache - 4:04X} + 4)")
+    # Optional observability the ip65 adapter grows with the #120 fix. Each
+    # is probed, never assumed: on the unfixed tree the label is absent and
+    # the assertions that use it say so instead of failing for the wrong
+    # reason.
     have_err = "net_last_error" in L
-    log(f"  net_last_error exported by this build: {have_err}"
-        + ("" if have_err else "  — error-byte assertions SKIPPED"))
+    have_attempts = "ip65_send_attempts" in L
+    have_pump = "ip65_send_pump" in L
+    for name, present in (("net_last_error", have_err),
+                          ("ip65_send_attempts", have_attempts),
+                          ("ip65_send_pump", have_pump)):
+        state = ("exported" if present else
+                 "ABSENT — its assertions are SKIPPED on this build")
+        log(f"  {name}: {state}")
+    for cname, mine in (("NET_ERR_IP65_WAIT_TIMEOUT",
+                         NET_ERR_IP65_WAIT_TIMEOUT),
+                        ("NET_ERR_TIMEBASE_STOPPED",
+                         NET_ERR_TIMEBASE_STOPPED)):
+        found = equate_from_sources(cname)
+        if found is None:
+            log(f"  {cname}: not defined in src/ — this suite expects "
+                f"${mine:02X}")
+        elif found != mine:
+            log(f"FATAL: {cname} is ${found:02X} in src/ but this suite "
+                f"asserts ${mine:02X}. The codes were renumbered; update "
+                f"the suite rather than letting it assert a dead value.")
+            return 1
+        else:
+            log(f"  {cname} = ${mine:02X}, agreed with src/")
 
     # ---- tap up BEFORE the machine boots ---------------------------------
     # Everything the C64 ever emits is in the capture, so "the cache was
@@ -543,6 +639,7 @@ def main() -> int:
                   f"UDP {c64} -> {dest_ip}: {len(udp_before)}")
 
             # ---- THE RED -------------------------------------------------
+            ceiling = max(8.0, args.budget * 4)
             set_dest(tr, L, dest_ip, dest_port)
             mark_udp = len(tap.udp(src=c64, dst=dest_ip))
             carry1, took1 = send_once(tr, L, payload,
@@ -578,11 +675,33 @@ def main() -> int:
             check(any(r[0] == gw for r in rows_after1),
                   "attempt 1 left the gateway resolved in ip65's arp_cache",
                   f"rows: {rows_after1}")
+            check(took1 <= ceiling,
+                  f"attempt 1 finished inside the budget ceiling "
+                  f"({ceiling:.1f}s)",
+                  f"took {took1:.2f}s — resolving one next hop on a LAN is a "
+                  f"milliseconds job; a first send that eats the whole retry "
+                  f"budget is stalling the handshake, not fixing it")
             if have_err:
-                err = read_bytes(tr, L["net_last_error"], 1)[0]
+                err = opt_byte(tr, L, "net_last_error")
                 check(err == 0,
                       "net_last_error is $00 after a successful first send",
                       f"net_last_error = ${err:02X}")
+            if have_attempts:
+                att = opt_byte(tr, L, "ip65_send_attempts")
+                # Sharper than the arp_cache row: a "fix" that pre-warmed ARP
+                # somewhere else entirely would satisfy C=0 and a populated
+                # cache, but it would leave attempts at 1. This asserts that
+                # the RETRY is what carried the send.
+                check(att is not None and att > 1,
+                      "attempt 1 actually went round the retry loop "
+                      "(ip65_send_attempts > 1)",
+                      f"ip65_send_attempts = {att} — with the cache proven "
+                      "cold, one ip65_udp_send call cannot have sent this")
+            if have_pump:
+                check(opt_byte(tr, L, "ip65_send_pump") == 0,
+                      "ip65_send_pump is clear after net_udp_send returns",
+                      "a leaked pump flag silently deafens the receive "
+                      "callback")
 
             # ---- the control: recovery -----------------------------------
             log("")
@@ -623,6 +742,18 @@ def main() -> int:
                              f"(if this NEVER fills, arp_cache=${cache:04X} "
                              f"is the wrong address and every row count above "
                              f"is meaningless)")
+            if have_attempts:
+                att2 = opt_byte(tr, L, "ip65_send_attempts")
+                ok_ctrl &= check(att2 == 1,
+                                 "control: a warm-cache send takes exactly "
+                                 "one ip65_udp_send call",
+                                 f"ip65_send_attempts = {att2} — the retry "
+                                 "loop should not engage when ARP is already "
+                                 "resolved")
+            if have_pump:
+                ok_ctrl &= check(opt_byte(tr, L, "ip65_send_pump") == 0,
+                                 "control: ip65_send_pump is clear after the "
+                                 "warm send returns")
             ok_ctrl &= check(tap.fragments() == 0,
                              "control: nothing was torn by IP fragmentation",
                              "\n".join(tap.frags[:5]))
@@ -637,7 +768,6 @@ def main() -> int:
             log(f"=== Phase 3: the retry budget is BOUNDED "
                 f"(on-subnet {blackhole}, unanswered) ===")
             set_dest(tr, L, blackhole, dest_port)
-            ceiling = max(8.0, args.budget * 4)
             hung = False
             try:
                 carry3, took3 = send_once(tr, L, payload,
@@ -668,14 +798,37 @@ def main() -> int:
                     f"(floor {floor:.2f}s) — ~0 means no retry loop is "
                     f"present; ~{args.budget:.1f}s means the bounded wait is "
                     f"real")
+                if have_attempts:
+                    att3 = opt_byte(tr, L, "ip65_send_attempts")
+                    check(att3 is not None and att3 > 1,
+                          "the unresolvable send went round the retry loop "
+                          "(ip65_send_attempts > 1)",
+                          f"ip65_send_attempts = {att3}")
+                if have_pump:
+                    check(opt_byte(tr, L, "ip65_send_pump") == 0,
+                          "ip65_send_pump is clear after the FAILING send "
+                          "returns too",
+                          "the give-up path is the one most likely to leak "
+                          "the flag")
                 if have_err:
-                    err = read_bytes(tr, L["net_last_error"], 1)[0]
-                    check(err != 0,
-                          "net_last_error is non-zero after an unresolvable "
-                          "send",
+                    err = opt_byte(tr, L, "net_last_error")
+                    check(err == NET_ERR_IP65_WAIT_TIMEOUT,
+                          f"net_last_error is "
+                          f"NET_ERR_IP65_WAIT_TIMEOUT (${NET_ERR_IP65_WAIT_TIMEOUT:02X}) "
+                          f"after an unresolvable send",
                           f"net_last_error = ${err:02X} — a failure the "
                           "consumer cannot see is invisible to every "
                           "structural probe (issue #120, #116)")
+                    check(err != NET_ERR_TIMEBASE_STOPPED,
+                          "the wall-clock bound engaged, rather than the "
+                          "attempt-count backstop "
+                          f"(net_last_error != ${NET_ERR_TIMEBASE_STOPPED:02X})",
+                          f"net_last_error = ${err:02X} = "
+                          "NET_ERR_TIMEBASE_STOPPED: the jiffy clock at "
+                          "$A0-$A2 never advanced, so the budget was spent "
+                          "by counting attempts, not by measuring time. The "
+                          "elapsed figure above is then an accident of "
+                          "loop cost, not a bound.")
 
             # ---- report --------------------------------------------------
             log("")
