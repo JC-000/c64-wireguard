@@ -167,6 +167,15 @@ POLL_CALLS = 120              # net_poll calls used to pump one ARP exchange
 VERBOSE = False
 results: list[tuple[bool, str]] = []
 
+#: Set only when the ip65_recv_dropped INCREMENT was actually asserted, i.e.
+#: a datagram was proven on the wire inside the pump window. Its zero case is
+#: asserted twice and that is NOT coverage: a counter that reads 0 when
+#: nothing was dropped is satisfied equally by a counter that can never move.
+#: This project already has that failure on record — a passing assertion
+#: coinciding with the truth rather than testing it — so the summary says so
+#: on every run rather than leaving the count to imply otherwise.
+drop_increment_asserted = False
+
 
 def vlog(msg: str) -> None:
     if VERBOSE:
@@ -1031,8 +1040,9 @@ def main() -> int:
             if have_dropped:
                 drop1 = opt_byte(tr, L, "ip65_recv_dropped")
                 check(drop1 == 0,
-                      "ip65_recv_dropped is 0 on the happy path — the disarm "
-                      "cost nothing here",
+                      "nothing was discarded during the first send "
+                      "(ip65_recv_dropped still reads 0 — this does NOT "
+                      "exercise the increment)",
                       f"ip65_recv_dropped = {drop1}; nothing was sent at the "
                       "C64 during this send, so the pump had no inbound "
                       "datagram to discard")
@@ -1098,9 +1108,9 @@ def main() -> int:
                 # Cumulative since net_init, so this covers phases 1 AND 2.
                 drop2 = opt_byte(tr, L, "ip65_recv_dropped")
                 ok_ctrl &= check(drop2 == 0,
-                                 "control: ip65_recv_dropped is still 0 — "
-                                 "nothing was thrown away during either "
-                                 "cold-ARP send",
+                                 "control: nothing was discarded during "
+                                 "either cold-ARP send (still 0 — this does "
+                                 "NOT exercise the increment)",
                                  f"ip65_recv_dropped = {drop2}; the counter "
                                  "is cumulative, so a non-zero here means "
                                  "real inbound traffic was discarded and the "
@@ -1334,6 +1344,7 @@ def main() -> int:
                                 "transmits every 100 ms, so it is far more "
                                 "receive-hungry than transmit-heavy. Not a "
                                 "backend bug without more work.")
+                        globals()["drop_increment_asserted"] = True
                         check(drop3 is not None and drop3 > drop_before3,
                               "a datagram arriving DURING the pump is counted "
                               "in ip65_recv_dropped",
@@ -1403,6 +1414,25 @@ def main() -> int:
             log("")
             passed = sum(1 for ok, _ in results if ok)
             log(f"=== {passed}/{len(results)} checks passed (seed {seed}) ===")
+            if have_dropped and not drop_increment_asserted:
+                log("")
+                log("COVERAGE GAP — ip65_recv_dropped's INCREMENT was never "
+                    "exercised in this run.")
+                log("  Its zero case is asserted twice above. That is not "
+                    "coverage: a counter that")
+                log("  reads 0 when nothing was dropped is satisfied just as "
+                    "well by a counter that")
+                log("  can never move at all. The increment path has not "
+                    "executed here, and a green")
+                log("  count above must not be read as saying otherwise.")
+                log("  Cause: under jsr() takeover the 6510 is HALTED between "
+                    "monitor commands and")
+                log("  ip65 is polled, so the host's ARP for the C64 goes "
+                    "unanswered and the probe")
+                log("  cannot be delivered inside the ~0.5 s window. Covering "
+                    "it needs a driver that")
+                log("  lets the app's main loop run — a different suite "
+                    "shape, not a knob here.")
             for ok, label in results:
                 if not ok:
                     log(f"    FAILED: {label}")
