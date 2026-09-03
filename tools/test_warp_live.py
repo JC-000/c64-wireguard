@@ -49,14 +49,43 @@ Stages:
       reply's IP/UDP header and DNS transaction ID/question section.
   D — restore 1 MHz / REU off, assert by read-back, release the lock.
 
+Backends (`--backend {uci,ip65}`, default uci — issue #70):
+  The tool never builds. It reads the BUILT backend structurally from each
+  labels.txt BEFORE any run_prg and refuses (exit 2) when that disagrees
+  with --backend: ip65 <=> `ip65_blob_start` present AND neither
+  `uci_send_part` nor `net_last_error` present; uci <=> the reverse.
+  Under uci the run is exactly what it was before --backend existed.
+  Under ip65 (RR-Net):
+    * get_uci_enabled/enable_uci are skipped (the C64 side never talks
+      UCI); set_reu(False) and the turbo target are kept.
+    * `net_last_error` is a UCI-adapter label and does not exist, so every
+      read of it is gated on the backend. The post-'I' `sleep(1.0)` +
+      net_last_error read becomes a poll of `net_initialized` (src/boot.s
+      do_net_init sets it to 1 only after net_init + DHCP + UDP listen all
+      succeeded), with a budget of WARP_NET_INIT_BUDGET_S seconds (env,
+      default 120) — DHCP against a real server at 1 MHz is slow.
+    * The clock is raised to --turbo only AFTER net_initialized (settle
+      3 s, asserted by read-back), never before 'I': see _net_init_ip65
+      for why DHCP under ip65 has to run at 1 MHz.
+  Stage A PRG (ip65):
+      make clean && make BACKEND=ip65 REU=0 WG_MTU1440=1
+  Stage C PRG (ip65, msg_port 53 into build_msgport53/):
+      make clean && make BACKEND=ip65 REU=0 WG_MTU1440=1 MSG_PORT=53 \\
+          BUILD_DIR=build_msgport53
+  Every stage logs a PRG fingerprint line (sha256, backend, WG_MTU read
+  structurally as ip_pkt_len - ip_packet_buf, uci_send_part present?,
+  reu_mul_init present?) so the log says which binary actually ran.
+
 Run::
 
     WARP_PROFILE=/path/to/wgcf-profile.conf U64_HOST=10.43.23.81 \\
         /Users/someone/.local/bin/python3 tools/test_warp_live.py
+    ... --backend ip65        # RR-Net build, see "Backends" above
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import os
 import random
@@ -111,7 +140,88 @@ PING_TIMEOUT = 10.0
 DNS_TIMEOUT = 10.0
 BOOT_TIMEOUT = 60.0
 
+# ip65 only: how long 'I' (net_init + DHCP + listen, at 1 MHz) may take
+# before net_initialized must read 1. Env-overridable for slow DHCP servers.
+NET_INIT_BUDGET_S = float(os.environ.get("WARP_NET_INIT_BUDGET_S", "120"))
+TURBO_SETTLE_S = 3.0
+
 DNS_QTYPE_TXT = 16
+
+BACKENDS = ("uci", "ip65")
+
+
+# =============================================================================
+# Backend detection — structural, from the BUILT labels, never from --backend
+# =============================================================================
+class BackendMismatch(RuntimeError):
+    """labels.txt describes a different backend than --backend asked for."""
+
+
+def detect_backend(L) -> str:
+    """'ip65' or 'uci' from label PRESENCE only (any Mapping[str, int]).
+
+    ip65 <=> the RR-Net blob is linked (`ip65_blob_start`) and neither
+    UCI-adapter label is: `uci_send_part` (chunked send, UCI_CHUNKED_WRITE=1
+    only) or `net_last_error` (the UCI adapter's error byte, every uci
+    build). uci <=> exactly the reverse. Anything else raises ValueError so
+    a half-matching labels file is refused rather than guessed.
+    """
+    has_blob = "ip65_blob_start" in L
+    has_uci = ("uci_send_part" in L) or ("net_last_error" in L)
+    if has_blob and not has_uci:
+        return "ip65"
+    if has_uci and not has_blob:
+        return "uci"
+    raise ValueError(
+        f"labels match neither backend: ip65_blob_start={has_blob} "
+        f"uci_send_part={'uci_send_part' in L} "
+        f"net_last_error={'net_last_error' in L}")
+
+
+def load_labels_for_backend(labels_path: Path, backend: str) -> dict:
+    """Labels.from_file + detect_backend; raises BackendMismatch on disagreement.
+
+    Called before the device is touched (no probe, no lock, no run_prg), so
+    a wrong --backend, or a build/ left over from the other backend, is
+    refused up front.
+    """
+    L = dict(Labels.from_file(str(labels_path)))
+    try:
+        found = detect_backend(L)
+    except ValueError as exc:
+        raise BackendMismatch(
+            f"requested --backend {backend} but {labels_path} is neither "
+            f"a uci nor an ip65 build ({exc})") from exc
+    if found != backend:
+        raise BackendMismatch(
+            f"requested --backend {backend} but {labels_path} is a {found} "
+            f"build (ip65_blob_start={'ip65_blob_start' in L}, "
+            f"uci_send_part={'uci_send_part' in L}, "
+            f"net_last_error={'net_last_error' in L}) — rebuild with "
+            f"BACKEND={backend} or pass --backend {found}")
+    return L
+
+
+def _fingerprint(tag: str, prg_bytes: bytes, L: dict, backend: str) -> dict:
+    """Log + return which binary this stage is about to run (mirrors
+    test_uci_handshake_live's fingerprint): sha256, backend, WG_MTU read
+    structurally (ip_packet_buf is .res WG_MTU and ip_pkt_len follows it),
+    and whether the chunked-send / REU-multiply entry points are linked."""
+    sha = hashlib.sha256(prg_bytes).hexdigest()
+    has_chunk = "uci_send_part" in L
+    has_reu_init = "reu_mul_init" in L
+    mtu = (L["ip_pkt_len"] - L["ip_packet_buf"]
+           if "ip_pkt_len" in L and "ip_packet_buf" in L else -1)
+    log.info("%s PRG fingerprint: sha256=%s (%d B) backend=%s WG_MTU=%d "
+             "uci_send_part=%s reu_mul_init=%s -> %s build, %s",
+             tag, sha, len(prg_bytes), backend, mtu, has_chunk, has_reu_init,
+             "REU" if has_reu_init else "onchip/REU=0",
+             "chunked UCI send (1472 B datagrams)" if has_chunk
+             else ("ip65 native send" if backend == "ip65"
+                   else "plain UCI send (892 B datagrams)"))
+    return {"sha256": sha, "size": len(prg_bytes), "backend": backend,
+            "wg_mtu": mtu, "uci_send_part": has_chunk,
+            "reu_mul_init": has_reu_init}
 
 
 # =============================================================================
@@ -241,9 +351,73 @@ def _stage_config(tr: Ultimate64Transport, L: dict, c64_priv: bytes,
     return tai
 
 
-def _dump_failure(tr: Ultimate64Transport, L: dict, tag: str) -> None:
-    err = tr.read_memory(L["net_last_error"], 1)[0]
-    log.error("[%s] net_last_error=$%02X", tag, err)
+def _set_turbo_checked(client: Ultimate64Client, mhz: int,
+                       settle: float = TURBO_SETTLE_S) -> int:
+    """set_turbo_mhz + settle + read-back; raises if the clock did not stick."""
+    set_turbo_mhz(client, mhz)
+    time.sleep(settle)
+    actual = get_turbo_mhz(client)
+    if actual != mhz:
+        raise RuntimeError(f"turbo did not stick: requested {mhz} MHz, "
+                           f"device reports {actual}")
+    log.info("turbo confirmed stuck at %d MHz", actual)
+    return actual
+
+
+def _net_init_ip65(tr: Ultimate64Transport, client: Ultimate64Client,
+                   L: dict, turbo_mhz: int, result: dict) -> bool:
+    """ip65 replacement for "press I, sleep 1 s, read net_last_error".
+
+    Runs 'I' at 1 MHz, polls `net_initialized` (boot.s do_net_init stores 1
+    only after net_init + DHCP + UDP listen all succeeded) within
+    NET_INIT_BUDGET_S, and only THEN raises the clock to *turbo_mhz*.
+
+    Why DHCP has to happen at 1 MHz: the ip65 blob is the RR-Net (CS8900A)
+    driver plus its own ARP/DHCP state machines, and those time out with
+    CPU-counted delay loops and retry counters calibrated for a 1 MHz 6510.
+    At 48 MHz every such wait expires ~48x sooner than the wire — a real
+    DHCP server's DISCOVER/OFFER round trip has not even started when ip65
+    gives up — and the RR-Net's cartridge-port register accesses are only
+    specified at the stock bus timing. The crypto is what needs the turbo,
+    and it starts at 'H', so the clock goes up between 'I' completing and
+    'H'. (The UCI adapter has none of this: the firmware does DHCP, the C64
+    only talks to $DF1B-$DF1F, and its waits are CIA-TOD bounded.)
+
+    Returns False with result["error"] set when net_initialized never
+    reads 1 (screen dumped); raises if the clock does not stick.
+    """
+    _set_turbo_checked(client, 1)
+    if not ki.press_key(tr, "I", timeout=20.0):
+        result["error"] = "press I (net init) not consumed"
+        return False
+    t0 = time.monotonic()
+    up = ki.wait_for_state(tr, L["net_initialized"], 1, NET_INIT_BUDGET_S,
+                           poll=1.0)
+    result["net_init_seconds"] = round(time.monotonic() - t0, 1)
+    result["net_initialized"] = up
+    if not up:
+        result["error"] = (f"net_initialized never set within "
+                           f"{NET_INIT_BUDGET_S:.0f}s of pressing I "
+                           f"(ip65 net_init/DHCP/listen failed; screen dumped)")
+        log.error(result["error"])
+        dump_screen(tr, label="ip65-net-init-timeout")
+        return False
+    log.info("after I: net_initialized=1 in %.1fs (ip65, at 1 MHz)",
+             result["net_init_seconds"])
+    _set_turbo_checked(client, turbo_mhz)
+    return True
+
+
+def _dump_failure(tr: Ultimate64Transport, L: dict, tag: str,
+                  backend: Optional[str] = None) -> None:
+    # net_last_error is a UCI-adapter label: gate the read on the backend
+    # (detected from the labels when the caller did not pass it).
+    backend = backend or detect_backend(L)
+    if backend == "uci":
+        err = tr.read_memory(L["net_last_error"], 1)[0]
+        log.error("[%s] net_last_error=$%02X", tag, err)
+    else:
+        log.error("[%s] backend=%s (no net_last_error)", tag, backend)
     for name, n in (("hs_h", 32), ("hs_c", 32), ("hs_resp_packet", 92),
                     ("hs_ephem_pub", 32)):
         if name in L:
@@ -254,23 +428,27 @@ def _dump_failure(tr: Ultimate64Transport, L: dict, tag: str) -> None:
 
 def run_stage_ab(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
                  c64_priv: bytes, c64_pub: bytes, resp_pub: bytes,
-                 seed: int) -> dict:
+                 seed: int, backend: str = "uci", turbo_mhz: int = 48,
+                 prg_path: Path = PRG_A) -> dict:
     result: dict = {"stage": "A/B"}
-    prg_bytes = PRG_A.read_bytes()
-    import hashlib
-    log.info("Stage A PRG sha256=%s (%d B)",
-             hashlib.sha256(prg_bytes).hexdigest(), len(prg_bytes))
+    prg_bytes = prg_path.read_bytes()
+    result["prg"] = _fingerprint("Stage A", prg_bytes, L, backend)
     client.run_prg(prg_bytes)
     _wait_boot_ready(tr, L)
 
     _stage_config(tr, L, c64_priv, c64_pub, resp_pub, TUNNEL_IP, PING_TARGET_IP)
 
-    if not ki.press_key(tr, "I", timeout=20.0):
-        result["error"] = "press I (net init) not consumed"
-        return result
-    time.sleep(1.0)  # net_init/DHCP read/listen — fast, but let it settle
-    err = tr.read_memory(L["net_last_error"], 1)[0]
-    log.info("after I: net_last_error=$%02X", err)
+    if backend == "ip65":
+        # 'I' at 1 MHz, poll net_initialized, THEN turbo — see _net_init_ip65.
+        if not _net_init_ip65(tr, client, L, turbo_mhz, result):
+            return result
+    else:
+        if not ki.press_key(tr, "I", timeout=20.0):
+            result["error"] = "press I (net init) not consumed"
+            return result
+        time.sleep(1.0)  # net_init/DHCP read/listen — fast, but let it settle
+        err = tr.read_memory(L["net_last_error"], 1)[0]
+        log.info("after I: net_last_error=$%02X", err)
 
     if not ki.press_key(tr, "H", timeout=20.0):
         result["error"] = "press H (handshake) not consumed"
@@ -285,7 +463,7 @@ def run_stage_ab(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
     result["active"] = active
 
     if not active:
-        _dump_failure(tr, L, "stageA-handshake")
+        _dump_failure(tr, L, "stageA-handshake", backend)
         return result
 
     log.info("Stage A: ACTIVE in %.1fs", elapsed)
@@ -307,14 +485,17 @@ def run_stage_ab(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
         if "tp_send_counter" in L else None
     ok = ki.send_message_dma(tr, msg_text, L, timeout=15.0)
     time.sleep(0.5)
-    err_after = tr.read_memory(L["net_last_error"], 1)[0]
+    # net_last_error exists only in the UCI adapter — gated on backend.
+    err_after = (tr.read_memory(L["net_last_error"], 1)[0]
+                 if backend == "uci" else None)
     after = int.from_bytes(tr.read_memory(L["tp_send_counter"], 2), "little") \
         if "tp_send_counter" in L else None
     result["message_sent_keypress_ok"] = ok
     result["message_text"] = msg_text
     result["tp_send_counter_before"] = before
     result["tp_send_counter_after"] = after
-    result["net_last_error_after_message"] = f"${err_after:02X}"
+    result["net_last_error_after_message"] = (
+        f"${err_after:02X}" if err_after is not None else None)
     return result
 
 
@@ -409,21 +590,24 @@ def run_stage_rekey(tr: Ultimate64Transport, L: dict, n: int,
 
 def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
                 c64_priv: bytes, c64_pub: bytes, resp_pub: bytes,
-                seed: int) -> dict:
+                seed: int, backend: str = "uci", turbo_mhz: int = 48) -> dict:
     result: dict = {"stage": "C"}
     prg_bytes = PRG_C.read_bytes()
-    import hashlib
-    log.info("Stage C PRG sha256=%s (%d B)",
-             hashlib.sha256(prg_bytes).hexdigest(), len(prg_bytes))
+    result["prg"] = _fingerprint("Stage C", prg_bytes, L, backend)
     client.run_prg(prg_bytes)
     _wait_boot_ready(tr, L)
 
     _stage_config(tr, L, c64_priv, c64_pub, resp_pub, TUNNEL_IP, PING_TARGET_IP)
 
-    if not ki.press_key(tr, "I", timeout=20.0):
-        result["error"] = "press I (net init) not consumed"
-        return result
-    time.sleep(1.0)
+    if backend == "ip65":
+        # Fresh run_prg, fresh DHCP: back to 1 MHz for 'I', turbo after.
+        if not _net_init_ip65(tr, client, L, turbo_mhz, result):
+            return result
+    else:
+        if not ki.press_key(tr, "I", timeout=20.0):
+            result["error"] = "press I (net init) not consumed"
+            return result
+        time.sleep(1.0)
 
     if not ki.press_key(tr, "H", timeout=20.0):
         result["error"] = "press H (handshake) not consumed"
@@ -435,7 +619,7 @@ def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
     result["handshake_seconds"] = round(elapsed, 1)
     result["active"] = active
     if not active:
-        _dump_failure(tr, L, "stageC-handshake")
+        _dump_failure(tr, L, "stageC-handshake", backend)
         return result
     log.info("Stage C: ACTIVE in %.1fs", elapsed)
 
@@ -503,7 +687,7 @@ def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
 # =============================================================================
 # main
 # =============================================================================
-def main() -> int:
+def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--host", default=os.environ.get("U64_HOST", DEFAULT_HOST))
     p.add_argument("--turbo", type=int, default=48)
@@ -514,7 +698,18 @@ def main() -> int:
                         "increases and wg_state returns to ACTIVE each "
                         "time (issue #87). RED BY CONSTRUCTION (raises) "
                         "against Cloudflare WARP on unfixed firmware.")
-    args = p.parse_args()
+    p.add_argument("--backend", choices=BACKENDS, default="uci",
+                   help="Which backend the PRGs in build/ and "
+                        "build_msgport53/ were built for (issue #70). "
+                        "Verified structurally from each labels.txt before "
+                        "any run_prg; a mismatch exits 2. Default uci; "
+                        "ip65 skips the UCI enable, polls net_initialized "
+                        "after I and raises the clock only after DHCP.")
+    p.add_argument("--labels", default=str(LABELS_A), metavar="PATH",
+                   help="Stage A labels.txt (default build/labels.txt); "
+                        "the PRG beside it is what Stage A runs. Stage C "
+                        "always uses build_msgport53/.")
+    args = p.parse_args(argv)
 
     seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
     log.info("Random seed: %d (reproduce with --seed %d)", seed, seed)
@@ -529,6 +724,23 @@ def main() -> int:
     resp_pub = base64.b64decode(resp_pub_b64)
     log.info("c64 static pub (derived, safe to log): %s", base64.b64encode(c64_pub).decode())
     log.info("peer pub: %s", resp_pub_b64)
+
+    # Backend check from the BUILT labels, before the device is touched (no
+    # probe, no lock, no run_prg on a mismatch). Stage A's labels are
+    # mandatory here; Stage C's are checked here too when its build exists,
+    # otherwise the missing file surfaces at Stage C exactly as before.
+    labels_a = Path(args.labels)
+    prg_a = labels_a.parent / "wireguard.prg"
+    try:
+        L_A = load_labels_for_backend(labels_a, args.backend)
+        L_C = (load_labels_for_backend(LABELS_C, args.backend)
+               if LABELS_C.exists() else None)
+    except BackendMismatch as exc:
+        log.error("backend mismatch: %s", exc)
+        return 2
+    log.info("backend=%s confirmed from %s%s", args.backend, labels_a,
+             f" and {LABELS_C}" if L_C is not None else
+             f" ({LABELS_C} not built yet)")
 
     probe = probe_u64(args.host)
     if not probe.reachable:
@@ -558,25 +770,33 @@ def main() -> int:
             recover(client)
             runner_health_check(client)
 
-        if not get_uci_enabled(client):
-            enable_uci(client)
-            time.sleep(0.5)
+        if args.backend == "uci":
+            if not get_uci_enabled(client):
+                enable_uci(client)
+                time.sleep(0.5)
 
         set_reu(client, False)
         log.warning("REU DETACHED (REU=0 build)")
         time.sleep(0.5)
-        set_turbo_mhz(client, args.turbo)
-        time.sleep(3.0)  # settle
-        actual = get_turbo_mhz(client)
-        if actual != args.turbo:
-            log.error("turbo did not stick: requested %d, device reports %d",
-                      args.turbo, actual)
-            return 1
-        log.info("turbo confirmed stuck at %d MHz", actual)
+        if args.backend == "uci":
+            set_turbo_mhz(client, args.turbo)
+            time.sleep(3.0)  # settle
+            actual = get_turbo_mhz(client)
+            if actual != args.turbo:
+                log.error("turbo did not stick: requested %d, device reports %d",
+                          args.turbo, actual)
+                return 1
+            log.info("turbo confirmed stuck at %d MHz", actual)
+        else:
+            # ip65: NOT here. DHCP must run at 1 MHz; each stage raises the
+            # clock itself once net_initialized reads 1 (_net_init_ip65).
+            log.info("ip65: turbo %d MHz deferred until after net_initialized",
+                     args.turbo)
 
-        # --- Stage A/B ---
-        L_A = dict(Labels.from_file(str(LABELS_A)))
-        ab = run_stage_ab(tr, client, L_A, c64_priv, c64_pub, resp_pub, seed)
+        # --- Stage A/B --- (L_A was loaded + backend-checked above)
+        ab = run_stage_ab(tr, client, L_A, c64_priv, c64_pub, resp_pub, seed,
+                          backend=args.backend, turbo_mhz=args.turbo,
+                          prg_path=prg_a)
         results["stage_ab"] = ab
 
         # --- Stage R: rekey (issue #87) ---
@@ -604,8 +824,10 @@ def main() -> int:
                     raise
 
         # --- Stage C ---
-        L_C = dict(Labels.from_file(str(LABELS_C)))
-        c = run_stage_c(tr, client, L_C, c64_priv, c64_pub, resp_pub, seed)
+        if L_C is None:
+            L_C = load_labels_for_backend(LABELS_C, args.backend)
+        c = run_stage_c(tr, client, L_C, c64_priv, c64_pub, resp_pub, seed,
+                        backend=args.backend, turbo_mhz=args.turbo)
         results["stage_c"] = c
 
     finally:

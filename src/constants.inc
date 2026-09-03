@@ -99,14 +99,25 @@ WG_DATA_OVERHEAD    = 32        ; 16 B Type-4 header + 16 B Poly1305 tag
 ; v0.12.1; udp_recv_buf must still hold NET_UDP_RECV_MAX, see §13.8 assert): the
 ; largest Type-4 datagram the RAM budget can hold. ip_packet_buf + udp_recv_buf
 ; (+ the rest of APP_BSS) must fit MAIN_AREA_HI. The keyboard text is typed in
-; place inside ip_packet_buf (issue #70; there is no msg_input_buf), which is
-; what leaves room for a 1472-byte datagram: with a private text buffer the
-; 1440 MTU overflowed APP_BSS by ~1 KB. The ip65 backend advertises 1472/1472
-; but stays at 892 here (its RR-Net path is unmeasured at 1472, and #80 is
-; open); the UCI backend lifts it to 1472 under UCI_CHUNKED_WRITE (#70, the
-; Makefile refuses that flag for ip65). The §13.8 asserts and the linker
-; refuse a cap the buffers cannot hold.
-.ifdef UCI_CHUNKED_WRITE
+; place inside ip_packet_buf (issue #70; there is no msg_input_buf — dropped in
+; #112, which is what made a 1472-byte datagram fit: with a private text buffer
+; the 1440 MTU overflowed APP_BSS by ~1 KB; measured after #112 the ip65 1472
+; build's APP_BSS spans $8800-$9E8B with 371 B of MAIN_AREA_HI free).
+;
+; Two flags lift the cap from 892 to 1472; the default is 892 for BOTH
+; backends and a default build is byte-identical to a tree without them:
+;   UCI_CHUNKED_WRITE — the UCI adapter's chunked ($16) send path, which is
+;     what raises NET_UDP_SEND_MAX to 1472 (#70; the Makefile refuses the flag
+;     for ip65).
+;   WG_MTU1440 — generic opt-in (#70). ip65 advertises 1472/1472 natively, so
+;     under ip65 the flag alone yields WG_MTU = 1440; its RR-Net path is
+;     unmeasured at 1472 and #80 is open, hence opt-in. Under uci it is only
+;     meaningful together with UCI_CHUNKED_WRITE (without the chunked send
+;     NET_UDP_SEND_MAX stays 892, the min() below clamps WG_MTU back to 860
+;     and the flag is a silent no-op — the Makefile refuses that pairing so
+;     it is loud instead).
+; The §13.8 asserts and the linker refuse a cap the buffers cannot hold.
+.if .defined(UCI_CHUNKED_WRITE) || .defined(WG_MTU1440)
 WG_DATAGRAM_CAP     = 1472
 .else
 WG_DATAGRAM_CAP     = 892
