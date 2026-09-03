@@ -8,15 +8,23 @@
 #   wireguard-uci-reu.prg            BACKEND=uci  REU=1  (Ultimate 64 / C64U)
 #   wireguard-uci-noreu.prg          BACKEND=uci  REU=0  (Ultimate, REU disabled)
 #   wireguard-uci-noreu-mtu1440.prg  BACKEND=uci REU=0 UCI_CHUNKED_WRITE=1
-#                                    (standard MTU 1440 — needs GideonZ/
-#                                     1541ultimate#807 firmware, unmerged)
+#                                    (standard MTU 1440 — needs Ultimate fw
+#                                     3.15+ (not a public release) plus
+#                                     GideonZ/1541ultimate#807, an open,
+#                                     unmerged issue; on-disk as
+#                                     wg-mtu1440-noreu)
 #   wireguard-uci-reu-mtu1440.prg    BACKEND=uci REU=1 UCI_CHUNKED_WRITE=1
-#                                    (same, REU DMA tables)
+#                                    (same, REU DMA tables; on-disk as
+#                                     wg-mtu1440-reu; no hardware run — REU
+#                                     fails the handshake at 48 MHz, #69)
 #   wireguard-reu.d64                wg-rrnet + wg-uci PRGs (REU builds)
 #                                    + wg.cfg + fw-warning
 #   wireguard-noreu.d64              same pair, no-REU builds
 #                                    + wg.cfg + fw-warning
-#   wireguard-mtu1440.d64            both mtu1440 PRGs + wg.cfg + fw-warning
+#   wireguard-mtu1440.d64            both mtu1440 PRGs (wg-mtu1440-noreu,
+#                                    wg-mtu1440-reu) + wg.cfg + fw-warning
+#                                    (fw-warning is CR-terminated on disk;
+#                                    the flat .txt copy below keeps LF)
 #   FIRMWARE-WARNING.txt             copy of tools/release/FIRMWARE-WARNING.txt
 #   VERSION                          `git describe --tags --always --dirty`
 #   SHA256SUMS                       header line names the version
@@ -114,6 +122,11 @@ cp "$WARNING" "$REL/FIRMWARE-WARNING.txt"
 make_d64_2() {
     local d64="$1" prg1="$2" prg1_name="$3" prg2="$4" prg2_name="$5" diskname="$6"
     rm -f "$REL/$d64"
+    # The on-disk SEQ warning uses CR (0x0D) line endings, matching real
+    # PETSCII text files (a CBM screen editor never sees LF) — the flat
+    # FIRMWARE-WARNING.txt copy in $REL stays LF for normal text tools.
+    local cr_warning="$REL/.fw-warning.cr"
+    tr '\n' '\r' < "$WARNING" > "$cr_warning"
     # Two invocations: c1541 detaches the image after -format, so
     # chaining -write onto the same command writes into the void.
     c1541 -format "$diskname,wg" d64 "$REL/$d64" >/dev/null
@@ -121,7 +134,8 @@ make_d64_2() {
           -write "$REL/$prg1" "$prg1_name" \
           -write "$REL/$prg2" "$prg2_name" \
           -write "$TEMPLATE" "wg.cfg,s" \
-          -write "$WARNING" "fw-warning,s" >/dev/null
+          -write "$cr_warning" "fw-warning,s" >/dev/null
+    rm -f "$cr_warning"
     local listing
     listing=$(c1541 "$REL/$d64" -list 2>/dev/null)
     for f in "$prg1_name" "$prg2_name" "wg.cfg" "fw-warning"; do
@@ -134,8 +148,8 @@ make_d64_2 wireguard-reu.d64   wireguard-rrnet-reu.prg   "wg-rrnet" \
                                 wireguard-uci-reu.prg    "wg-uci"   "wireguard reu"
 make_d64_2 wireguard-noreu.d64 wireguard-rrnet-noreu.prg "wg-rrnet" \
                                 wireguard-uci-noreu.prg  "wg-uci"   "wireguard noreu"
-make_d64_2 wireguard-mtu1440.d64 wireguard-uci-noreu-mtu1440.prg "wg-uci-noreu" \
-                                  wireguard-uci-reu-mtu1440.prg   "wg-uci-reu"   "wireguard mtu1440"
+make_d64_2 wireguard-mtu1440.d64 wireguard-uci-noreu-mtu1440.prg "wg-mtu1440-noreu" \
+                                  wireguard-uci-reu-mtu1440.prg   "wg-mtu1440-reu"   "wg mtu1440"
 
 # --- Version stamp -----------------------------------------------------
 VERSION="$(git describe --tags --always --dirty)"

@@ -4,7 +4,7 @@ Second tagged release. Since v1.0.0: a security sweep closed nine
 issues (including a HIGH-severity remote DoS), a standard-MTU
 (1440-byte) send path landed behind a build flag that needs firmware
 not yet released for any Ultimate device, a receive-side bug that
-truncated large inbound datagrams on **every** build was fixed, and
+truncated large inbound datagrams on **every UCI build** was fixed, and
 the C64 completed its first handshakes and key rotations against a
 real production WireGuard peer (Cloudflare WARP) rather than only the
 project's own Python responder.
@@ -20,16 +20,16 @@ project's own Python responder.
   housekeeping" below for the rest.
 - **#70 — standard MTU 1440**, behind the new `UCI_CHUNKED_WRITE=1`
   build flag. Requires the chunked `SOCKET_WRITE` firmware command
-  from [GideonZ/1541ultimate#807](https://github.com/GideonZ/1541ultimate/pull/807),
+  from [GideonZ/1541ultimate#807](https://github.com/GideonZ/1541ultimate/issues/807),
   **which is not merged upstream and not in any released U64E or
   C64U firmware.** See the boxed warning below and
   `tools/release/FIRMWARE-WARNING.txt`.
-- **Receive-side Command-Busy fix, all builds (#112).** Multi-block
+- **Receive-side Command-Busy fix, all UCI builds (#112).** Multi-block
   `SOCKET_READ` now waits while firmware STATE is Command-Busy
   instead of stopping at the first reply block; at 48 MHz this had
   been silently truncating every inbound datagram above 893 bytes
   (58/60 in the original probe). This is not behind a flag — every
-  shipped PRG gets it.
+  shipped UCI PRG gets it (ip65/RR-Net builds have no `SOCKET_READ`).
 - **Cloudflare WARP real-peer interop and rekeys (#112, #115).** The
   C64 now completes a WireGuard handshake against Cloudflare's
   production edge (`162.159.192.1:2408`) using a `wgcf`-registered
@@ -53,15 +53,15 @@ project's own Python responder.
 
 | File | Backend | Field multiply | MTU | Firmware required | Runs on |
 |---|---|---|---|---|---|
-| `wireguard-rrnet-reu.prg` | ip65 / RR-Net | REU DMA tables | 860 | none (stock) | C64 + RR-Net + REU (512 KB+) |
-| `wireguard-rrnet-noreu.prg` | ip65 / RR-Net | CT on-chip | 860 | none (stock) | stock C64 + RR-Net |
-| `wireguard-uci-reu.prg` | UCI | REU DMA tables | 860 | none (stock) | Ultimate 64 / C64 Ultimate |
-| `wireguard-uci-noreu.prg` | UCI | CT on-chip | 860 | none (stock) | Ultimate, REU disabled |
-| `wireguard-uci-noreu-mtu1440.prg` | UCI | CT on-chip | 1440 | **#807 (unmerged)** | Ultimate running #807 firmware |
-| `wireguard-uci-reu-mtu1440.prg` | UCI | REU DMA tables | 1440 | **#807 (unmerged)** | Ultimate running #807 firmware + REU |
-| `wireguard-reu.d64` | both REU PRGs (`wg-rrnet`, `wg-uci`) + `wg.cfg` + warning | | 860 | none | |
-| `wireguard-noreu.d64` | both no-REU PRGs + `wg.cfg` + warning | | 860 | none | |
-| `wireguard-mtu1440.d64` | both mtu1440 PRGs (`wg-uci-noreu`, `wg-uci-reu`) + `wg.cfg` + warning | | 1440 | **#807 (unmerged)** | |
+| `wireguard-rrnet-reu.prg` | ip65 / RR-Net | REU DMA tables | 860 | none — no Ultimate firmware (RR-Net/ip65; VICE-verified only since PR #83) | C64 + RR-Net + REU (512 KB+) |
+| `wireguard-rrnet-noreu.prg` | ip65 / RR-Net | CT on-chip | 860 | none — no Ultimate firmware (RR-Net/ip65; VICE-verified only since PR #83) | stock C64 + RR-Net |
+| `wireguard-uci-reu.prg` | UCI | REU DMA tables | 860 | Ultimate 3.15+ — **not a public release** as of 2026-09-03 (U64/U64E: preview/test-merge builds only; C64 Ultimate firmware line: untested) | Ultimate 64 / C64 Ultimate |
+| `wireguard-uci-noreu.prg` | UCI | CT on-chip | 860 | Ultimate 3.15+ — **not a public release** (see above) | Ultimate, REU disabled |
+| `wireguard-uci-noreu-mtu1440.prg` | UCI | CT on-chip | 1440 | Ultimate 3.15+ (not public) **+ #807** (open issue, unmerged) | Ultimate running the #807 spike firmware |
+| `wireguard-uci-reu-mtu1440.prg` | UCI | REU DMA tables | 1440 | Ultimate 3.15+ (not public) **+ #807** (open issue, unmerged) | Ultimate running the #807 spike firmware + REU — **no hardware run: REU builds fail the handshake at 48 MHz on the preview firmware (#69); ships for completeness, use `-noreu` for turbo** |
+| `wireguard-reu.d64` | both REU PRGs (`wg-rrnet`, `wg-uci`) + `wg.cfg` + warning | | 860 | mixed: rrnet none, uci 3.15+ (not public) | |
+| `wireguard-noreu.d64` | both no-REU PRGs + `wg.cfg` + warning | | 860 | mixed: rrnet none, uci 3.15+ (not public) | |
+| `wireguard-mtu1440.d64` | both mtu1440 PRGs (on disk as `wg-mtu1440-noreu`, `wg-mtu1440-reu`) + `wg.cfg` + warning | | 1440 | Ultimate 3.15+ (not public) + #807 (open issue, unmerged) | |
 | `FIRMWARE-WARNING.txt` | plain-text copy of the on-disk warning | | | | |
 | `VERSION` | `git describe --tags --always --dirty` at build time | | | | |
 
@@ -73,29 +73,40 @@ endpoint) in the 9-line fixed-order SEQ format documented in
 > C64-WIREGUARD - FIRMWARE WARNING
 > =================================
 >
-> MTU1440 PRGS NEED UNMERGED FIRMWARE:
+> ALL WIREGUARD-UCI-*.PRG NEED ULTIMATE
+> FIRMWARE 3.15 OR NEWER. AS OF
+> 2026-09-03 THIS IS NOT A PUBLIC
+> RELEASE: U64/U64E RUN PREVIEW OR
+> TEST-MERGE BUILDS ONLY; THE C64
+> ULTIMATE FIRMWARE LINE IS UNTESTED.
+>
+> MTU1440 PRGS ADDITIONALLY NEED
+> GIDEONZ/1541ULTIMATE#807 (CHUNKED
+> SOCKET WRITE), AN OPEN ISSUE, NOT
+> MERGED UPSTREAM:
 >   WIREGUARD-UCI-NOREU-MTU1440.PRG
+>     (WG-MTU1440-NOREU ON DISK)
 >   WIREGUARD-UCI-REU-MTU1440.PRG
+>     (WG-MTU1440-REU ON DISK)
 >
-> THESE REQUIRE GIDEONZ/1541ULTIMATE
-> #807 (CHUNKED SOCKET WRITE), NOT
-> MERGED UPSTREAM, AND NOT IN ANY
-> RELEASED U64E OR C64U FIRMWARE AS
-> OF 2026-09-03.
+> ON ANY RELEASED FIRMWARE THE FIRST
+> SEND (THE HANDSHAKE) IS EXPECTED TO
+> FAIL: SCREEN SHOWS "HANDSHAKE SEND
+> FAILED" WITH NO CODE, THOUGH
+> NET_LAST_ERROR IS $8E. THE CODE
+> SHOWS ONLY OVER DMA OR ON THE 'S'
+> MESSAGE PATH (ISSUE #116). NEVER
+> OBSERVED ON HARDWARE - OUR RIG
+> RUNS THE #807 SPIKE.
 >
-> ON RELEASED FIRMWARE (3.15 AND
-> EARLIER) THE FIRST SEND FAILS:
->   SEND FAILED, NET ERR $8E
->
-> THE DEFAULT PRGS (RRNET AND UCI,
-> REU AND NOREU) NEED NO FIRMWARE
-> CHANGE. THEY WORK ON RELEASED
-> 3.15 AT MTU 860.
+> WIREGUARD-RRNET-*.PRG NEED NO
+> ULTIMATE FIRMWARE (RR-NET/IP65).
+> THEY WORK AT MTU 860.
 >
 > REU CAVEAT (#69): REU=1 BUILDS
-> GIVE WRONG X25519 RESULTS AT 48
-> MHZ ON FW 3.15. USE THE NOREU
-> PRGS FOR TURBO HOSTS.
+> FAIL THE HANDSHAKE AT 48 MHZ ON
+> THE PREVIEW FIRMWARE. USE THE
+> NOREU PRGS FOR TURBO HOSTS.
 > ```
 
 ## Hardware validation
@@ -113,7 +124,7 @@ endpoint) in the 9-line fixed-order SEQ format documented in
   same firmware behaviour the mtu1440 build depends on, on hardware
   that needs no firmware change.
 - **Cloudflare WARP, 48 MHz, mtu1440 build:** handshake to `ACTIVE`
-  in ~48 s; a subsequent rekey (`H`) reached `ACTIVE` again in ~48 s,
+  in ~48 s at 48 MHz; a subsequent rekey (`H`) reached `ACTIVE` again in ~48 s,
   and a second rekey in ~47 s — each with a strictly greater TAI64N
   timestamp than the last (#87). ICMP echo and a 1278-byte DNS
   response were carried through the tunnel intact.
@@ -137,9 +148,9 @@ Security sweep, closed 2026-08-30/31:
 - **#84** — an incomplete handshake held the firmware UDP socket for
   the rest of the run, with teardown dependent on an unshipped
   firmware reaper.
-- **#103** — the cold-init reclaim left only single-digit bytes free
-  in `MAIN_AREA_LO`/`HI`, blocking the #94 fix until the reclaim was
-  widened.
+- **#103** — the cold-init reclaim left only 3 B free in
+  `MAIN_AREA_LO` and 28 B free in `MAIN_AREA_HI`, blocking the #94
+  fix until the reclaim was widened.
 - **#109** — following #103's reclaim, a test calling into the
   reclaimed cold-init span hung for 180 s instead of failing fast; a
   gate check now catches keyword and aliased spellings of the same call.
@@ -151,12 +162,20 @@ Also landed:
 
 ## Known issues
 
-- **#807 is unmerged.** The mtu1440 PRGs fail their first send with
-  `NET ERR $8E` on any released firmware; only the default-MTU PRGs
-  are usable until a firmware release ships #807.
-- **#69** — `REU=1` variants produce wrong X25519 products at 48 MHz
-  on fw 3.15. Use the `-noreu` PRGs on turbo hosts until this is
-  resolved upstream.
+- **#807 is unmerged, and no released firmware carries it.** On any
+  released firmware, the mtu1440 PRGs' first send — the Type-1
+  handshake — is expected to fail: the screen shows `HANDSHAKE SEND
+  FAILED` with no error code, though `net_last_error` is `$8E`; the
+  code is visible only over DMA or on the 'S' message path
+  ([#116](https://github.com/JC-000/c64-wireguard/issues/116)). This
+  has never been observed on hardware — our rig runs the #807 spike.
+  All `wireguard-uci-*` PRGs, mtu1440 or not, additionally require
+  Ultimate firmware 3.15+, itself not a public release as of
+  2026-09-03 (preview/test-merge builds only on U64/U64E; untested on
+  the C64 Ultimate firmware line).
+- **#69** — `REU=1` variants fail the handshake at 48 MHz on the
+  preview firmware. Use the `-noreu` PRGs on turbo hosts until this
+  is resolved upstream.
 - **#113** — the default `MSG_PORT` (9999) is stored little-endian
   and copied to the wire big-endian, so the actual on-wire port is
   3879. Interop tooling that expects 9999 on the wire should be
