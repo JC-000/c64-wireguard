@@ -103,6 +103,29 @@ ETH_IFACE = "feth0"           # VICE's pcap side
 DNSMASQ_PIDFILE = "/tmp/c64-rig-dnsmasq.pid"
 DEFAULT_VICE_BIN = os.path.expanduser("~/opt/vice-eth/bin/x64sc")
 
+# --- BRIDGED mode --------------------------------------------------------
+# The "host" mode above is a private feth pair: the C64 can only reach this
+# Mac, and anything beyond it would have to be NATed through the host's IP
+# stack — which on this bench means through the host's own Cloudflare WARP
+# tunnel (utun1, MTU 1300), capping every path the C64 could take.
+#
+# BRIDGED mode attaches VICE's pcap driver to a REAL LAN interface instead.
+# VICE's CS8900A then reads and writes frames directly on that segment, so
+# the emulated C64 is an ordinary node on the physical LAN: it DHCPs from
+# the real router, and its IP datagrams are switched to the default gateway
+# without ever entering this Mac's IP stack. That is the whole point — the
+# host's WARP tunnel is a route in the host's stack, and frames that never
+# reach the stack cannot be routed through it. `bridged_problems()` refuses
+# to run unless the named interface really is an active LAN interface, and
+# the suite proves the bypass empirically (a real router lease, and a full
+# 1500-byte-capable path) rather than asserting it from this comment.
+#
+# This became possible on 2026-09-03, when a USB-C ethernet adapter was
+# attached: the built-in en0 is Wi-Fi, and Apple's Wi-Fi drivers do not
+# accept injected frames with a foreign source MAC, which is why
+# docs/rig said there was no bridged mode on this Mac.
+BRIDGED_IFACE = os.environ.get("VICE_BRIDGED_IFACE", "en4")
+
 # KERNAL keyboard queue — see tools/wg_c64_input.py for the mechanics.
 KBD_BUFFER = 0x0277
 KBD_COUNT = 0x00C6
@@ -219,6 +242,213 @@ def skip_if_rig_down(vice_bin: str) -> None:
     sys.exit(SKIP_EXIT)
 
 
+# ---------------------------------------------------------------------------
+# Bridged-mode preflight
+# ---------------------------------------------------------------------------
+
+def iface_status(iface: str) -> dict:
+    """Parse `ifconfig <iface>` into {up, running, active, inet, netmask,
+    ether, mtu, media}.  Missing keys mean the field was not printed."""
+    r = subprocess.run(["ifconfig", iface], capture_output=True, text=True)
+    if r.returncode != 0:
+        return {}
+    t = r.stdout
+    out: dict = {"raw": t}
+    fl = re.search(r"flags=\d+<([^>]*)>", t)
+    flags = fl.group(1).split(",") if fl else []
+    out["up"] = "UP" in flags
+    out["running"] = "RUNNING" in flags
+    m = re.search(r"\bmtu (\d+)", t)
+    if m:
+        out["mtu"] = int(m.group(1))
+    m = re.search(r"\bether ([0-9a-f:]{17})", t)
+    if m:
+        out["ether"] = m.group(1)
+    m = re.search(r"\n\tinet (\d+\.\d+\.\d+\.\d+) netmask (0x[0-9a-f]+)", t)
+    if m:
+        out["inet"] = m.group(1)
+        out["netmask"] = int(m.group(2), 16)
+    m = re.search(r"\n\tstatus: (\w+)", t)
+    if m:
+        out["active"] = m.group(1) == "active"
+    m = re.search(r"\n\tmedia: (.*)", t)
+    if m:
+        out["media"] = m.group(1).strip()
+    return out
+
+
+def default_gateway(iface: str) -> str | None:
+    """The IPv4 default gateway reachable over *iface*, from the route table."""
+    r = subprocess.run(["netstat", "-rn", "-f", "inet"],
+                       capture_output=True, text=True)
+    for line in r.stdout.splitlines():
+        f = line.split()
+        if len(f) >= 4 and f[0] == "default" and f[-1] == iface \
+                and re.fullmatch(r"\d+\.\d+\.\d+\.\d+", f[1]):
+            return f[1]
+    return None
+
+
+def dnsmasq_interfaces() -> list[str]:
+    """Every interface any live dnsmasq on this host is bound to.
+
+    `--bind-interfaces` plus `--interface=X` is a hard bind: the rig's
+    dnsmasq answers DHCP on feth1 and nowhere else. The bridged suite
+    asserts the LAN interface is NOT in this list, so a lease taken there
+    is provably the real router's and not the rig's own DHCP server
+    accidentally serving the physical segment (which would make the whole
+    "we are on the real LAN" claim vacuous).
+    """
+    # `-fl`, not `-af`: -a is Linux pgrep. On macOS `pgrep -af` exits 1 with
+    # no output, so this function returned [] for every input and the
+    # "dnsmasq is not on the bridged interface" check passed vacuously —
+    # caught 2026-09-03 by printing the list instead of trusting the empty
+    # result. selftest_dnsmasq_probe() is the standing alarm for it.
+    r = subprocess.run(["pgrep", "-fl", "dnsmasq"],
+                       capture_output=True, text=True)
+    out: list[str] = []
+    for line in r.stdout.splitlines():
+        out += re.findall(r"--interface[= ](\S+)", line)
+    return out
+
+
+def selftest_dnsmasq_probe() -> list[str]:
+    """Prove the dnsmasq probe can actually see a running dnsmasq.
+
+    An empty list from dnsmasq_interfaces() is the answer bridged mode
+    wants to hear, so it must not be reachable by the probe being broken.
+    If any dnsmasq is running at all, the probe has to name at least one
+    interface for it; if none is running the probe is unexercised and says
+    so rather than claiming a pass.
+    """
+    r = subprocess.run(["pgrep", "-fl", "dnsmasq"],
+                       capture_output=True, text=True)
+    running = [ln for ln in r.stdout.splitlines() if "dnsmasq" in ln]
+    if not running:
+        return ["no dnsmasq is running, so the interface probe is "
+                "UNEXERCISED — its empty result proves nothing this run"]
+    if not dnsmasq_interfaces():
+        return [f"dnsmasq is running but the probe found no --interface: "
+                f"{running}"]
+    return []
+
+
+def bridged_problems(iface: str, vice_bin: str) -> list[str]:
+    """Missing-prerequisite messages for bridged mode; empty means ready."""
+    problems: list[str] = []
+    if sys.platform != "darwin":
+        return ["not macOS — bridged mode is the pcap-on-a-real-NIC rig"]
+    if not os.path.exists(vice_bin):
+        problems.append(
+            f"{vice_bin} missing — an ethernet-capable x64sc is required. "
+            "Set VICE_ETHERNET_BIN or pass --vice-bin.")
+    if not bpf_capture_available():
+        problems.append(
+            "/dev/bpf0 and /dev/bpf1 are not world read-write — VICE's pcap "
+            "driver cannot attach. Ask the user to run: "
+            "sudo chmod o+rw /dev/bpf*  (resets on reboot)")
+    st = iface_status(iface)
+    if not st:
+        problems.append(f"{iface} does not exist")
+        return problems
+    if not (st.get("up") and st.get("running")):
+        problems.append(f"{iface} is not UP+RUNNING")
+    if st.get("active") is False:
+        problems.append(f"{iface} has no link (status: not active)")
+    if "ether" not in st:
+        problems.append(f"{iface} is not an ethernet interface (no MAC) — "
+                        "bridged mode needs a real L2 segment")
+    ip = st.get("inet")
+    if not ip:
+        problems.append(f"{iface} has no IPv4 address — it is not on a LAN")
+    else:
+        if st.get("netmask", 0) == 0xFFFFFFFF:
+            problems.append(f"{iface} is a /32 (point-to-point), not a LAN "
+                            "segment")
+        if ip.startswith("169.254."):
+            problems.append(f"{iface} only has a link-local address ({ip}) — "
+                            "no DHCP server answered on this segment")
+    gw = default_gateway(iface)
+    if not gw:
+        problems.append(f"no IPv4 default gateway routes over {iface} — the "
+                        "C64 would have no path off the segment")
+    if iface in dnsmasq_interfaces():
+        problems.append(
+            f"the rig's dnsmasq is bound to {iface} — a lease taken here "
+            "would be the rig's, not the real router's; bridged mode "
+            "requires dnsmasq to stay on " + HOST_IFACE + " only")
+    r = subprocess.run(["pgrep", "-fl", f"ethernetioif {iface}"],
+                       capture_output=True, text=True)
+    if r.stdout.strip():
+        problems.append(
+            f"another VICE is already attached to {iface} (duplicate-MAC "
+            f"conflict):\n      {r.stdout.strip()}")
+    return problems
+
+
+def describe_bridged(iface: str) -> str:
+    st = iface_status(iface)
+    return (f"{iface}: {st.get('inet', '?')}/{st.get('netmask', 0):08x} "
+            f"mac={st.get('ether', '?')} mtu={st.get('mtu', '?')} "
+            f"media={st.get('media', '?')} gw={default_gateway(iface)}")
+
+
+def skip_if_bridged_rig_down(iface: str, vice_bin: str) -> None:
+    problems = bridged_problems(iface, vice_bin)
+    if not problems:
+        return
+    log(f"SKIP: bridged ethernet rig not ready on {iface}:")
+    for p in problems:
+        log(f"    - {p}")
+    sys.exit(SKIP_EXIT)
+
+
+def assert_vice_bound_to(proc, iface: str) -> str:
+    """Read the LAUNCHED process's argv and prove the pcap binding.
+
+    Structural: the config object this module built is not evidence — what
+    matters is the command line the OS is actually running. Returns the
+    argv string; raises RuntimeError naming what was missing.
+    """
+    p = getattr(proc, "_proc", None)
+    if p is None:
+        raise RuntimeError("VICE process not started")
+    r = subprocess.run(["ps", "-o", "command=", "-p", str(p.pid)],
+                       capture_output=True, text=True)
+    argv = r.stdout.strip()
+    if not argv:
+        raise RuntimeError(f"VICE pid {p.pid} is gone — cannot verify binding")
+    missing = []
+    if "-ethernetiodriver pcap" not in argv:
+        missing.append("-ethernetiodriver pcap")
+    if f"-ethernetioif {iface}" not in argv:
+        missing.append(f"-ethernetioif {iface}")
+    # The cartridge itself is not a CLI flag: ViceProcess writes the RR-Net
+    # resources into a temporary .rc handed to VICE with -addconfig. Read
+    # that file rather than trusting the ViceConfig object we built.
+    m = re.search(r"-addconfig (\S+)", argv)
+    if not m:
+        missing.append("-addconfig <rc> (no RR-Net resource file)")
+    else:
+        try:
+            rc = open(m.group(1)).read()
+        except OSError as e:
+            raise RuntimeError(f"cannot read VICE's rc file: {e}") from e
+        for want, why in (
+                (r"^ETHERNETCART_ACTIVE=1\s*$", "cartridge not active"),
+                (r"^EthernetCartMode=1\s*$", "not RR-Net mode"),
+                (rf'^ETHERNET_INTERFACE="{re.escape(iface)}"\s*$',
+                 f"interface is not {iface}"),
+                (r'^ETHERNET_DRIVER="pcap"\s*$', "driver is not pcap")):
+            if not re.search(want, rc, re.M):
+                missing.append(f"{why} (no /{want}/ in rc):\n{rc}")
+    if missing:
+        raise RuntimeError(
+            f"VICE was not launched bridged onto {iface}; missing "
+            f"{missing} in:\n  {argv}")
+    return argv
+
+
 # ============================================================================
 # Map / cfg parsers (structural inputs, never constants)
 # ============================================================================
@@ -327,9 +557,15 @@ def build_ip65(extra_make_args: list[str] | None = None) -> None:
     if os.environ.get("C64_SKIP_BUILD"):
         log("C64_SKIP_BUILD set — reusing build/wireguard.prg")
         return
-    cmd = ["make", "BACKEND=ip65"] + list(extra_make_args or [])
-    log(f"=== make clean && {' '.join(cmd)} ===")
-    for c in (["make", "clean"], cmd):
+    extra = list(extra_make_args or [])
+    cmd = ["make", "BACKEND=ip65"] + extra
+    # The knobs go to `clean` too: BUILD_DIR selects WHICH tree is cleaned
+    # (a BUILD_DIR=build_x build otherwise cleans `build` and leaves its own
+    # stale objects), and the ca65 flag knobs are what the Makefile's
+    # CA65_FLAGSTAMP compares against — see the KNOB_GUARDS comment.
+    clean = ["make", "clean", "BACKEND=ip65"] + extra
+    log(f"=== {' '.join(clean)} && {' '.join(cmd)} ===")
+    for c in (clean, cmd):
         r = subprocess.run(c, cwd=PROJECT_ROOT, capture_output=True, text=True)
         if r.returncode != 0:
             sys.stderr.write(r.stdout[-2000:])
@@ -359,10 +595,11 @@ class EthVice:
     """
 
     def __init__(self, vice_bin: str, port: int = 0, prg_path: str = PRG_PATH,
-                 reu: bool = True):
+                 reu: bool = True, iface: str = ETH_IFACE):
         self.vice_bin = vice_bin
         self.prg_path = prg_path
         self.reu = reu
+        self.iface = iface
         self._allocator = PortAllocator(port_range_start=6570,
                                         port_range_end=6590)
         self._own_port = port == 0
@@ -384,7 +621,7 @@ class EthVice:
             minimize=True,
             ethernet=True,
             ethernet_mode="rrnet",
-            ethernet_interface=ETH_IFACE,
+            ethernet_interface=self.iface,
             ethernet_driver="pcap",
             ethernet_executable=self.vice_bin,
             run_as_root=False,        # the BPF nodes are world-rw on this rig
@@ -393,7 +630,7 @@ class EthVice:
         self.proc = ViceProcess(config)
         self.proc.start()
         log(f"=== VICE pid={self.proc._proc.pid if self.proc._proc else '?'} "
-            f"port={self.port} iface={ETH_IFACE} (warp OFF) ===")
+            f"port={self.port} iface={self.iface} (warp OFF) ===")
         self.tr = self._connect()
         return self
 
@@ -665,7 +902,8 @@ class Tap:
         r"IP (\d+\.\d+\.\d+\.\d+)\.(\d+) > (\d+\.\d+\.\d+\.\d+)\.(\d+): "
         r"UDP, length (\d+)")
 
-    def __init__(self, bpf_filter: str):
+    def __init__(self, bpf_filter: str, iface: str = HOST_IFACE):
+        self.iface = iface
         self.filter = f"({bpf_filter}) or (ip[6:2] & 0x1fff != 0)"
         self.records: list[UdpRec] = []
         self.frags: list[str] = []
@@ -675,7 +913,7 @@ class Tap:
 
     def __enter__(self) -> "Tap":
         self._proc = subprocess.Popen(
-            ["tcpdump", "-i", HOST_IFACE, "-l", "-n", "-q", "-U", self.filter],
+            ["tcpdump", "-i", self.iface, "-l", "-n", "-q", "-U", self.filter],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         threading.Thread(target=self._pump, daemon=True).start()
         deadline = time.monotonic() + 5.0
@@ -685,7 +923,7 @@ class Tap:
                 return self
             if not line and self._proc.poll() is not None:
                 break
-        raise RuntimeError("tcpdump did not start listening on " + HOST_IFACE)
+        raise RuntimeError("tcpdump did not start listening on " + self.iface)
 
     def __exit__(self, *exc) -> None:
         if self._proc is not None:
