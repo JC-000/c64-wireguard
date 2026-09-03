@@ -218,7 +218,6 @@
 
 ; --- Messaging ---
 .export msg_port
-.export msg_input_buf
 .export msg_input_len
 .export msg_recv_ptr
 .export msg_recv_len
@@ -737,10 +736,18 @@ ip_cksum_result:
 ; --- Messaging (msg_port is in APP_DATA; remaining msg_* state is mutable) ---
 ; Sized from the tunnel MTU (constants.inc), never from literals: a message
 ; is text + 28 bytes of IP/UDP framing and the whole thing must fit in one
-; Type-4 payload, so the text buffer is MSG_TEXT_MAX = WG_MTU - 28 and the
-; packet buffer is exactly WG_MTU. All lengths are 16-bit (contract §13.3).
-msg_input_buf:
-        .res MSG_TEXT_MAX, 0   ; keyboard input buffer (fills one tunnel packet)
+; Type-4 payload, so the packet buffer is exactly WG_MTU and the text is at
+; most MSG_TEXT_MAX = WG_MTU - 28. All lengths are 16-bit (contract §13.3).
+;
+; THERE IS NO SEPARATE KEYBOARD BUFFER (issue #70). read_input_line types
+; straight into ip_packet_buf + IP_UDP_HDR_LEN, i.e. where udp_tunnel_build
+; would have copied the text to anyway; with source == destination that
+; byte-forward copy is an identity and the 28-byte header is prepended in
+; place. This is what makes a 1472-byte datagram fit: a private
+; msg_input_buf of MSG_TEXT_MAX bytes overflowed APP_BSS by ~1 KB at
+; WG_MTU = 1440. Nothing touches ip_packet_buf while a line is being typed
+; (main_loop is blocked inside read_input_line), and the MSG_TEXT_MAX clamp
+; in read_input_line keeps the text inside the WG_MTU-byte buffer.
 msg_input_len:
         .res 2                 ; input length (16-bit)
 msg_recv_ptr:
@@ -753,7 +760,7 @@ ip_packet_buf:
         .res WG_MTU, 0         ; outgoing IP packet (28 B headers + MSG_TEXT_MAX)
 ip_pkt_len:
         .res 2                 ; IP packet length (16-bit)
-.assert WG_MTU = IP_UDP_HDR_LEN + MSG_TEXT_MAX, error, "ip_packet_buf and msg_input_buf sizes disagree"
+.assert WG_MTU = IP_UDP_HDR_LEN + MSG_TEXT_MAX, error, "MSG_TEXT_MAX must be WG_MTU - IP_UDP_HDR_LEN: the text is typed in place inside ip_packet_buf"
 
 ; --- Cookie state ---
 cookie_buf:

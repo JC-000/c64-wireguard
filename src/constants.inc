@@ -93,13 +93,13 @@ WG_DATA_OVERHEAD    = 32        ; 16 B Type-4 header + 16 B Poly1305 tag
 ; WG_DATAGRAM_CAP is THIS CONSUMER's ceiling, independent of the backend
 ; (a consumer MAY clamp below the backend's caps — c64-lib-contract PR #143,
 ; v0.12.1; udp_recv_buf must still hold NET_UDP_RECV_MAX, see §13.8 assert): the
-; largest Type-4 datagram the RAM budget can hold. ip_packet_buf + msg_input_buf
-; + udp_recv_buf must fit MAIN_AREA_HI; at 892 they leave ~137 B (UCI map,
-; 2026-08-27). The ip65 backend advertises 1472/1472 and would otherwise derive
-; a 1440 MTU whose buffers overflow HI by ~1 KB. Raising this — e.g. once the
-; UCI send side reaches 1440 via WRITE_SOCKET_MORE (GideonZ/1541ultimate#802) —
-; means sharing msg_input_buf with ip_packet_buf (build in place), not just
-; editing the number: the §13.8 asserts and the linker will refuse otherwise.
+; largest Type-4 datagram the RAM budget can hold. ip_packet_buf + udp_recv_buf
+; (+ the rest of APP_BSS) must fit MAIN_AREA_HI. The keyboard text is typed in
+; place inside ip_packet_buf (issue #70; there is no msg_input_buf), which is
+; what leaves room for a 1472-byte datagram: with a private text buffer the
+; 1440 MTU overflowed APP_BSS by ~1 KB. The ip65 backend advertises 1472/1472
+; but stays at 892 here (its RR-Net path is unmeasured at 1472, and #80 is
+; open). The §13.8 asserts and the linker refuse a cap the buffers cannot hold.
 WG_DATAGRAM_CAP     = 892
 ; WG_NET_UDP_MAX = min(NET_UDP_SEND_MAX, NET_UDP_RECV_MAX, WG_DATAGRAM_CAP)
 .if NET_UDP_SEND_MAX < NET_UDP_RECV_MAX
