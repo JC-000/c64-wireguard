@@ -852,7 +852,12 @@ def main() -> int:
     # ---- tap up BEFORE the machine boots ---------------------------------
     # Everything the C64 ever emits is in the capture, so "the cache was
     # cold" is a claim about the whole run, not about a window.
-    bpf = (f"arp or (udp and (port 67 or port 68 or port {dest_port}))")
+    # 51820 is wg_local_port as built, which is the port net_udp_listen
+    # registers during net_init — the mid-pump probe is aimed there and
+    # MUST be captured, or the drop-counter assertion would rest on an
+    # unproven premise (that the datagram reached the C64 at all).
+    bpf = (f"arp or (udp and (port 67 or port 68 or port {dest_port} "
+           f"or port 51820))")
     rc = 1
     with WireTap(bpf, args.iface) as tap:
         with EthVice(args.vice_bin, iface=args.iface) as vice:
@@ -1118,6 +1123,12 @@ def main() -> int:
                 else:
                     probe = (bytes(rng.randrange(0x80, 0x100)
                                    for _ in range(28)) + b"MIDP")
+                    # Warm the HOST's ARP for the C64 first. Otherwise the
+                    # probe is the packet that triggers the host's own ARP
+                    # resolution and can leave late, after the send has
+                    # already returned — the window is only ~0.35 s wide.
+                    ping_silent(c64)
+                    mark_probe = len(tap.matching(host_ip, c64, listen_port))
                     injector = MidPumpSender(c64, listen_port,
                                              args.budget * 0.3, probe)
                     log(f"  mid-pump probe: {len(probe)} B at {c64}:"
@@ -1186,9 +1197,24 @@ def main() -> int:
                 if injector is not None:
                     injector.join(timeout=5.0)
                     drop3 = opt_byte(tr, L, "ip65_recv_dropped")
+                    # ON THE WIRE, not just handed to sendto(). A counter
+                    # that did not move proves nothing unless the datagram
+                    # demonstrably reached the C64 while the send was still
+                    # running; otherwise the "failure" is the host's, and
+                    # asserting on it would be asserting on an unproven
+                    # premise.
+                    seen = tap.matching(host_ip, c64, listen_port)[mark_probe:]
+                    on_wire = any(f[4] == probe for f in seen)
                     landed = (injector.sent_at is not None
                               and injector.error is None
-                              and injector.sent_at <= t_send_end)
+                              and injector.sent_at <= t_send_end
+                              and on_wire)
+                    if not on_wire and injector.error is None:
+                        log(f"  mid-pump probe NEVER REACHED THE WIRE inside "
+                            f"the window (tap saw {len(seen)} datagram(s) to "
+                            f"{c64}:{listen_port}) — the counter is NOT "
+                            f"asserted; this is a host-side miss, not a "
+                            f"finding about ip65_recv_dropped")
                     if injector.error:
                         log(f"  mid-pump probe FAILED TO SEND: "
                             f"{injector.error} — the counter is NOT asserted")
