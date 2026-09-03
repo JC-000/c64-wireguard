@@ -451,9 +451,13 @@ wgcf register --accept-tos && wgcf generate      # writes wgcf-profile.conf
 ```bash
 make BACKEND=uci REU=0 UCI_CHUNKED_WRITE=1                                # build/, msg_port 9999 (wire port 3879 — #113)
 make BACKEND=uci REU=0 UCI_CHUNKED_WRITE=1 MSG_PORT=53 \
-     BUILD_DIR=build_msgport53                                            # DNS stage, msg_port 53
+     BUILD_DIR=build_msgport53                                            # DNS stage, msg_port 53 (own tree + lib/, no clean needed)
 WARP_PROFILE=/path/to/wgcf-profile.conf U64_HOST=<device-ip> \
     python3 tools/test_warp_live.py                                       # 48 MHz
+# RR-Net (ip65) instead — MTU 1440 via the generic knob, DHCP at 1 MHz then turbo:
+make BACKEND=ip65 REU=0 WG_MTU1440=1
+make BACKEND=ip65 REU=0 WG_MTU1440=1 MSG_PORT=53 BUILD_DIR=build_msgport53
+WARP_PROFILE=... U64_HOST=<device-ip> python3 tools/test_warp_live.py --backend ip65
 ```
 
 Stage A/B handshakes against WARP on the first PRG, pings and messages `1.1.1.1` through the tunnel; Stage C loads the second, `MSG_PORT=53` PRG for a *fresh* handshake and rides it with two host-crafted DNS queries to `1.1.1.1:53`, checking the decrypted inbound reply's IP/UDP header and DNS transaction id/question section.

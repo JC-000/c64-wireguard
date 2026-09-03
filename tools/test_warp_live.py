@@ -67,11 +67,18 @@ Backends (`--backend {uci,ip65}`, default uci — issue #70):
     * The clock is raised to --turbo only AFTER net_initialized (settle
       3 s, asserted by read-back), never before 'I': see _net_init_ip65
       for why DHCP under ip65 has to run at 1 MHz.
-  Stage A PRG (ip65):
-      make clean && make BACKEND=ip65 REU=0 WG_MTU1440=1
-  Stage C PRG (ip65, msg_port 53 into build_msgport53/):
-      make clean && make BACKEND=ip65 REU=0 WG_MTU1440=1 MSG_PORT=53 \\
-          BUILD_DIR=build_msgport53
+  Stage A PRG (ip65, into build/):
+      make BACKEND=ip65 REU=0 WG_MTU1440=1
+  Stage C PRG (ip65, msg_port 53 into build_msgport53/ — its own tree,
+  own lib/ archives and own flag stamp, so no `make clean` is needed and
+  a plain `make clean` must NOT precede it: that would wipe build/, the
+  Stage A PRG):
+      make BACKEND=ip65 REU=0 WG_MTU1440=1 MSG_PORT=53 BUILD_DIR=build_msgport53
+  Both builds are required up front: a missing build_msgport53/labels.txt
+  exits 2 before any device call.
+  Exit code: 0 only when no stage recorded an error; a stage that fails
+  (e.g. Stage A never ACTIVE) is logged, the remaining stages still run,
+  and the process exits 1.
   Every stage logs a PRG fingerprint line (sha256, backend, WG_MTU read
   structurally as ip_pkt_len - ip_packet_buf, uci_send_part present?,
   reu_mul_init present?) so the log says which binary actually ran.
@@ -725,22 +732,26 @@ def main(argv: Optional[list[str]] = None) -> int:
     log.info("c64 static pub (derived, safe to log): %s", base64.b64encode(c64_pub).decode())
     log.info("peer pub: %s", resp_pub_b64)
 
-    # Backend check from the BUILT labels, before the device is touched (no
-    # probe, no lock, no run_prg on a mismatch). Stage A's labels are
-    # mandatory here; Stage C's are checked here too when its build exists,
-    # otherwise the missing file surfaces at Stage C exactly as before.
+    # Backend check from the BUILT labels of BOTH stages, before the device
+    # is touched (no probe, no lock, no run_prg on a mismatch or a missing
+    # Stage C build).
     labels_a = Path(args.labels)
     prg_a = labels_a.parent / "wireguard.prg"
+    if not LABELS_C.exists():
+        log.error("Stage C build missing: %s — build it first: make "
+                  "BACKEND=%s REU=0 %s MSG_PORT=53 BUILD_DIR=build_msgport53",
+                  LABELS_C, args.backend,
+                  "WG_MTU1440=1" if args.backend == "ip65"
+                  else "UCI_CHUNKED_WRITE=1")
+        return 2
     try:
         L_A = load_labels_for_backend(labels_a, args.backend)
-        L_C = (load_labels_for_backend(LABELS_C, args.backend)
-               if LABELS_C.exists() else None)
+        L_C = load_labels_for_backend(LABELS_C, args.backend)
     except BackendMismatch as exc:
         log.error("backend mismatch: %s", exc)
         return 2
-    log.info("backend=%s confirmed from %s%s", args.backend, labels_a,
-             f" and {LABELS_C}" if L_C is not None else
-             f" ({LABELS_C} not built yet)")
+    log.info("backend=%s confirmed from %s and %s", args.backend, labels_a,
+             LABELS_C)
 
     probe = probe_u64(args.host)
     if not probe.reachable:
@@ -824,8 +835,6 @@ def main(argv: Optional[list[str]] = None) -> int:
                     raise
 
         # --- Stage C ---
-        if L_C is None:
-            L_C = load_labels_for_backend(LABELS_C, args.backend)
         c = run_stage_c(tr, client, L_C, c64_priv, c64_pub, resp_pub, seed,
                         backend=args.backend, turbo_mhz=args.turbo)
         results["stage_c"] = c
@@ -853,7 +862,28 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     import json
     log.info("RESULTS:\n%s", json.dumps(results, indent=2, default=str))
+    failed = stage_errors(results)
+    if failed:
+        log.error("FAILED: %s", "; ".join(failed))
+        return 1
     return 0
+
+
+def stage_errors(results: dict) -> list[str]:
+    """Every 'error'/'ping_error' any stage recorded, as 'stage: text'.
+
+    main() keeps running the remaining stages after a failure (Stage C is
+    a fresh run_prg and still informative when Stage A never went ACTIVE)
+    but must not exit 0 with the failure buried in RESULTS.
+    """
+    out = []
+    for key, stage in results.items():
+        if not isinstance(stage, dict):
+            continue
+        for k in ("error", "ping_error"):
+            if stage.get(k):
+                out.append(f"{key}: {stage[k]}")
+    return out
 
 
 if __name__ == "__main__":

@@ -372,10 +372,177 @@ def main() -> int:
         check("test_warp_live.main() restore-in-finally check runs", False,
               repr(exc))
 
+    print("\n=== test_warp_live backend seams (#70, ip65 warp) ===")
+    # Structural checks of the pieces the ip65 run hangs from, with labels
+    # shaped like the three REAL builds (addresses from the 2026-09-03
+    # isolated builds on feat/ip65-mtu1440-warp): default uci, chunked
+    # uci, and ip65 + WG_MTU1440. ip_pkt_len - ip_packet_buf is how the
+    # tool reads WG_MTU, so the MTU numbers here are the real ones.
+    try:
+        import test_warp_live as warp
+        uci_default = _warp_labels("uci", ip_pkt_len=0x9B8F)
+        uci_chunked = _warp_labels("uci", ip_pkt_len=0x9DD3, chunked=True)
+        ip65_1440 = _warp_labels("ip65", ip_pkt_len=0x9DD3)
+        check("detect_backend: default uci build -> 'uci'",
+              warp.detect_backend(uci_default) == "uci")
+        check("detect_backend: chunked uci build -> 'uci'",
+              warp.detect_backend(uci_chunked) == "uci")
+        check("detect_backend: ip65 build -> 'ip65'",
+              warp.detect_backend(ip65_1440) == "ip65")
+        # Coincidence guard: a classifier that keys on ip65_blob_start
+        # ALONE still passes the three checks above; a mixed map (blob plus
+        # the uci error byte) and an empty map must both be refused.
+        mixed = dict(ip65_1440, net_last_error=0x7C32)
+        for name, lab in (("blob + net_last_error", mixed),
+                          ("no markers at all", {})):
+            try:
+                got = warp.detect_backend(lab)
+                raised = False
+            except ValueError:
+                raised, got = True, None
+            check(f"detect_backend: {name} raises ValueError",
+                  raised, f"returned {got!r}")
+        for kind, lab, want in (("default uci", uci_default, 860),
+                                ("chunked uci", uci_chunked, 1440),
+                                ("ip65 WG_MTU1440", ip65_1440, 1440)):
+            fp = warp._fingerprint("seam", b"\x00", lab,
+                                   warp.detect_backend(lab))
+            check(f"_fingerprint: {kind} reports WG_MTU {want}",
+                  fp["wg_mtu"] == want, f"got {fp['wg_mtu']}")
+        check("_fingerprint: uci_send_part flag follows the label",
+              (warp._fingerprint("s", b"", uci_chunked, "uci")["uci_send_part"]
+               is True)
+              and (warp._fingerprint("s", b"", uci_default, "uci")
+                   ["uci_send_part"] is False))
+
+        # load_labels_for_backend on a real-format labels file: a uci
+        # labels.txt requested as ip65 raises BackendMismatch naming both.
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            lf = Path(td) / "labels.txt"
+            lf.write_text("".join(f"al C:{v:04X} .{k}\n"
+                                  for k, v in uci_default.items()))
+            try:
+                warp.load_labels_for_backend(lf, "ip65")
+                mism = None
+            except warp.BackendMismatch as exc:
+                mism = str(exc)
+            check("load_labels_for_backend: uci labels.txt as --backend "
+                  "ip65 raises BackendMismatch naming both",
+                  mism is not None and "ip65" in mism and "uci" in mism,
+                  repr(mism))
+            check("load_labels_for_backend: matching backend returns labels",
+                  warp.load_labels_for_backend(lf, "uci")["ip_packet_buf"]
+                  == 0x9833)
+
+        # _dump_failure gating: on ip65 labels the UCI-only net_last_error
+        # must never be read (it is not even in the map).
+        class _Tr:
+            def __init__(self):
+                self.reads = []
+
+            def read_memory(self, addr, n):
+                self.reads.append(addr)
+                return bytes(n)
+        saved_dump = warp.dump_screen
+        warp.dump_screen = lambda *a, **k: None
+        try:
+            tr = _Tr()
+            warp._dump_failure(tr, ip65_1440, "seam")
+            check("_dump_failure: no reads at all on ip65 labels without "
+                  "hs_* labels (net_last_error never touched)",
+                  tr.reads == [], f"reads={tr.reads}")
+            tr = _Tr()
+            warp._dump_failure(tr, uci_default, "seam")
+            check("_dump_failure: uci labels DO read net_last_error",
+                  tr.reads == [uci_default["net_last_error"]],
+                  f"reads={tr.reads}")
+        finally:
+            warp.dump_screen = saved_dump
+
+        # _net_init_ip65 ordering: 1 MHz before 'I', turbo only after
+        # net_initialized reads 1; a timeout returns False and never
+        # raises the clock.
+        calls = []
+        mem = {ip65_1440["net_initialized"]: 0}
+
+        class _TrNet(_Tr):
+            def read_memory(self, addr, n):
+                calls.append(("read", addr))
+                if addr == ip65_1440["net_initialized"]:
+                    mem[addr] = 1 if len(calls) > 3 else mem[addr]
+                    return bytes([mem[addr]])
+                return bytes(n)
+        saved = (warp.set_turbo_mhz, warp.get_turbo_mhz, warp.ki.press_key,
+                 warp.time.sleep, warp.dump_screen, warp.NET_INIT_BUDGET_S)
+        try:
+            warp.set_turbo_mhz = lambda c, m: calls.append(("turbo", m))
+            warp.get_turbo_mhz = lambda c: calls[-1][1] if calls else 0
+            warp.ki.press_key = lambda tr, ch, timeout=0: (
+                calls.append(("key", ch)) or True)
+            warp.time.sleep = lambda s: None
+            warp.dump_screen = lambda *a, **k: None
+            res = {}
+            ok = warp._net_init_ip65(_TrNet(), None, ip65_1440, 48, res)
+            seq = [c for c in calls if c[0] != "read"]
+            reads_before_turbo48 = any(
+                c == ("read", ip65_1440["net_initialized"])
+                for c in calls[:calls.index(("turbo", 48))]) \
+                if ("turbo", 48) in calls else False
+            check("_net_init_ip65: 1 MHz -> I -> net_initialized -> turbo",
+                  ok is True and seq == [("turbo", 1), ("key", "I"),
+                                         ("turbo", 48)]
+                  and reads_before_turbo48 and res.get("net_initialized"),
+                  f"ok={ok} seq={seq} res={res}")
+            # timeout path
+            calls.clear()
+            mem[ip65_1440["net_initialized"]] = 0
+            warp.NET_INIT_BUDGET_S = 0.0
+            res = {}
+            ok = warp._net_init_ip65(_Tr(), None, ip65_1440, 48, res)
+            check("_net_init_ip65: net_initialized never 1 -> False, error "
+                  "set, turbo NOT raised",
+                  ok is False and "net_initialized" in res.get("error", "")
+                  and ("turbo", 48) not in calls
+                  and calls[:2] == [("turbo", 1), ("key", "I")],
+                  f"ok={ok} calls={calls} res={res}")
+        finally:
+            (warp.set_turbo_mhz, warp.get_turbo_mhz, warp.ki.press_key,
+             warp.time.sleep, warp.dump_screen, warp.NET_INIT_BUDGET_S) = saved
+
+        # Exit code: a stage that recorded an error must fail the process.
+        check("stage_errors: Stage A error is reported",
+              warp.stage_errors({"seed": 1, "stage_ab": {"error": "boom"},
+                                 "stage_c": {"active": True}})
+              == ["stage_ab: boom"])
+        check("stage_errors: clean results report nothing",
+              warp.stage_errors({"seed": 1, "stage_ab": {"active": True}})
+              == [])
+    except Exception as exc:                                      # noqa: BLE001
+        check("test_warp_live backend seams run", False, repr(exc))
+
     total = passed + failed
     print(f"\nResults: {passed}/{total} passed, {failed} failed")
     return 0 if failed == 0 else 1
 
+
+
+# ---------------------------------------------------------------------------
+# Labels shaped like the real builds, for the test_warp_live backend seams.
+# Addresses are the measured ones (ip_packet_buf $9833 in every build;
+# ip_pkt_len $9B8F at MTU 860, $9DD3 at MTU 1440).
+# ---------------------------------------------------------------------------
+def _warp_labels(kind: str, ip_pkt_len: int, chunked: bool = False) -> dict:
+    L = {"boot_ready": 0x8E60, "wg_state": 0x8E61, "net_initialized": 0x908E,
+         "ip_packet_buf": 0x9833, "ip_pkt_len": ip_pkt_len,
+         "WG_MTU": ip_pkt_len - 0x9833}
+    if kind == "ip65":
+        L["ip65_blob_start"] = 0x2000
+    else:
+        L["net_last_error"] = 0x7C32
+        if chunked:
+            L["uci_send_part"] = 0x211C
+    return L
 
 if __name__ == "__main__":
     sys.exit(main())

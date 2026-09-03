@@ -102,10 +102,17 @@ endif
 # build is byte-identical to a tree without this flag. UCI only — ip65 has
 # no chunked path and its caps are already 1472/1472 (clamped by
 # WG_DATAGRAM_CAP for RAM, see src/constants.inc).
+# The knob $(error) guards below fire at parse time, which would also refuse
+# `make clean BACKEND=uci WG_MTU1440=1`. KNOB_GUARDS is non-empty whenever
+# something other than `clean` is going to be built (an empty goal list means
+# the default target), so clean always works and every build is still guarded.
+KNOB_GUARDS := $(if $(MAKECMDGOALS),$(filter-out clean,$(MAKECMDGOALS)),all)
 UCI_CHUNKED_WRITE ?= 0
 ifeq ($(UCI_CHUNKED_WRITE),1)
 ifneq ($(BACKEND),uci)
+ifneq ($(KNOB_GUARDS),)
 $(error UCI_CHUNKED_WRITE=1 requires BACKEND=uci: the chunked SOCKET_WRITE is a UCI firmware command, ip65 has no equivalent)
+endif
 endif
 CA65FLAGS += -D UCI_CHUNKED_WRITE=1
 endif
@@ -128,7 +135,9 @@ WG_MTU1440 ?= 0
 ifeq ($(WG_MTU1440),1)
 ifeq ($(BACKEND),uci)
 ifneq ($(UCI_CHUNKED_WRITE),1)
+ifneq ($(KNOB_GUARDS),)
 $(error WG_MTU1440=1 with BACKEND=uci needs the chunked send path: add UCI_CHUNKED_WRITE=1 (requires GideonZ/1541ultimate#807 spike firmware), or use BACKEND=ip65 where the 1472-byte caps are native)
+endif
 endif
 endif
 CA65FLAGS += -D WG_MTU1440=1
@@ -305,11 +314,13 @@ $(LIB_DIR):
 .PHONY: FORCE
 FORCE:
 
+# OUT_DIR follows $(LIB_DIR) so a BUILD_DIR override gets its own archives
+# (the scripts default to build/lib when run by hand).
 $(X25519_ARCHIVE): FORCE | $(LIB_DIR)
-	bash tools/integration/build_x25519.sh
+	OUT_DIR=$(abspath $(LIB_DIR)) bash tools/integration/build_x25519.sh
 
 $(CHACHA_ARCHIVE): FORCE | $(LIB_DIR)
-	bash tools/integration/build_chacha20poly1305.sh
+	OUT_DIR=$(abspath $(LIB_DIR)) bash tools/integration/build_chacha20poly1305.sh
 
 # --- Assembler-flag dependency tracking (issue #76) ---
 # The .d fragments record which FILES an object read, not which FLAGS it was
