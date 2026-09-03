@@ -633,9 +633,14 @@ class MidPumpSender(threading.Thread):
     """
 
     def __init__(self, dst_ip: str, dst_port: int, delay: float,
-                 payload: bytes):
+                 payload: bytes, src_ip: str | None = None):
         super().__init__(daemon=True)
         self.dst = (dst_ip, dst_port)
+        # This Mac is dual-homed on 10.43.23.0/24 (Wi-Fi en0 .99 and the
+        # wired en4 .182). The route to the C64 goes via en4 today, but
+        # binding the source address pins the frame to the interface the
+        # tap is on rather than trusting that.
+        self.src_ip = src_ip
         self.delay = delay
         self.payload = payload
         self.sent_at: float | None = None
@@ -645,6 +650,8 @@ class MidPumpSender(threading.Thread):
         time.sleep(self.delay)
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            if self.src_ip:
+                s.bind((self.src_ip, 0))
             s.sendto(self.payload, self.dst)
             self.sent_at = time.monotonic()
             s.close()
@@ -679,7 +686,8 @@ def set_source_port(tr, L, port: int) -> None:
     write_bytes(tr, L["wg_local_port"], struct.pack("<H", port))
 
 
-def send_once(tr, L, payload: bytes, timeout: float) -> tuple[int, float]:
+def send_once(tr, L, payload: bytes, timeout: float,
+              on_before_jsr=None) -> tuple[int, float]:
     """One net_udp_send. Returns (carry, wall seconds spent inside the call).
 
     jsr() sets a monitor checkpoint and lets the CPU RUN to it, so the wall
@@ -689,6 +697,11 @@ def send_once(tr, L, payload: bytes, timeout: float) -> tuple[int, float]:
     write_bytes(tr, L["udp_recv_buf"], payload)
     write_bytes(tr, L["net_udp_send_len"], struct.pack("<H", len(payload)))
     write_bytes(tr, CARRY, b"\xFF")
+    # Staging is several monitor round trips. Anything timed against the
+    # CALL must start here, after them, or it races the setup instead of
+    # the send — which is how the mid-pump probe kept landing late.
+    if on_before_jsr is not None:
+        on_before_jsr()
     t0 = time.monotonic()
     jsr(tr, SEND_TRAMP, timeout=timeout)
     elapsed = time.monotonic() - t0
@@ -1153,17 +1166,18 @@ def main() -> int:
                     ping_silent(c64)
                     mark_probe = len(tap.matching(host_ip, c64, listen_port))
                     injector = MidPumpSender(c64, listen_port,
-                                             args.budget * 0.3, probe)
+                                             args.budget * 0.2, probe,
+                                             src_ip=host_ip)
                     log(f"  mid-pump probe: {len(probe)} B at {c64}:"
                         f"{listen_port} (ip65_listen_port), fired "
-                        f"{args.budget * 0.3:.2f}s into the send")
-                    injector.start()
+                        f"{args.budget * 0.2:.2f}s into the send")
 
             hung = False
             t_send_start = time.monotonic()
             try:
-                carry3, took3 = send_once(tr, L, payload,
-                                          timeout=max(45.0, args.budget * 20))
+                carry3, took3 = send_once(
+                    tr, L, payload, timeout=max(45.0, args.budget * 20),
+                    on_before_jsr=(injector.start if injector else None))
             except Exception as exc:  # noqa: BLE001 — a hang is the point
                 hung, carry3, took3 = True, -1, float("nan")
                 log(f"  send attempt 3 NEVER RETURNED: {type(exc).__name__}: "
@@ -1271,15 +1285,33 @@ def main() -> int:
                             f"probe bytes in udp_recv_buf: {delivered}")
                         if delivered:
                             log("  DIAGNOSIS: the probe was DELIVERED, not "
-                                "dropped — net_udp_recv_cb ran live during "
-                                "the pump, so ip65_send_pump was not set "
-                                "when the datagram arrived. That is a "
-                                "finding about the DISARM, not about the "
-                                "counter.")
+                                "dropped. This suite drives net_udp_send "
+                                "through jsr() with the CPU parked between "
+                                "monitor commands — NO main loop is running "
+                                "— so nothing called net_poll between the "
+                                "send returning and this read. The datagram "
+                                "therefore cannot have been taken in "
+                                "legitimately after the call, and a live "
+                                "callback DURING the pump is the only "
+                                "explanation left. Bring this to the "
+                                "implementer: it is a finding about the "
+                                "DISARM, of the opposite sign to a broken "
+                                "counter. (Under a driver that DOES let the "
+                                "main loop run, the same reading would mean "
+                                "only that the frame was polled in late, "
+                                "which is no defect at all.)")
                         elif drop3 == drop_before3:
                             log("  DIAGNOSIS: the probe is neither counted "
                                 "nor in udp_recv_buf — it reached the wire "
-                                "but ip65 never processed the frame.")
+                                "but ip65 never processed the frame. First "
+                                "hypothesis is VICE's rawnet receive path "
+                                "under a CPU spinning inside the retry loop, "
+                                "NOT eth_rx starvation: the loop calls "
+                                "ip65_process every iteration and, for an "
+                                "on-subnet destination, arp_lookup only "
+                                "transmits every 100 ms, so it is far more "
+                                "receive-hungry than transmit-heavy. Not a "
+                                "backend bug without more work.")
                         check(drop3 is not None and drop3 > drop_before3,
                               "a datagram arriving DURING the pump is counted "
                               "in ip65_recv_dropped",
