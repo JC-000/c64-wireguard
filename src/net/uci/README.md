@@ -96,6 +96,22 @@ hang. The TOD is *stopped* after reset on a U64E, so `net_init` calls
 clock never ticks — without that every "bounded" wait was unbounded on
 hardware while looking fine in VICE, whose TOD runs.
 
+Two different "busy" conditions, two different waits. `uci_wait_not_busy`
+watches `CMD_BUSY` (bit 0): "a `PUSH_CMD` has not been accepted yet". It is
+already clear the moment the firmware accepts the command, and it never
+rises for a Data More continuation. `uci_wait_reply_staged` watches the
+STATE field (bits 5..4) and spins while it reads `01` Command Busy — the
+firmware is producing a reply block — returning once a block is VALIDATEd
+(`$30` Data More / `$20` Data Last) or the interface is Idle; 1 s budget,
+`$89` on expiry. `net_poll` uses it before reading the reply header and,
+crucially, after acking a Data More block: on that ack the FPGA drops STATE
+to `01` at once and the next block is staged by an interrupt, a FreeRTOS
+queue post, a task switch and a memcpy on the firmware side. Sampling STATE
+once in that window reads "not Data More", which the pre-#112 code took as
+Data Last and delivered the first 893-byte block as the whole datagram —
+invisible at 1 MHz (the fences alone are ~17 ms), every time at 48 MHz.
+The four STATE values are `UCI_STATE_*` in `uci_regs.inc`.
+
 ## UDP adaptation
 
 Instead of `TCP_CONNECT` + stream semantics, the adapter uses `UDP_CONNECT`

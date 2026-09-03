@@ -86,6 +86,7 @@
 ; --- primitives from uci_cmd.s ---
 .import uci_abort
 .import uci_wait_idle
+.import uci_wait_reply_staged
 .import uci_tod_start
 .import uci_wait_not_busy
 .import uci_begin_cmd
@@ -1136,6 +1137,9 @@ net_poll:
 
         lda #UCI_ERR_READ_FAIL
         sta net_last_error
+@poll_fail:
+        ; Shared error exit: net_last_error already holds the code. Also the
+        ; landing for a $89 from uci_wait_reply_staged below.
         jsr uci_drain_resp
         jsr uci_drain_status
         jsr uci_ack
@@ -1143,8 +1147,17 @@ net_poll:
         rts
 
 @no_err:
-        ; First 2 bytes of response = actual_len (LE).
-        uci_fence               ; give firmware time to stage response
+        ; uci_push_wait returned on CMD_BUSY clearing, i.e. the firmware's
+        ; HANDSHAKE_ACCEPT_COMMAND. The reply is NOT staged yet: STATE is
+        ; still 01 until copy_result() has memcpy'd up to 895 bytes and
+        ; written VALIDATE_LAST/MORE (command_intf.cc). Sampling DATA_AV in
+        ; that window reads "no data" and abandons a block the firmware then
+        ; presents to nobody. Wait for STATE to leave 01 (bounded, $89).
+        ; Same window as the continuation race fixed at @block_end; this one
+        ; is straight-line firmware code (no task switch) and has not been
+        ; observed, so this is the defensive half of the same fix.
+        jsr uci_wait_reply_staged
+        bcs @poll_fail
         ldy #$00
 @hdr_loop:
         lda UCI_STATUS
@@ -1315,7 +1328,31 @@ net_poll:
         ; outstanding; concatenating the blocks yields exactly the datagram a
         ; single large queue would have delivered.
         ;
-        ; STATE ($30) distinguishes them: $20 = Data Last, $30 = Data More.
+        ; STATE (bits 5..4) says which, and it has FOUR values, not two
+        ; (command_protocol.vhd "Protocol"; UCI_STATE_* in uci_regs.inc):
+        ;
+        ;   $30 Data More    block drained, next one announced -> DATA_ACC,
+        ;                    then back to @byte_loop to drain it
+        ;   $10 Command Busy the firmware is still producing the next block
+        ;                    -> WAIT (bounded) for STATE to change, then back
+        ;                    to @byte_loop; $89 on expiry
+        ;   $20 Data Last    reply ended with bytes outstanding: short reply,
+        ;   $00 Idle         take what we got rather than hang
+        ;
+        ; WHY $10 IS REACHABLE HERE: our DATA_ACC on a Data More block makes
+        ; the FPGA drop STATE to 01 at once (vhdl: `state(1) <= '0'` with
+        ; state(0) still 1) and post CMD_DATA_ACCEPTED to the firmware; the
+        ; next block is then staged by an ISR, a queue post, a FreeRTOS task
+        ; switch and a memcpy (command_intf.cc run_task -> get_more_data ->
+        ; copy_result -> HANDSHAKE_VALIDATE_*). DATA_AV is 0 throughout, so
+        ; @byte_loop lands here with bytes outstanding and STATE == 01. The
+        ; previous code had only a two-way test — "$30, else Data Last" —
+        ; and a wait on CMD_BUSY (bit 0), which is already clear once a
+        ; command has been accepted and never rises for a continuation. At
+        ; 1 MHz ~17 ms of fences hid the window; at 48 MHz it was ~340 us
+        ; and every 1452/1472-byte datagram was truncated to block 1 (893
+        ; bytes) with the header's full length — measured 2026-09-01 on the
+        ; U64E (fw 3.15 + #807 spike, REU=0). Issue #70 / PR #112.
         lda uci_poll_rem+0
         ora uci_poll_rem+1
         beq @done_data          ; nothing outstanding — reply complete
@@ -1323,17 +1360,31 @@ net_poll:
         lda UCI_STATUS
         uci_fence               ; settle before testing STATE
         and #UCI_STAT_STATE
-        cmp #(UCI_STAT_STATE)   ; $30 = Data More
-        bne @done_data          ; Data Last with bytes outstanding: short
-                                ; reply, take what we got rather than hang
+        cmp #UCI_STATE_DATA_MORE
+        beq @block_more
+        cmp #UCI_STATE_BUSY
+        bne @done_data          ; Data Last / Idle with bytes outstanding:
+                                ; short reply, take what we got
 
-        ; Accept this block. Because state(0)=1 this signals the Ultimate to
-        ; produce the next one and moves the machine to Command Busy rather
-        ; than Idle, so we must wait for it to present the next block.
+        ; Command Busy: the continuation is being staged. Bounded wait for
+        ; STATE to leave 01, then resume draining into the SAME buffer
+        ; (Y/SMC intact). The wait clobbers only A.
+        jsr uci_wait_reply_staged
+        bcs @block_wedged
+        jmp @byte_loop
+
+@block_more:
+        ; Accept the drained block. state(0)=1 tells the Ultimate to produce
+        ; the next one; @byte_loop will see DATA_AV clear and come back here
+        ; in Command Busy to wait for it.
         jsr uci_ack
-        jsr uci_wait_not_busy
-        bcs @done_data          ; wedged waiting for the continuation
-        jmp @byte_loop          ; resume into the SAME buffer, Y/SMC intact
+        jmp @byte_loop
+
+@block_wedged:
+        ; $89 already in net_last_error. The datagram is unrecoverable (a
+        ; datagram socket has no "rest of it" to fetch later), so this is an
+        ; error exit, NOT a delivery of the partial buffer.
+        jmp @poll_fail
 
 @done_data:
         jsr uci_drain_resp

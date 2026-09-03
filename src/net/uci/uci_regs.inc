@@ -33,6 +33,25 @@ UCI_STAT_STATE    = $30         ; state field mask
 UCI_STAT_ERROR    = $08         ; command returned an error
 UCI_STAT_CMD_BUSY = $01         ; command FIFO busy / command in flight
 
+; The four values of the STATE field (bits 5..4), from the FPGA's own
+; encoding (1541ultimate fpga/io/command_interface/vhdl_source/
+; command_protocol.vhd, "Protocol: There are 4 states", and the firmware's
+; CMD_STATE_* in software/io/command_interface/command_intf.h):
+;   00 Idle        — Ultimate is ready and waiting for a new command
+;   01 Command Busy— the C64 pushed a command (or accepted a Data More
+;                    block) and the Ultimate is still producing the reply
+;   11 Data More   — a reply block is staged and it is NOT the last one
+;   10 Data Last   — a reply block is staged and it IS the last one
+; NOTE the two "busy" notions are different bits: STATE=01 (this field) is
+; the firmware working on a reply; UCI_STAT_CMD_BUSY (bit 0) is only "a
+; PUSH_CMD has not yet been accepted", and is already CLEAR while a Data
+; More continuation is being staged. Waiting on bit 0 for a continuation
+; block is therefore a no-op — that was the multi-block read bug in #70.
+UCI_STATE_IDLE      = $00
+UCI_STATE_BUSY      = $10
+UCI_STATE_DATA_LAST = $20
+UCI_STATE_DATA_MORE = $30
+
 ; =============================================================================
 ; Control register bits (write to UCI_CONTROL)
 ; =============================================================================

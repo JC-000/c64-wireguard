@@ -39,6 +39,7 @@ COMMON_LABELS = (
 UCI_LABELS = (
     "net_last_error",
     "uci_abort", "uci_wait_idle", "uci_wait_not_busy",
+    "uci_wait_reply_staged",
     "uci_push_wait", "uci_read_resp_bytes", "uci_ack",
     "uci_socket_id", "uci_socket_open",
 )
