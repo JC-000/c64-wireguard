@@ -16,3 +16,4 @@ __pycache__/
 # Serena: ignore regenerable/local state, track project.yml + memories
 artifacts/
 .serena/
+.claude/settings.local.json
