@@ -1462,6 +1462,37 @@ def main() -> int:
                     "so a datagram discarded")
                 log("  during an eviction pump is simply gone — which is why "
                     "the counter exists.")
+                log("")
+                log("  BUT EVICTION ALONE GIVES THE RIGHT WINDOW IN THE WRONG "
+                    "DURATION. A pump only runs")
+                log("  the full budget when nothing answers. After a plain "
+                    "eviction the gateway is alive")
+                log("  and replies at once: arp_process takes the reply on "
+                    "the next ip65_process, and")
+                log("  the following ip65_udp_send succeeds. This suite's own "
+                    "Phase 1 measures that case")
+                log("  directly — cold cache, live gateway, off-subnet peer — "
+                    "at 0.05-0.19 s across seven")
+                log("  green runs. So the eviction window is several times "
+                    "TIGHTER than the ~0.5 s one")
+                log("  the probe above already failed to hit, and aiming at "
+                    "it unmodified would be a")
+                log("  harder shot, not an easier one.")
+                log("")
+                log("  So combine the two: evict the gateway row with the "
+                    "eight frames AND make the")
+                log("  next hop unanswerable for the duration — suppress the "
+                    "gateway's reply, or point")
+                log("  the peer's route at an on-subnet address nothing "
+                    "answers. That gets the mid-session")
+                log("  window, with the main loop running so the C64 can "
+                    "answer the host's ARP, AND a")
+                log("  full-budget pump for the probe to land in. It is also "
+                    "the more faithful case: a")
+                log("  gateway answering in 50 ms costs almost nothing, while "
+                    "a next hop that has gone")
+                log("  away mid-session is a full-budget pump with live "
+                    "tunnel traffic arriving into it.")
             for ok, label in results:
                 if not ok:
                     log(f"    FAILED: {label}")
