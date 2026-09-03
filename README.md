@@ -16,6 +16,24 @@ The shipped build links the sibling crypto libraries [c64-x25519](https://github
 
 **Phase 8 complete**: Pre-Shared Key (PSK) support — IKpsk2 protocol compliance, optional PSK in disk config, backward-compatible with zero PSK.
 
+**Standard WireGuard MTU achieved (2026-09-03).** With the `UCI_CHUNKED_WRITE=1` build the tunnel runs at `WG_MTU` 1440 (1472-byte datagrams) bidirectionally, with the peer left at its 1420 default — no per-peer MTU configuration needed. Verified 60/60 twice at 48 MHz on the U64E (PR [#112](https://github.com/JC-000/c64-wireguard/pull/112)). Default builds stay at MTU 860: released firmware doesn't carry the chunked write. See [Chunked send](#chunked-send-ucichunkedwrite1) and [Tunnel MTU](#tunnel-mtu).
+
+**Real-peer handshake, against Cloudflare WARP (2026-09-03).** The C64 completes the handshake with WARP's production WireGuard edge in ~48 s at 48 MHz, exchanges data through the tunnel (ping, a 1278-byte DNS reply received whole), and — after the [#87](https://github.com/JC-000/c64-wireguard/issues/87) fix (PR [#115](https://github.com/JC-000/c64-wireguard/pull/115)) — rekeys twice more to `ACTIVE` with strictly increasing timestamps. WARP itself caps inbound at ~1280 B (its own MTU policy, not this tunnel's). See [Real-peer interop: Cloudflare WARP](#real-peer-interop-cloudflare-warp).
+
+**Receive-side fix for all builds (PR [#112](https://github.com/JC-000/c64-wireguard/pull/112)).** Inbound datagrams above 893 bytes were silently truncated at turbo clock speeds until the multi-block `SOCKET_READ` continuation was made to wait on Command Busy rather than sampling STATE once.
+
+**Timestamps now monotonic** — [#87](https://github.com/JC-000/c64-wireguard/issues/87) is fixed (PR [#115](https://github.com/JC-000/c64-wireguard/pull/115)): Type-1 TAI64N timestamps strictly increase across initiations, and the bench responder enforces the greatest-seen rule. Persistence of the counter across a power cycle / fresh load is still open.
+
+> **⚠️ Firmware requirement for standard-MTU builds.** The `UCI_CHUNKED_WRITE=1` PRGs above require the `WRITE_SOCKET_CHUNK` firmware command from [GideonZ/1541ultimate#807](https://github.com/GideonZ/1541ultimate/issues/807), which is **not merged upstream and not in any released U64E/C64U firmware** as of 2026-09-03. On released firmware (3.15 and earlier) a chunked build fails its first send with `$8E`. Default (non-chunked) PRGs need no firmware change and are unaffected.
+
+Still-open caveats:
+
+- [#113](https://github.com/JC-000/c64-wireguard/issues/113) — the default build's message port reaches the wire as 3879, not the documented 9999.
+- [#69](https://github.com/JC-000/c64-wireguard/issues/69) — the REU build fails the handshake at 48 MHz on fw 3.15; use `REU=0` for hardware.
+- [#80](https://github.com/JC-000/c64-wireguard/issues/80) — RR-Net/ip65 builds overwrite application code; shipped `wireguard-rrnet-*.prg` artifacts are untrustworthy as built.
+- [#104](https://github.com/JC-000/c64-wireguard/issues/104) — the constant-time invariant (`CRYPTO_BSS` alignment) is unenforced; nothing catches a regression.
+- [#106](https://github.com/JC-000/c64-wireguard/issues/106) — a forged cookie reply in `HS_SENT` still buys an attacker three X25519 scalarmults per 64-byte packet.
+
 Development-phase history (per-suite test counts have drifted since; `tools/run_regression.py` reports current totals):
 
 | Phase | Components |
