@@ -1034,6 +1034,14 @@ def main() -> int:
                         f"EDNS bufsize advertised {ednsbuf}; host "
                         f"baseline {host_len} B TC={int(host_tc)}")
                     n_before = len(tap.udp(src=ip, dst=WARP_ENDPOINT_IP))
+                    # Baseline the REPLY direction too. Without this the
+                    # per-query reply count is cumulative over the tap's
+                    # whole lifetime, so the second query inherits the
+                    # first one's replies and the reported number is
+                    # quietly wrong (observed: github.com reported "3
+                    # replies" for a single exchange). No assertion
+                    # depended on it, but the figure goes in the report.
+                    r_before = len(tap.udp(src=WARP_ENDPOINT_IP, dst=ip))
                     rt.write_memory(LC["msg_recv_len"], bytes(2))
                     rt.write_memory(LC["tp_payload_len"], bytes(2))
                     staged = stage_raw_dma(rt, wire, LC, timeout=20.0)
@@ -1111,7 +1119,8 @@ def main() -> int:
                     # torn send is two. The reply direction matters most
                     # here -- a >1280 B inner reply is precisely where the
                     # outer datagram would fragment if anything did.
-                    n_reply = len(tap.udp(src=WARP_ENDPOINT_IP, dst=ip))
+                    n_reply = len(tap.udp(src=WARP_ENDPOINT_IP,
+                                          dst=ip)) - r_before
                     check(n_after > n_before,
                           f"[C] {name}: the query left as "
                           f"{n_after - n_before} datagram(s) C64->WARP")
