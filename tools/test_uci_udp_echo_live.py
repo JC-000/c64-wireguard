@@ -23,6 +23,24 @@ sent once, on one boot; per size the tool asserts the listener saw exactly
 ONE datagram of exactly that length (a torn 888+584 write is two), and that
 sizes above the build's exported NET_UDP_SEND_MAX are refused with $8C and
 never reach the wire. Run once against stock 3.15 to see $8E.
+
+Inbound multi-block SOCKET_READ at turbo (issue #70 / PR #112: at 48 MHz a
+1452/1472-byte datagram arrived as its first 893-byte reply block with the
+header's full length, because net_poll took STATE "Command Busy" for "Data
+Last" while the firmware was still staging block 2)::
+
+    make clean && make BACKEND=uci REU=0
+    C64_SKIP_BUILD=1 ECHO_TURBO_MHZ=48 ECHO_REPLY_LEN=893,894,1452,1472 \\
+        U64_ALLOW_MUTATE=1 python3 tools/test_uci_udp_echo_live.py
+
+``ECHO_TURBO_MHZ`` runs the whole sequence at that CPU speed (default 1 —
+which is exactly the speed at which that bug cannot be seen; the tool used
+to pin 1 MHz unconditionally). ``ECHO_REPLY_LEN`` makes the listener answer
+each datagram with a fresh payload of THAT length instead of an echo, so the
+RECEIVE path is driven past NET_UDP_SEND_MAX on the default (892-byte send)
+build too — the build whose PRG the fix changes. Every inbound datagram is
+asserted on udp_recv_len AND on content byte-for-byte; a mismatch reports
+how many leading bytes matched (893 = one reply block = the #70 signature).
 """
 from __future__ import annotations
 
@@ -99,7 +117,26 @@ def _payload(n: int) -> bytes:
     return bytes(0x40 + ((i + n) % 32) for i in range(n))
 
 
+def _reply_sizes() -> list[int]:
+    """ECHO_REPLY_LEN: listener answers with a payload of each of these
+    lengths (per sent size) instead of echoing. Empty = plain echo."""
+    return [int(s) for s in os.environ.get("ECHO_REPLY_LEN", "").split(",")
+            if s.strip()]
+
+
+def _reply(n: int) -> bytes:
+    """Reply pattern: a DIFFERENT alphabet ($61-$79) from _payload's
+    ($40-$5F) and a different stride, so an echo of what the C64 sent, or
+    a stale buffer from the previous size, cannot satisfy the assertion."""
+    return bytes(0x61 + ((3 * i + n) % 25) for i in range(n))
+
+
 PAYLOAD_SIZES = _payload_sizes()
+REPLY_SIZES = _reply_sizes()
+# CPU speed for the whole sequence. 1 MHz hides timing races between the
+# 6510 and the firmware's cmdif task (the uci_fence alone is ~5.5 ms there);
+# 48 MHz is where issue #70's multi-block read truncation reproduced.
+TURBO_MHZ = int(os.environ.get("ECHO_TURBO_MHZ", "1"))
 SEND_BUF = 0x02A7                        # free space before cassette buffer (<= 64 B);
                                          # larger payloads are staged in udp_recv_buf
 BOOT_TIMEOUT, STEP_TIMEOUT, ECHO_TIMEOUT = 60.0, 10.0, 5.0
@@ -110,8 +147,12 @@ CHUNK_PATH_LABEL = "uci_send_part"       # linked only under UCI_CHUNKED_WRITE=1
 # build exports it. These are POST-COMPLETION values: the whole send is one
 # trampoline step, so the host cannot observe a non-completing part's reply
 # in between — that needs a single-step build or the debug-bus trace.
-UCI_TELEMETRY = ("uci_resp_count", "uci_status_seen", "uci_status_leading_code",
-                 "uci_status_buf")
+# NOT in this tuple: `uci_status_leading_code`. It is a ROUTINE in uci_cmd.s,
+# not a cell — reading one byte at its label yields $AD (the LDA opcode),
+# which an earlier version of this tool printed as if it were the firmware's
+# status code. The code is decoded from uci_status_buf's text below, the
+# same two-digit decimal the routine itself parses.
+UCI_TELEMETRY = ("uci_resp_count", "uci_status_seen", "uci_status_buf")
 
 
 class _NoCapture:
@@ -222,6 +263,38 @@ def _wait_boot(tr: Ultimate64Transport, mul_dma_hi: int) -> None:
         f"reu_mul_init not finished within {BOOT_TIMEOUT}s; "
         f"mul_dma_hi[128,255]=(${pair[0]:02X},${pair[1]:02X})"
     )
+
+
+def _wait_boot_ready(tr: Ultimate64Transport, labels: Labels,
+                     L: dict[str, int]) -> None:
+    """Wait for boot to complete, in any build configuration.
+
+    Prefers `boot_ready` (src/wg/data.s), which src/boot.s sets to 1 as its
+    last act (issue #55); falls back to `_wait_boot`'s REU multiply-table
+    signature only when the label is absent (a pre-#55 PRG).
+
+    The fallback CANNOT work on a REU=0 build: it polls `mul_dma_hi` for the
+    signature `reu_mul_init` writes, and under WG_NO_REU that routine is
+    compiled out (0 label entries) while `mul_dma_hi` still resolves as a
+    plain BSS label — so it times out on a machine that booted fine. That
+    is how this tool hung on every REU=0 build until 2026-09-01. Ported
+    from test_uci_handshake_live.py's `_wait_boot_ready`.
+    """
+    addr = labels.address("boot_ready")
+    if addr is None:
+        log.warning("no boot_ready label (pre-#55 PRG); "
+                    "falling back to the REU table signature")
+        _wait_boot(tr, L["mul_dma_hi"])
+        return
+    deadline = time.monotonic() + BOOT_TIMEOUT
+    while time.monotonic() < deadline:
+        if tr.read_memory(addr, 1)[0] == 1:
+            log.info("boot complete — boot_ready=1 (%.1fs)",
+                     BOOT_TIMEOUT - (deadline - time.monotonic()))
+            return
+        time.sleep(0.25)
+    raise TimeoutError(
+        f"boot_ready never set within {BOOT_TIMEOUT}s — boot did not complete")
 
 
 def _install_trampoline(tr: Ultimate64Transport, main_loop: int) -> None:
@@ -354,6 +427,8 @@ def _uci_telemetry(tr: Ultimate64Transport, labels: Labels) -> str:
             raw = bytes(tr.read_memory(addr, 24))
             text = raw.split(b"\x00", 1)[0].decode("ascii", errors="replace")
             out.append(f"{name}={text!r}")
+            code = int(text[:2]) if text[:2].isdigit() else None
+            out.append(f"status_code={code}")
         elif name == "uci_resp_count":
             lo, hi = tr.read_memory(addr, 2)
             out.append(f"{name}={lo | (hi << 8)}")
@@ -365,6 +440,7 @@ def _uci_telemetry(tr: Ultimate64Transport, labels: Labels) -> str:
 def _echo_once(
     tr: Ultimate64Transport, L: dict[str, int], labels: Labels,
     listener: UDPEchoListener, payload: bytes, send_max: int,
+    reply: bytes | None = None,
 ) -> list[str]:
     """Send one datagram of len(payload) and expect exactly one back.
 
@@ -372,12 +448,18 @@ def _echo_once(
     888+584 send whose first fragment happens to be what the listener
     reports first; `len(listener.received) == 1` is the assertion that
     says the chunked write left the firmware as ONE datagram.
+
+    `reply`, when given, is what the listener answers with instead of the
+    echo (ECHO_REPLY_LEN), and what the inbound side is asserted against.
     """
     n = len(payload)
-    tag = f"[{n} B]"
+    expected = payload if reply is None else reply
+    n_exp = len(expected)
+    tag = f"[{n} B]" if reply is None else f"[{n} B -> reply {n_exp} B]"
     fail: list[str] = []
     expect_ok = n <= send_max
     listener.clear()
+    listener.reply_fn = None if reply is None else (lambda _p, r=reply: r)
     write_bytes(tr, L["udp_recv_ready"], bytes([0]))
     write_bytes(tr, L["udp_recv_len"], bytes([0, 0]))
     send_buf = SEND_BUF if n <= 64 else L["udp_recv_buf"]
@@ -439,18 +521,35 @@ def _echo_once(
 
     # net_poll loop
     got = _poll_until_recv_ready(tr, L["udp_recv_ready"], L["net_poll"],
-                                 ECHO_TIMEOUT, n)
+                                 ECHO_TIMEOUT, n_exp)
+    nle = tr.read_memory(L["net_last_error"], 1)[0]
     if not got:
-        fail.append(f"{tag} udp_recv_ready stayed 0 for {ECHO_TIMEOUT}s after echo")
+        fail.append(f"{tag} udp_recv_ready stayed 0 for {ECHO_TIMEOUT}s after "
+                    f"the reply (net_last_error=${nle:02X}; $89=WAIT_TIMEOUT "
+                    f"is the multi-block continuation never being staged)")
     else:
         lo, hi = tr.read_memory(L["udp_recv_len"], 2)
         rx_len = lo | (hi << 8)
-        log.info("%s udp_recv_len=%d", tag, rx_len)
-        if rx_len != n:
-            fail.append(f"{tag} udp_recv_len={rx_len}, expected {n}")
-        rx = bytes(tr.read_memory(L["udp_recv_buf"], min(rx_len, n)))
-        if rx != payload:
-            fail.append(f"{tag} udp_recv_buf mismatch after echo")
+        log.info("%s udp_recv_len=%d net_last_error=$%02X", tag, rx_len, nle)
+        if rx_len != n_exp:
+            fail.append(f"{tag} udp_recv_len={rx_len}, expected {n_exp}")
+        # Read the FULL expected length regardless of rx_len: the #70
+        # truncation left udp_recv_len at the header's total while only the
+        # first block had been stored, so a read bounded by rx_len would
+        # have covered the bytes that were never written.
+        rx = bytes(tr.read_memory(L["udp_recv_buf"], n_exp))
+        if rx != expected:
+            match = next((i for i in range(n_exp) if rx[i] != expected[i]),
+                         n_exp)
+            tail_zero = all(b == 0 for b in rx[match:])
+            note = ""
+            if match == 893:
+                note = (" — exactly one UCI reply block (896-byte response "
+                        "queue minus the 2-byte header): the issue #70 "
+                        "multi-block truncation")
+            fail.append(f"{tag} udp_recv_buf content mismatch: first {match} "
+                        f"of {n_exp} bytes match"
+                        f"{', remainder all zero' if tail_zero else ''}{note}")
     return fail
 
 
@@ -527,10 +626,16 @@ def _run_sequence(
     # One echo per size, each size ONCE, all on this boot and socket. A
     # size that fails stops nothing: the next size still runs, so a sweep
     # reports the whole boundary picture rather than its first casualty.
-    for n in PAYLOAD_SIZES:
+    # With ECHO_REPLY_LEN, each sent size is answered with each reply size
+    # in turn; the inbound datagram may then exceed what this build can
+    # send, which is the whole point (receive is 1472 on every build).
+    plan = [(n, None) for n in PAYLOAD_SIZES] if not REPLY_SIZES else \
+           [(n, r) for n in PAYLOAD_SIZES for r in REPLY_SIZES]
+    for n, r in plan:
         try:
             fail.extend(_echo_once(tr, L, labels, listener, _payload(n),
-                                   send_max))
+                                   send_max,
+                                   reply=None if r is None else _reply(r)))
         except TimeoutError as exc:
             fail.append(f"[{n} B] {exc}")
             log.error("[%d B] step timed out — the adapter may be wedged; "
@@ -630,15 +735,27 @@ def main() -> int:
             set_debug_stream_mode(client, DEBUG_MODE_6510)
         else:
             log.info("U64_NO_CAPTURE set — debug stream disabled for this run")
-        set_turbo_mhz(client, 1)
-        # Verify turbo stuck at 1 MHz (harness PR #106 footgun: prior 48 MHz
-        # session can survive reset() and silently warp our measurements).
-        try:
-            check_measurement_environment(client)
-        except Ultimate64MeasurementEnvironmentError as exc:
-            _skip(f"unexpected turbo state: {exc}")
+        # REU first, THEN turbo: set_reu may reset the machine, and a reset
+        # would drop the turbo setting (same order as the handshake tool).
         _safe(set_reu, client, True, "512 KB")  # reu_mul_init needs REU
         time.sleep(0.5)
+        set_turbo_mhz(client, TURBO_MHZ)
+        # A CPU-speed write can lose the next UCI command on a C64 Ultimate
+        # (memory: settle ~3 s, then ASSERT the speed stuck — harness PR #106
+        # footgun: a prior 48 MHz session survives reset()).
+        time.sleep(3.0)
+        if TURBO_MHZ == 1:
+            try:
+                check_measurement_environment(client)
+            except Ultimate64MeasurementEnvironmentError as exc:
+                _skip(f"unexpected turbo state: {exc}")
+        else:
+            actual = get_turbo_mhz(client)
+            if actual != TURBO_MHZ:
+                _skip(f"requested ECHO_TURBO_MHZ={TURBO_MHZ} but the device "
+                      f"reports {actual} MHz")
+            log.warning("RUNNING AT %d MHz — every timing this tool logs is "
+                        "host-side wall clock", TURBO_MHZ)
         try:
             if capture:
                 client.stream_debug_start(f"{local_ip}:{DEBUG_PORT}")
@@ -665,14 +782,15 @@ def main() -> int:
                  "chunked 1472" if has_chunk else "plain 892")
         client.run_prg(prg_bytes)
         log.info("PRG sent; waiting for boot...")
-        _wait_boot(tr, L["mul_dma_hi"])
+        _wait_boot_ready(tr, labels, L)
         failures = _run_sequence(tr, L, labels, listener, local_ip)
         _safe(client.stream_debug_stop)
         streamed = False
         time.sleep(0.3)
         if capture:
             result = cap.stop()
-            trace_path = _persist_trace(result, labels, mhz=1, mode=DEBUG_MODE_6510)
+            trace_path = _persist_trace(result, labels, mhz=TURBO_MHZ,
+                                        mode=DEBUG_MODE_6510)
         else:
             result, trace_path = _NoCapture(), "(capture disabled)"
         if failures:
@@ -695,7 +813,7 @@ def main() -> int:
             try:
                 time.sleep(0.2)
                 trace_path = _persist_trace(
-                    cap.stop(), labels, mhz=1, mode=DEBUG_MODE_6510,
+                    cap.stop(), labels, mhz=TURBO_MHZ, mode=DEBUG_MODE_6510,
                 )
                 print(f"Debug trace (partial): {trace_path}")
             except Exception as exc:

@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import socket
 import threading
-from typing import List, Tuple
+from typing import Callable, List, Optional, Tuple
 
 __all__ = ["UDPEchoListener"]
 
@@ -24,10 +24,18 @@ class UDPEchoListener:
 
     def __init__(
         self, port: int = 0, bind_addr: str = "", max_payload: int = 2048,
+        reply_fn: Optional[Callable[[bytes], bytes]] = None,
     ) -> None:
         self._port = port
         self._bind_addr = bind_addr
         self._max_payload = max_payload
+        # Optional reply generator. When set, every datagram is answered with
+        # ``reply_fn(payload)`` instead of the payload itself, so a test can
+        # drive the C64's RECEIVE path with sizes its SEND path cannot produce
+        # (the default UCI build sends at most 892 bytes but receives 1472 —
+        # issue #70's multi-block SOCKET_READ). ``received`` still records
+        # what arrived. Settable between datagrams via :attr:`reply_fn`.
+        self._reply_fn = reply_fn
         self._sock: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -90,6 +98,17 @@ class UDPEchoListener:
         with self._lock:
             self._received.clear()
 
+    @property
+    def reply_fn(self) -> Optional[Callable[[bytes], bytes]]:
+        """Reply generator (``None`` = echo the payload verbatim)."""
+        with self._lock:
+            return self._reply_fn
+
+    @reply_fn.setter
+    def reply_fn(self, fn: Optional[Callable[[bytes], bytes]]) -> None:
+        with self._lock:
+            self._reply_fn = fn
+
     def _recv_loop(self) -> None:
         sock = self._sock
         assert sock is not None
@@ -104,11 +123,13 @@ class UDPEchoListener:
                 raise
             with self._lock:
                 self._received.append((src, payload))
+                reply_fn = self._reply_fn
+            out = reply_fn(payload) if reply_fn is not None else payload
             _log.info(
-                "echo from %s:%d len=%d first16=%s",
-                src[0], src[1], len(payload), payload[:16].hex(),
+                "echo from %s:%d len=%d first16=%s -> reply len=%d",
+                src[0], src[1], len(payload), payload[:16].hex(), len(out),
             )
             try:
-                sock.sendto(payload, src)
+                sock.sendto(out, src)
             except OSError as exc:
                 _log.warning("echo sendto %r failed: %s", src, exc)
