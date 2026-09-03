@@ -214,12 +214,9 @@ def rig_problems(vice_bin: str) -> list[str]:
     # same default MAC, so a leftover instance is a live duplicate-MAC node
     # eating the DHCP traffic. x64sc processes NOT on feth0 share this
     # bench — never touch those.
-    r = subprocess.run(["pgrep", "-fl", f"ethernetioif {ETH_IFACE}"],
-                       capture_output=True, text=True)
-    if r.stdout.strip():
-        problems.append(
-            f"another VICE is already attached to {ETH_IFACE} "
-            f"(duplicate-MAC conflict):\n      {r.stdout.strip()}")
+    procs = vice_on_iface(ETH_IFACE)
+    if procs:
+        problems.append(describe_conflict(procs, ETH_IFACE))
     if not _dnsmasq_alive():
         problems.append(f"rig dnsmasq not running (no live `dnsmasq "
                         f"--interface={HOST_IFACE}` and {DNSMASQ_PIDFILE} "
@@ -333,6 +330,125 @@ def selftest_dnsmasq_probe() -> list[str]:
     return []
 
 
+def process_cwd(pid: int):
+    """The working directory of *pid*, via lsof. None when unknowable.
+
+    This is how a conflicting process is ATTRIBUTED rather than removed.
+    Several agents share this bench and each works in its own worktree, so
+    the cwd names the lane that owns the process. A blanket
+    ``pkill -f x64sc`` is forbidden here (c64-test skill: "other agents may
+    have VICE instances running") and it has already cost another lane a
+    run -- 2026-09-03, by me. Identify, name, refuse; never kill what you
+    did not start.
+    """
+    r = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                       capture_output=True, text=True)
+    for line in r.stdout.splitlines():
+        if line.startswith("n"):
+            return line[1:]
+    return None
+
+
+def _worktree_of(path):
+    """The ``.claude/worktrees/<name>`` component of *path*, if any."""
+    if not path:
+        return None
+    m = re.search(r"\.claude/worktrees/([^/]+)", path)
+    return m.group(1) if m else None
+
+
+def vice_on_iface(iface: str) -> list:
+    """Every x64sc bound to *iface*: pid, cwd, worktree, argv."""
+    r = subprocess.run(["pgrep", "-fl", "ethernetioif " + iface],
+                       capture_output=True, text=True)
+    out = []
+    for line in r.stdout.splitlines():
+        head, _, argv = line.strip().partition(" ")
+        if not head.isdigit():
+            continue
+        pid = int(head)
+        cwd = process_cwd(pid)
+        # The worktree also appears in the -autostart PRG path, which
+        # survives even when lsof cannot report the cwd.
+        wt = _worktree_of(cwd) or _worktree_of(argv)
+        out.append({"pid": pid, "cwd": cwd, "worktree": wt, "argv": argv})
+    return out
+
+
+def describe_conflict(procs: list, iface: str) -> str:
+    """A polite, attributing refusal. Never a kill suggestion."""
+    lines = ["another VICE is already bound to " + iface + " -- every ip65 "
+             "build uses the same default MAC, so a second instance is a "
+             "live duplicate-MAC node on the segment:"]
+    for pr in procs:
+        who = ("worktree " + pr["worktree"]) if pr["worktree"] \
+            else ("cwd " + (pr["cwd"] or "unknown"))
+        lines.append("      pid %d  (%s)" % (pr["pid"], who))
+    lines.append("      That process belongs to another lane. Do NOT kill "
+                 "it, and never `pkill x64sc`: wait for the rig, or "
+                 "coordinate with whoever owns that worktree.")
+    return "\n".join(lines)
+
+
+def selftest_conflict_probe(iface: str = "en4") -> list:
+    """Prove vice_on_iface() can actually SEE a conflicting process.
+
+    An empty list is the answer the preflight wants to hear, so it must
+    not also be what a broken probe returns. This is the same coincidence
+    class as the pgrep -af bug below: on macOS that flag does not exist,
+    the probe returned [] for every input, and the assertion built on it
+    passed with no evidence behind it.
+
+    A decoy is spawned whose argv matches the pgrep pattern and whose cwd
+    looks like an agent worktree, then the probe must find it AND
+    attribute the worktree. The decoy is this function's own child, so
+    terminating it is legitimate -- that is the ONLY process any code here
+    may kill.
+    """
+    import tempfile
+    bad = []
+    with tempfile.TemporaryDirectory() as td:
+        fake = os.path.join(td, ".claude", "worktrees", "agent-SELFTESTFAKE")
+        os.makedirs(fake)
+        decoy = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)",
+             "--ethernetioif", iface, "--decoy"],
+            cwd=fake, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            found = None
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                hits = [h for h in vice_on_iface(iface)
+                        if h["pid"] == decoy.pid]
+                if hits:
+                    found = hits[0]
+                    break
+                time.sleep(0.1)
+            if found is None:
+                bad.append(f"vice_on_iface({iface}) did not find the decoy "
+                           f"pid {decoy.pid} -- the conflict probe is BLIND, "
+                           "so an empty result proves nothing")
+            else:
+                if found["worktree"] != "agent-SELFTESTFAKE":
+                    bad.append("the probe found the decoy but misattributed "
+                               f"it: worktree={found['worktree']!r} "
+                               f"cwd={found['cwd']!r}")
+                msg = describe_conflict([found], iface)
+                if "SELFTESTFAKE" not in msg:
+                    bad.append("describe_conflict() does not name the owner: "
+                               + msg)
+                if "pkill" not in msg:
+                    bad.append("describe_conflict() omits the do-not-kill "
+                               "warning: " + msg)
+        finally:
+            decoy.terminate()
+            try:
+                decoy.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                decoy.kill()
+    return bad
+
+
 def bridged_problems(iface: str, vice_bin: str) -> list[str]:
     """Missing-prerequisite messages for bridged mode; empty means ready."""
     problems: list[str] = []
@@ -377,12 +493,9 @@ def bridged_problems(iface: str, vice_bin: str) -> list[str]:
             f"the rig's dnsmasq is bound to {iface} — a lease taken here "
             "would be the rig's, not the real router's; bridged mode "
             "requires dnsmasq to stay on " + HOST_IFACE + " only")
-    r = subprocess.run(["pgrep", "-fl", f"ethernetioif {iface}"],
-                       capture_output=True, text=True)
-    if r.stdout.strip():
-        problems.append(
-            f"another VICE is already attached to {iface} (duplicate-MAC "
-            f"conflict):\n      {r.stdout.strip()}")
+    procs = vice_on_iface(iface)
+    if procs:
+        problems.append(describe_conflict(procs, iface))
     return problems
 
 

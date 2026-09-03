@@ -63,14 +63,46 @@ RED WITHOUT THE FIXES
   26633. ``type1_dport_ok`` is the assertion that catches it, and it is
   the ONLY one that can: the handshake simply never completes, and every
   other check reports "timed out" without saying why. ``--prove-red port``
-  reproduces exactly that wire symptom by staging cfg_peer_endpoint_port
-  byte-swapped, so the alarm is demonstrated rather than assumed.
+  demonstrates the alarm through net_udp_send DIRECTLY (an 8-byte stub at
+  $0340 driven by jsr()), staging the destination port correctly and then
+  byte-swapped and reading the dport off the tap. It goes through the send
+  path rather than the menu because the menu computes the entire Type-1
+  first -- 349 s of X25519 measured on this rig -- which makes it a
+  hopeless place to demonstrate a wire-format assertion. Be clear about
+  what this is: a deliberate one-field corruption that reproduces the
+  unfixed tree's OUTPUT, not a build of the unfixed tree.
 * Without WG_MTU1440, ip65's caps clamp WG_MTU to 860 and MSG_TEXT_MAX to
   832 (src/constants.inc), which is smaller than every reply Stage C asks
   for. ``mtu_admits_replies`` is checked from the BUILT labels before any
   VICE is started, so that build is refused up front instead of failing
   as a mysterious short read. ``--prove-red mtu`` links a no-flag build
   and shows the check going red.
+
+TWO VACUOUS CHECKS FOUND IN THIS SUITE'S OWN SCAFFOLDING (2026-09-03)
+====================================================================
+
+Both are the coincidence class this project keeps hitting -- an assertion
+that passes while testing nothing -- so both now carry a standing alarm
+rather than a comment:
+
+1. ``dnsmasq_interfaces()`` used ``pgrep -af``. ``-a`` is Linux pgrep; on
+   macOS the call exits 1 with no output, so the function returned [] for
+   every input and "the rig's dnsmasq is not serving the bridged
+   interface" passed with no evidence behind it. It was found by PRINTING
+   the list instead of trusting the empty result. Now ``pgrep -fl``, with
+   ``selftest_dnsmasq_probe()`` failing the run when a dnsmasq is running
+   that the probe cannot see. ``selftest_conflict_probe()`` guards the
+   identical shape for "no other VICE is on this NIC", using a decoy
+   process, because that answer is an empty list too.
+
+2. The send-retry poll loop called the rig's ``screen_text()``, which does
+   NOT resume, and then slept. Every binary-monitor command pauses the
+   6510 (issue #54/#55), so the machine was halted for essentially the
+   whole window and running crypto was indistinguishable from a hang --
+   it burned a 900 s budget looking exactly like a stuck handshake. The
+   local ``screen()`` wrapper in press_h_until_sent resumes, and the
+   1000-byte screen read is throttled to 10 s while the 1-byte wg_state
+   read carries the fast cadence.
 
 Randomised per run: both C64 static keypairs, the chat payload and the DNS
 transaction ids — seeded, the seed logged once, reproducible via --seed.
@@ -108,10 +140,11 @@ import wg_c64_input as ki  # noqa: E402
 from vice_eth_rig import (  # noqa: E402
     BRIDGED_IFACE, DEFAULT_VICE_BIN, PROJECT_ROOT, EthVice, ResumingTransport,
     Tap, assert_ip65_build, assert_vice_bound_to, boot_and_net_init,
-    build_ip65, c64_ip,
-    default_gateway, describe_bridged, dnsmasq_interfaces, iface_status, log,
-    press_key, screen_text, selftest_classifier, selftest_dnsmasq_probe,
-    skip_if_bridged_rig_down, wait_boot_ready, wait_net_initialized,
+    build_ip65, c64_ip, default_gateway, describe_bridged, describe_conflict,
+    dnsmasq_interfaces, iface_status, log, press_key, screen_text,
+    selftest_classifier, selftest_conflict_probe, selftest_dnsmasq_probe,
+    skip_if_bridged_rig_down, vice_on_iface, wait_boot_ready,
+    wait_net_initialized,
 )
 
 # --- Cloudflare WARP peer (public facts; the private key comes from the
@@ -447,6 +480,21 @@ def press_h_until_sent(rt, tr, L, tag: str
     return False, SEND_ATTEMPTS, notes
 
 
+def assert_iface_free(iface: str) -> None:
+    """Refuse to launch if another lane holds *iface*. Never kills.
+
+    The preflight already checked this, but a build takes about a minute
+    and the rig is shared: on 2026-09-03 another lane's VICE claimed en4
+    during exactly that window, so my launch failed with a bare "VICE
+    exited early". Re-check at the last possible moment and name the
+    owner, so the refusal is actionable instead of mystifying.
+    """
+    procs = vice_on_iface(iface)
+    if procs:
+        raise SystemExit("REFUSING TO LAUNCH: "
+                         + describe_conflict(procs, iface))
+
+
 SEND_STUB = 0x0340      # free tape buffer: harness owns $0334, $0360, $03F0-1
 
 
@@ -756,6 +804,11 @@ def main() -> int:
     bad = selftest_dnsmasq_probe()
     check(not bad, "dnsmasq probe self-test (its empty answer is meaningful)",
           "\n".join(bad))
+    # Same coincidence class: "no other VICE is on this NIC" is an empty
+    # result, and a blind probe returns empty too. Prove it can see one.
+    bad = selftest_conflict_probe(args.iface)
+    check(not bad, "conflict probe self-test (it can see a decoy and names "
+          "the worktree that owns it)", "\n".join(bad))
     check(args.iface not in dnsmasq_interfaces(),
           f"the rig's dnsmasq is NOT serving {args.iface} "
           f"(it is bound to {dnsmasq_interfaces()})")
@@ -781,6 +834,7 @@ def main() -> int:
         # a 301 s Type-1 first. Needs the rig, so it runs after preflight.
         log("\n=== --prove-red port: does type1_dport_ok actually fire? ===")
         L = load_labels(BUILD_A)
+        assert_iface_free(args.iface)
         vice = EthVice(args.vice_bin, port=args.port, iface=args.iface,
                        reu=False)
         vice.__enter__()
@@ -818,6 +872,7 @@ def main() -> int:
             fingerprint("Stage A/B", os.path.join(BUILD_A, "wireguard.prg"), L)
             check_mtu_admits(L, 1279)
 
+            assert_iface_free(args.iface)
             vice = EthVice(args.vice_bin, port=args.port, iface=args.iface,
                            reu=False)
             vice.__enter__()
@@ -886,6 +941,16 @@ def main() -> int:
                 ts_prev = bytes(rt.read_memory(L["hs_timestamp"], 12))
                 log(f"  hs_timestamp[0] {ts_prev.hex()}")
                 for i in range(1, args.rekey + 1):
+                    # Re-resolve the next hop first. ki.rekey presses H
+                    # once and has no retry, and ip65's ARP cache does age
+                    # out -- a rekey that lands on a cold entry fails the
+                    # send after computing the whole Type-1, so the flake
+                    # would cost ~460 s to even observe. A few seconds here
+                    # removes that class entirely.
+                    warmed, probes = warm_arp_cache(vice.tr, L, rng,
+                                                    f"D{i}")
+                    check(warmed, f"[D] rekey {i}: next hop resolved in "
+                          f"{probes} probe(s) before pressing H")
                     t0 = time.monotonic()
                     ok = ki.rekey(rt, L["wg_state"], SESSION_ACTIVE,
                                   timeout=HS_BUDGET_S)
@@ -923,6 +988,7 @@ def main() -> int:
             need = max([n for n, _ in dns_host.values() if n > 0] or [1279])
             check_mtu_admits(LC, max(need, 1279))
 
+            assert_iface_free(args.iface)
             vice = EthVice(args.vice_bin, port=args.port, iface=args.iface,
                            reu=False, prg_path=prg_c)
             vice.__enter__()
@@ -935,14 +1001,28 @@ def main() -> int:
             timings.append(("Stage C: boot+DHCP+handshake",
                             time.monotonic() - t0))
 
+            dns_results: list[dict] = []
             if active:
                 for name, qtype, band in DNS_QUERIES:
                     log(f"\n--- DNS {name} ({band}) ---")
                     txn = rng.randint(0, 0xFFFF)
+                    # Advertise the largest reply this build can actually
+                    # hold, derived from the labels. A hardcoded 1400 would
+                    # make OUR OWN EDNS advertisement the binding limit and
+                    # leave the interesting question unanswerable: a TC=1
+                    # stub would then be indistinguishable between "1.1.1.1
+                    # caps its UDP replies by policy" and "we asked for no
+                    # more than 1400". Advertising MSG_TEXT_MAX means
+                    # anything the resolver is willing to send fits by
+                    # construction, so a reply in the 1280..MSG_TEXT_MAX
+                    # band would DISPROVE a ~1280 policy cap, and its
+                    # absence is evidence for one.
+                    ednsbuf = ki.input_max_from_labels(LC)
                     question, wire = build_dns_query(name, qtype, txn,
-                                                     bufsize=1400)
+                                                     bufsize=ednsbuf)
                     host_len, host_tc = dns_host.get(name, (-1, False))
-                    log(f"  txn_id={txn} query wire {len(wire)} B; host "
+                    log(f"  txn_id={txn} query wire {len(wire)} B; "
+                        f"EDNS bufsize advertised {ednsbuf}; host "
                         f"baseline {host_len} B TC={int(host_tc)}")
                     n_before = len(tap.udp(src=ip, dst=WARP_ENDPOINT_IP))
                     rt.write_memory(LC["msg_recv_len"], bytes(2))
@@ -968,6 +1048,14 @@ def main() -> int:
                     ptr = int.from_bytes(
                         rt.read_memory(LC["msg_recv_ptr"], 2), "little")
                     payload = bytes(rt.read_memory(ptr, min(recv_len, 1450)))
+                    # A DNS header is 12 bytes. Without this, a runt reply
+                    # would crash the run on payload[6] rather than fail
+                    # the assertion it was meant to fail.
+                    if not check(len(payload) >= 12,
+                                 f"[C] {name}: reply is at least a DNS "
+                                 f"header ({len(payload)} B)",
+                                 payload.hex()):
+                        continue
                     ip_hdr = bytes(rt.read_memory(LC["tp_packet"] + 16, 20))
                     udp_hdr = bytes(rt.read_memory(LC["tp_packet"] + 36, 8))
                     src_ip = ".".join(str(b) for b in ip_hdr[12:16])
@@ -1006,10 +1094,27 @@ def main() -> int:
                           f"the inner UDP header ({udp_len} - 8)",
                           f"msg_recv_len={recv_len}, inner UDP length="
                           f"{udp_len}; host baseline {host_len} B")
-                    check(len(payload) >= 12 and ancount >= 0,
+                    check(ancount >= 0,
                           f"[C] {name}: {recv_len} B received "
                           f"(host saw {host_len} B), TC={int(tc)}, "
                           f"ANCOUNT={ancount}")
+                    # Datagram counts at the tap, per the standing rule: a
+                    # torn send is two. The reply direction matters most
+                    # here -- a >1280 B inner reply is precisely where the
+                    # outer datagram would fragment if anything did.
+                    n_reply = len(tap.udp(src=WARP_ENDPOINT_IP, dst=ip))
+                    check(n_after > n_before,
+                          f"[C] {name}: the query left as "
+                          f"{n_after - n_before} datagram(s) C64->WARP")
+                    check(tap.fragments() == 0,
+                          f"[C] {name}: no IP fragments at the tap "
+                          f"({tap.fragments()})",
+                          "\n".join(tap.frags[-5:]))
+                    q_rec = {"name": name, "recv_len": recv_len,
+                             "host_len": host_len, "tc": tc,
+                             "ancount": ancount, "ednsbuf": ednsbuf,
+                             "sent": n_after - n_before, "replies": n_reply}
+                    dns_results.append(q_rec)
                     log(f"  RESULT {name}: C64 received {recv_len} B "
                         f"(TC={int(tc)}, ANCOUNT={ancount}); host baseline "
                         f"{host_len} B (TC={int(host_tc)}); "
@@ -1017,6 +1122,30 @@ def main() -> int:
                     if host_len > 0 and recv_len > 1280 >= host_len:
                         log("  *** the C64's direct path carried a reply the "
                             "host's WARP path could not ***")
+
+            if dns_results:
+                biggest = max(r["recv_len"] for r in dns_results)
+                ceiling = max(r["ednsbuf"] for r in dns_results)
+                log("\n  === Stage C verdict on the >1280 B question ===")
+                for r in dns_results:
+                    log(f"    {r['name']:16s} C64 {r['recv_len']:5d} B "
+                        f"TC={int(r['tc'])} ANCOUNT={r['ancount']:3d} | "
+                        f"host {r['host_len']:5d} B | advertised "
+                        f"{r['ednsbuf']} | {r['sent']} sent, "
+                        f"{r['replies']} replies")
+                if biggest > 1280:
+                    log(f"    => a {biggest} B reply arrived WHOLE on the "
+                        "C64's direct path: the ~1280 B ceiling seen on the "
+                        "host path is NOT imposed on this path.")
+                elif any(r["tc"] for r in dns_results):
+                    log(f"    => nothing above 1280 B arrived, and the "
+                        f"resolver set TC while we advertised {ceiling} B. "
+                        "Our own EDNS buffer was NOT the binding limit, so "
+                        "the ceiling is 1.1.1.1's own reply-size policy, "
+                        "not an MTU on this path.")
+                else:
+                    log("    => nothing above 1280 B was requested "
+                        "successfully; inconclusive.")
 
             log(f"\n  Stage C wire totals: "
                 f"{len(tap.udp(src=ip, dst=WARP_ENDPOINT_IP))} C64->WARP, "
