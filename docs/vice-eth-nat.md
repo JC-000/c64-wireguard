@@ -57,6 +57,119 @@ inner MTU around 1240. A 1472-byte `WG_MTU1440` datagram is dropped and the
 kernel replies to the rig with ICMP frag-needed, which ip65 does not act on —
 it black-holes. `vice_eth_nat.sh status` prints this verdict for you.
 
+## 0b. Why there is no "bridged mode" on this Mac
+
+The obvious way to dodge §0 entirely is to stop NATing through the host stack
+and put the emulated C64's frames straight onto the physical LAN, so it takes a
+DHCP lease from the real router (`10.43.23.1`) and never meets WARP at all —
+the path the U64E already uses. **That is not reachable on this machine.**
+Measured 2026-09-03, all read-only:
+
+### There is no wired interface to bridge onto
+
+```
+$ networksetup -listallhardwareports | grep -A1 Wi-Fi
+Hardware Port: Wi-Fi
+Device: en0
+
+$ ipconfig getsummary en0 | grep -E 'InterfaceType|LinkStatusActive'
+  InterfaceType : WiFi
+  LinkStatusActive : TRUE
+
+$ route -n get default | grep interface
+  interface: en0
+```
+
+`en0` — the only interface carrying a LAN address (`10.43.23.99`) and the
+default route — is Wi-Fi. Classic `ifconfig bridge` L2 bridging cannot use it:
+802.11 station mode gives the host one MAC, and a bridge needs to source frames
+from the guest's MAC too (here ip65's `00:80:10:00:51:00`, `ip65/config.s:17`).
+
+Every other candidate is down:
+
+| iface | what it is | status |
+| --- | --- | --- |
+| `en1`, `en2` | Thunderbolt 1 / 2, members of `bridge0` | `status: inactive` |
+| `en3`, `en5` | Apple internal (`anpi`-class, `media: none`) | `status: inactive` |
+| `bridge0` | Thunderbolt Bridge | `status: inactive` |
+| `en4` | **Belkin USB-C LAN** — configured service, adapter unplugged | absent from `ifconfig -a` |
+| `en6` | **USB 10/100/1000 LAN** — configured service, adapter unplugged | absent from `ifconfig -a` |
+
+`en4`/`en6` are the interesting rows: `networksetup -listnetworkserviceorder`
+lists both as services 1 and 2, so this Mac *has* USB Ethernet adapters that
+simply are not attached. **Plug one in and bridging becomes possible** — see
+"If a wired adapter is attached" below.
+
+### vmnet does not rescue it either
+
+Apple's `vmnet` framework does give VMs a pseudo-bridge over Wi-Fi, but VICE
+cannot reach it:
+
+```
+$ otool -L ~/opt/vice-eth/bin/x64sc | grep -i pcap
+	/usr/lib/libpcap.A.dylib
+$ ~/opt/vice-eth/bin/x64sc -help | grep -A1 ethernetio
+-ethernetiodriver <Name>
+	Set the low-level driver for Ethernet emulation (tuntap, pcap).
+-ethernetioif <Name>
+	Set the system ethernet interface
+```
+
+VICE takes a **libpcap interface name** (resource `ETHERNET_INTERFACE`, flag
+`-ethernetioif <Name>`; driver `-ethernetiodriver pcap`). It links `libpcap`
+and nothing else — no `vmnet.framework`. vmnet exposes no pcap device of its
+own, so there is no direct binding. The nominal `tuntap` driver is a dead end
+too: no `/dev/tap*` exists on this Mac (no tuntap kext).
+
+The indirect route — let a VM stack create a vmnet bridge and add the rig's
+`feth` to it — does not stand up either. UTM, Lima, Colima and Docker are all
+installed, but no vmnet bridge is currently up (`ifconfig bridge100` →
+`interface bridge100 does not exist`, no `vmenet*`), `socket_vmnet` is not
+installed, and adding a member to a vmnet-managed bridge needs `sudo` against a
+daemon-owned interface. **And it would not help anyway:** vmnet *shared* mode
+NATs in the kernel and still egresses via the host routing table, so internet
+traffic lands back on `utun1` at MTU 1300 — the exact cap §0 describes. Only
+vmnet *bridged* mode would escape WARP, and that is what Wi-Fi rules out.
+
+### Verdict: use §0's split-tunnel
+
+Nothing found beats the known-working path. Keep the NAT rig and exclude the
+peer prefix from WARP — no `sudo`, VPN stays up:
+
+```sh
+warp-cli tunnel ip add 162.159.192.0/24
+route -n get 162.159.192.1 | grep -E 'interface|mtu'   # want: en0, 1500
+```
+
+`warp-cli tunnel ip list` and `warp-cli settings` both run unprivileged (this
+is a managed/Zero-Trust client, so a policy push may still override a local
+add — re-check the route, do not assume).
+
+### If a wired adapter is attached
+
+Should the Belkin (`en4`) or the USB adapter (`en6`) be plugged in later,
+bridging becomes a real option and needs **no new tooling for VICE itself** —
+VICE binds pcap directly to a named interface, so pointing it at the wired
+`enX` *is* the bridge; no `bridge0` membership is required. The steps would be:
+
+1. Confirm link: `ifconfig en4 | grep -E 'media|status'` → `status: active`.
+2. Stop the host-only rig's DHCP server, or it will answer the C64 before the
+   real router does — `rig-up-macos.sh` starts it:
+   `sudo pkill -F /tmp/c64-rig-dnsmasq.pid`
+3. Point VICE at the wired interface instead of `feth0`:
+   `x64sc -ethernetiodriver pcap -ethernetioif en4 ...`
+4. `/dev/bpf*` must be readable/writable. Already granted on this Mac
+   (`crw----rw-`), by `rig-up-macos.sh`'s `chmod o+rw /dev/bpf*`; it reverts on
+   reboot. **This is the only privileged step bridging needs.**
+5. The C64 then DHCPs from `10.43.23.1` and takes a third lease alongside the
+   U64E (`.81`) and this Mac (`.99`). ip65's default MAC is a valid unicast
+   locally-administered-free address and the router has no reason to refuse it,
+   but this is untested — watch for a lease in the router's client list.
+
+Caveat for that mode: host-side listeners on `10.0.65.1` (the Python WireGuard
+responder) are **not** reachable from a bridged C64. Bridged mode is for
+real-peer / internet tests; keep the host-only rig for the responder.
+
 ## 1. Rig up
 
 ```sh
