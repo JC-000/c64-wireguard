@@ -95,6 +95,20 @@ TESTS = [
     # ever disagrees with these numbers, say so rather than demoting the suite
     # to SERIAL_TESTS or thinning its assertions.
     ("issue_94",       ["tools/test_issue_94_95_adversarial.py"]),
+    # Issue #87. The Type-1 TAI64N timestamp must be strictly increasing
+    # across initiations; before the fix every initiation carried
+    # base_time||00000001 and a conformant peer dropped every handshake after
+    # the first. Drives the REAL session_initiate with the three scalarmults
+    # and net_udp_send stubbed over DMA (zero X25519, seconds per call), so
+    # the REU split cannot move it. Deliberately UNSEEDED here: the base time
+    # and the jiffy deltas are random per run and the seed is on the first
+    # line of its output (reproduce with --seed).
+    ("tai64n_monotonic", ["tools/test_tai64n_monotonic.py", "--verbose"]),
+    # Issue #87, the other half: the bench responder enforces WireGuard's
+    # greatest-seen timestamp rule, so the bench peer can catch that class
+    # of defect at all. No emulator, no hardware — a loopback UDP socket for
+    # the server.py case; milliseconds.
+    ("responder_ts",   ["tools/test_wg_responder_timestamp.py"]),
     # NOT listed, deliberately: tools/test_uci_*_live.py and
     # tools/test_wg_responder*.py need real hardware or a live responder.
 ]
