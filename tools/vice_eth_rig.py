@@ -69,26 +69,96 @@ from c64_test_harness.backends.vice_lifecycle import (  # noqa: E402
     ViceConfig, ViceProcess,
 )
 from c64_test_harness.backends.vice_manager import PortAllocator  # noqa: E402
+from c64_test_harness.backends.vice_elevation import (  # noqa: E402
+    ALLOW_UNELEVATED_ENV, driver_requires_root, effective_driver_name,
+    rawnet_capability, vice_binary_supports_ethernet,
+)
 
 
-def bpf_capture_available() -> bool:
-    """True iff /dev/bpf0 and /dev/bpf1 are world read-write.
+def vice_rawnet_problems(vice_bin: str, driver: str = "pcap") -> list[str]:
+    """Whether VICE will actually get a rawnet driver — VICE's gate, not libpcap's.
 
-    The harness used to export this; it no longer does (VICE's pcap
-    driver is selected by euid, not by node permissions — see the
-    run_as_root comment in c64_test_harness/backends/vice_lifecycle.py).
-    The patched ~/opt/vice-eth build on this bench lifts that euid gate,
-    so the node permissions are what remain load-bearing here: rig-up
-    chmods both nodes and the perms reset on reboot.
+    THIS REPLACES a ``bpf_capture_available()`` that checked whether
+    /dev/bpf0 and /dev/bpf1 were world read-write. That helper was a
+    verbatim copy of one the harness DELETED on purpose in c3fe7aa,
+    "fix(vice): ask whether VICE can get rawnet, not whether /dev/bpf* is
+    open" — it modelled libpcap's requirements instead of VICE's, so the
+    preflight could pass and VICE then die. Copying it re-introduced the
+    bug they removed. Do not re-copy that shape.
+
+    VICE's gate is two conditions, and the harness exposes both:
+
+      * the binary was BUILT with raw-network support —
+        ``vice_binary_supports_ethernet()``, which reads ``x64sc
+        -features``. This is the one that separates Homebrew's bottle
+        (networking compiled out, c64-test-harness#144) from the patched
+        ~/opt/vice-eth build, and no amount of node permission ever said
+        anything about it.
+      * ``archdep_rawnet_capability()`` holds for the child —
+        ``rawnet_capability(as_root=...)`` (euid 0, or CAP_NET_RAW on
+        Linux). Without it ``rawnet_arch_driver`` stays NULL and x64sc
+        SIGSEGVs on the first reset with no log output.
+
+    The patched build on this bench lifts the euid half deliberately,
+    which is the whole reason it exists, so we run unelevated with
+    VICE_ETHERNET_ALLOW_UNELEVATED=1 (set at import below). That opt-out
+    is the harness's own documented escape hatch for "this host grants
+    the capability by a route we cannot observe".
+
+    /dev/bpf* permissions are libpcap's requirement, not VICE's. For the
+    patched build they do still have to be right, so they are reported as
+    an ADVISORY note — never as the gate.
     """
+    problems: list[str] = []
+    if not os.path.exists(vice_bin):
+        problems.append(
+            f"{vice_bin} missing — an ethernet-capable x64sc is required. "
+            "Set VICE_ETHERNET_BIN or pass --vice-bin.")
+        return problems
+    if not vice_binary_supports_ethernet(vice_bin):
+        problems.append(
+            f"{vice_bin} was built WITHOUT raw-network support (x64sc "
+            "-features says no rawnet) — Homebrew's macOS bottle compiles "
+            "networking out entirely (c64-test-harness#144). Point "
+            "VICE_ETHERNET_BIN at a build that has it.")
+    if driver_requires_root(driver) \
+            and not rawnet_capability(as_root=False) \
+            and os.environ.get(ALLOW_UNELEVATED_ENV, "").strip() != "1":
+        problems.append(
+            f"VICE gates the {effective_driver_name(driver)} driver behind "
+            "archdep_rawnet_capability() and this process is neither root "
+            "nor CAP_NET_RAW; x64sc would SIGSEGV on the first reset with "
+            f"no log output. Set {ALLOW_UNELEVATED_ENV}=1 if this build "
+            "lifts the gate (the patched ~/opt/vice-eth one does), or run "
+            "the launch elevated.")
+    return problems
+
+
+def libpcap_node_note() -> str | None:
+    """An ADVISORY line when /dev/bpf* would stop libpcap, or None.
+
+    Not a gate: see vice_rawnet_problems. libpcap needs a bpf node it can
+    open, so an unelevated pcap launch on this bench does depend on the
+    world-rw perms rig-up sets (they reset on reboot) — but that is a
+    property of running unelevated, not the condition VICE tests, and
+    treating it as the gate is the c3fe7aa bug.
+    """
+    bad = []
     for node in ("/dev/bpf0", "/dev/bpf1"):
         try:
             m = os.stat(node).st_mode
         except FileNotFoundError:
-            return False
+            bad.append(f"{node} missing")
+            continue
         if not (m & stat.S_IROTH and m & stat.S_IWOTH):
-            return False
-    return True
+            bad.append(f"{node} not world-rw")
+    if not bad:
+        return None
+    return ("advisory: " + ", ".join(bad) + " — VICE does not read these, "
+            "but libpcap does, so an UNELEVATED pcap launch will fail to "
+            "open a capture handle. `sudo chmod o+rw /dev/bpf*` (rig-up "
+            "does this; it resets on reboot).")
+
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "wireguard.prg")
@@ -160,27 +230,38 @@ def _dnsmasq_alive() -> bool:
     return r.returncode == 0 and r.stdout.strip() != ""
 
 
+def vice_holders(iface: str) -> list[str]:
+    """`pid cmdline` for each x64 EMULATOR attached to *iface*.
+
+    Matches the emulator, not the string. ``pgrep -f "ethernetioif en4"``
+    also matches any SHELL whose own command line mentions it — a pgrep in
+    a wait loop matches itself — and the preflight then reports a busy rig
+    against an idle one (measured while writing the #120 suite). Require
+    an x64 binary in argv[0] and drop our own pid.
+    """
+    r = subprocess.run(["pgrep", "-fl", f"ethernetioif {iface}"],
+                       capture_output=True, text=True)
+    out: list[str] = []
+    for line in r.stdout.splitlines():
+        pid, _, cmd = line.partition(" ")
+        if not pid.isdigit() or int(pid) == os.getpid():
+            continue
+        argv0 = cmd.split()[0] if cmd.split() else ""
+        if os.path.basename(argv0).startswith("x64"):
+            out.append(line)
+    return out
+
+
 def rig_problems(vice_bin: str) -> list[str]:
     """Return missing-prerequisite messages; empty means the rig is up."""
     problems: list[str] = []
     if sys.platform != "darwin":
         return ["not macOS — this rig is the feth/pcap one from "
                 "c64-https' tools/rig-up-macos.sh"]
-    if not os.path.exists(vice_bin):
-        problems.append(
-            f"{vice_bin} missing — an ethernet-capable x64sc is required "
-            "(stock macOS VICE gates pcap on euid 0; Homebrew's bottle has "
-            "networking compiled out entirely — c64-test-harness#144). "
-            "Set VICE_ETHERNET_BIN or pass --vice-bin.")
-    if not bpf_capture_available():
-        modes = []
-        for node in ("/dev/bpf0", "/dev/bpf1"):
-            try:
-                m = os.stat(node).st_mode
-                modes.append(f"{node} {'rw' if (m & stat.S_IROTH and m & stat.S_IWOTH) else 'not world-rw'}")
-            except FileNotFoundError:
-                modes.append(f"{node} missing")
-        problems.append("no usable /dev/bpf node (" + ", ".join(modes) + ")")
+    problems += vice_rawnet_problems(vice_bin)
+    note = libpcap_node_note()
+    if note:
+        problems.append(note)
     r = subprocess.run(["ifconfig", ETH_IFACE], capture_output=True, text=True)
     if r.returncode != 0:
         problems.append(f"{ETH_IFACE} missing")
@@ -191,12 +272,11 @@ def rig_problems(vice_bin: str) -> list[str]:
     # same default MAC, so a leftover instance is a live duplicate-MAC node
     # eating the DHCP traffic. x64sc processes NOT on feth0 share this
     # bench — never touch those.
-    r = subprocess.run(["pgrep", "-fl", f"ethernetioif {ETH_IFACE}"],
-                       capture_output=True, text=True)
-    if r.stdout.strip():
+    holders = vice_holders(ETH_IFACE)
+    if holders:
         problems.append(
             f"another VICE is already attached to {ETH_IFACE} "
-            f"(duplicate-MAC conflict):\n      {r.stdout.strip()}")
+            f"(duplicate-MAC conflict):\n      " + "\n      ".join(holders))
     if not _dnsmasq_alive():
         problems.append(f"rig dnsmasq not running (no live `dnsmasq "
                         f"--interface={HOST_IFACE}` and {DNSMASQ_PIDFILE} "
@@ -262,11 +342,19 @@ def parse_map_exports(path: str) -> dict[str, int]:
     """{symbol: value} from an ld65 map's `Exports list by name:`.
 
     Rows carry two symbols per line: ``name  00A000 RLA   other  00B000 RLA``.
+
+    The terminator is spelled ``[^\\n]*`` rather than ``.*``: under re.S a
+    dot matches newlines too, so ``^\\S.*:`` used to match the underline
+    row right beneath the header and run on to the next colon anywhere in
+    the file, leaving the body a single "\\n". This function raised
+    "parsed no exports" on EVERY ld65 map — measured on both
+    build/wireguard.map and ip65-build/ip65-c64.map — and had no caller to
+    notice until issue #120's suite wanted arp_ip.
     """
     with open(path) as fh:
         text = fh.read()
-    m = re.search(r"^Exports list by name:\s*$(.*?)^\S.*:\s*$", text,
-                  re.S | re.M)
+    m = re.search(r"^Exports list by name:[^\n]*\n(.*?)^\S[^\n]*:[^\n]*$",
+                  text, re.S | re.M)
     if not m:
         raise RuntimeError(f"{path}: no 'Exports list by name:' section")
     out: dict[str, int] = {}
@@ -276,6 +364,81 @@ def parse_map_exports(path: str) -> dict[str, int]:
     if not out:
         raise RuntimeError(f"{path}: parsed no exports")
     return out
+
+
+#: A real ld65 map, trimmed to the shapes the parsers must survive: the
+#: header, its underline row (which has no colon), two-symbols-per-line
+#: export rows, and a FOLLOWING section header that terminates the block.
+#: Kept here so the bug below can never come back silently.
+_MAP_SAMPLE = """\
+Segment list:
+-------------
+Name                   Start     End    Size  Align
+----------------------------------------------------
+CODE                  000801  0032EE  002AEE  00001
+BSS                   00A000  00AF3F  000F40  00001
+NOTHING               000002  000001  000000  00001
+
+Exports list by name:
+---------------------
+arp_ip                    00A007 RLA    arp_lookup                00208D RLA
+cfg_gateway               00325A RLA    cfg_ip                    003252 RLA
+
+Exports list by value:
+----------------------
+arp_lookup                00208D RLA    cfg_ip                    003252 RLA
+"""
+
+
+def selftest_map_parsers() -> list[str]:
+    """Alarm proof for parse_map_exports / parse_map_segments.
+
+    parse_map_exports raised "parsed no exports" on EVERY ld65 map for as
+    long as it existed: its terminator was spelled ``^\\S.*:\\s*$`` under
+    re.S, where a dot matches newlines, so it matched the underline row
+    directly beneath the header and ran on to the next colon anywhere in
+    the file — leaving the captured body a single "\\n". Nothing called it,
+    so nothing noticed, until the #120 suite wanted arp_ip. That is the
+    coincidence class: a helper that had never once worked, sitting in a
+    module three suites import.
+
+    This pins the shapes so a future edit fails here instead of in a
+    130-second rig run.
+    """
+    import tempfile
+    bad: list[str] = []
+    with tempfile.NamedTemporaryFile("w", suffix=".map", delete=False) as fh:
+        fh.write(_MAP_SAMPLE)
+        path = fh.name
+    try:
+        try:
+            exports = parse_map_exports(path)
+        except Exception as exc:  # noqa: BLE001
+            return [f"parse_map_exports raised on a real map shape: {exc!r}"]
+        want = {"arp_ip": 0xA007, "arp_lookup": 0x208D,
+                "cfg_gateway": 0x325A, "cfg_ip": 0x3252}
+        for name, value in want.items():
+            if exports.get(name) != value:
+                bad.append(f"parse_map_exports: {name} = "
+                           f"{exports.get(name)}, expected ${value:04X}")
+        # Both symbols on a row must be picked up, not just the first.
+        if len(exports) != len(want):
+            bad.append(f"parse_map_exports returned {len(exports)} symbols, "
+                       f"expected {len(want)} — a row carries TWO")
+        try:
+            segs = parse_map_segments(path)
+        except Exception as exc:  # noqa: BLE001
+            bad.append(f"parse_map_segments raised: {exc!r}")
+        else:
+            if segs.get("BSS") != (0xA000, 0xAF3F):
+                bad.append(f"parse_map_segments: BSS = {segs.get('BSS')}, "
+                           "expected (0xA000, 0xAF3F)")
+            if "NOTHING" in segs:
+                bad.append("parse_map_segments kept a zero-size segment "
+                           "(NOTHING), which reads as a one-byte span")
+    finally:
+        os.unlink(path)
+    return bad
 
 
 def parse_cfg_segment_types(path: str) -> dict[str, str]:
@@ -359,10 +522,15 @@ class EthVice:
     """
 
     def __init__(self, vice_bin: str, port: int = 0, prg_path: str = PRG_PATH,
-                 reu: bool = True):
+                 reu: bool = True, iface: str = ETH_IFACE):
         self.vice_bin = vice_bin
         self.prg_path = prg_path
         self.reu = reu
+        # The feth rig's VICE side by default; a BRIDGED run passes a real
+        # NIC name instead (e.g. "en4"), which puts the C64 on the real LAN
+        # with its own DHCP lease. VICE binds a libpcap interface by name,
+        # so the NIC IS the bridge — see docs/vice-eth-nat.md.
+        self.iface = iface
         self._allocator = PortAllocator(port_range_start=6570,
                                         port_range_end=6590)
         self._own_port = port == 0
@@ -384,7 +552,7 @@ class EthVice:
             minimize=True,
             ethernet=True,
             ethernet_mode="rrnet",
-            ethernet_interface=ETH_IFACE,
+            ethernet_interface=self.iface,
             ethernet_driver="pcap",
             ethernet_executable=self.vice_bin,
             run_as_root=False,        # the BPF nodes are world-rw on this rig
@@ -393,7 +561,7 @@ class EthVice:
         self.proc = ViceProcess(config)
         self.proc.start()
         log(f"=== VICE pid={self.proc._proc.pid if self.proc._proc else '?'} "
-            f"port={self.port} iface={ETH_IFACE} (warp OFF) ===")
+            f"port={self.port} iface={self.iface} (warp OFF) ===")
         self.tr = self._connect()
         return self
 
@@ -665,7 +833,11 @@ class Tap:
         r"IP (\d+\.\d+\.\d+\.\d+)\.(\d+) > (\d+\.\d+\.\d+\.\d+)\.(\d+): "
         r"UDP, length (\d+)")
 
-    def __init__(self, bpf_filter: str):
+    def __init__(self, bpf_filter: str, iface: str = HOST_IFACE):
+        # feth1 (the host end of the rig pair) by default; a BRIDGED run
+        # taps the same NIC VICE injects on, where the host's own BPF sees
+        # both the C64's frames and the LAN's answers.
+        self.iface = iface
         self.filter = f"({bpf_filter}) or (ip[6:2] & 0x1fff != 0)"
         self.records: list[UdpRec] = []
         self.frags: list[str] = []
@@ -675,7 +847,7 @@ class Tap:
 
     def __enter__(self) -> "Tap":
         self._proc = subprocess.Popen(
-            ["tcpdump", "-i", HOST_IFACE, "-l", "-n", "-q", "-U", self.filter],
+            ["tcpdump", "-i", self.iface, "-l", "-n", "-q", "-U", self.filter],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         threading.Thread(target=self._pump, daemon=True).start()
         deadline = time.monotonic() + 5.0
@@ -685,7 +857,7 @@ class Tap:
                 return self
             if not line and self._proc.poll() is not None:
                 break
-        raise RuntimeError("tcpdump did not start listening on " + HOST_IFACE)
+        raise RuntimeError("tcpdump did not start listening on " + self.iface)
 
     def __exit__(self, *exc) -> None:
         if self._proc is not None:
