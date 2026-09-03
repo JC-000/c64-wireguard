@@ -83,6 +83,21 @@ OUTBOUND_OVERHEAD = IP_UDP_HDR_LEN + T4_HDR_LEN + 16
 OUTBOUND_TEXT_SIZES = (828, 829, 831, 832, 833, 1392, 1412)
 INBOUND_TEXT_SIZES = (860, 861, 1420, 1440)
 END_MARKER_LEN = 40     # last 40 chars of every inbound message, unique per size
+
+
+def partition_outbound_sizes(text_max: int, sizes=OUTBOUND_TEXT_SIZES):
+    """Split the outbound sizes into (run, skipped) for a build whose
+    MSG_TEXT_MAX is *text_max*.
+
+    A size the build cannot stage is SKIPPED, not failed: on the default
+    build MSG_TEXT_MAX is 832, so 833/1392/1412 are simply not this
+    build's claim — failing them would turn the shipped build's clean run
+    into 9/12 for no defect. The summary reports the skip count so a
+    flag-build run (0 skipped) stays distinguishable from a default one.
+    """
+    run = tuple(n for n in sizes if n <= text_max)
+    skipped = tuple(n for n in sizes if n > text_max)
+    return run, skipped
 INBOUND_WINDOW = 4.0    # seconds for the C64 to poll, decrypt and print
 
 
@@ -228,7 +243,13 @@ def build_probe():
         # these are DMA-staged (wg_c64_input.send_message_dma) because a
         # 1412-character line cannot be typed ten keys at a time. Same
         # do_message_input -> udp_tunnel_build -> transport_send path.
-        for n in OUTBOUND_TEXT_SIZES:
+        run_sizes, skipped_sizes = partition_outbound_sizes(text_max)
+        for n in skipped_sizes:
+            print(f"  SKIP  [out {n}] {n + OUTBOUND_OVERHEAD}-byte datagram: "
+                  f"above this build's MSG_TEXT_MAX={text_max} "
+                  f"(not a claim of the {'chunked' if has_chunk else 'plain'}"
+                  f" build)", flush=True)
+        for n in run_sizes:
             text = _sized_text("OUT", n)
             tail = text[-END_MARKER_LEN:]
             expect_dgram = n + OUTBOUND_OVERHEAD
@@ -236,6 +257,8 @@ def build_probe():
             try:
                 accepted = wg_c64_input.send_message_dma(tr, text, L)
             except ValueError as exc:
+                # Cannot happen after the partition above; if it does, the
+                # helper and the labels disagree, which IS a failure.
                 check(False, f"[out {n}] {expect_dgram}-byte datagram: "
                       f"text fits this build", str(exc))
                 continue
@@ -373,8 +396,10 @@ def build_probe():
 
         failed = [label for ok, label in results if not ok]
         print("\n" + "=" * 60, flush=True)
-        print(f"{len(results) - len(failed)}/{len(results)} checks passed",
-              flush=True)
+        print(f"{len(results) - len(failed)}/{len(results)} checks passed; "
+              f"{len(skipped_sizes)} outbound size(s) skipped "
+              f"{list(skipped_sizes)} (MSG_TEXT_MAX={text_max}, "
+              f"{'chunked' if has_chunk else 'plain'} build)", flush=True)
         for label in failed:
             print(f"  FAILED: {label}", flush=True)
         print("=" * 60, flush=True)

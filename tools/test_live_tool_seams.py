@@ -180,6 +180,26 @@ def main() -> int:
         except Exception as exc:                              # noqa: BLE001
             check(f"{mod_name} imports and builds its hook", False, repr(exc))
 
+    print("\n=== size tables (#70) ===")
+    # A size above the build's MSG_TEXT_MAX must be SKIPPED, never failed:
+    # the default build (832) is not making the 1472-byte claim, and its
+    # 9/9 must not become 9/12 because the flag build's sizes are listed.
+    try:
+        import test_wire_encryption_live as wire
+        run, skipped = wire.partition_outbound_sizes(832)
+        check("default build (MSG_TEXT_MAX=832) skips the sizes above it",
+              skipped == (833, 1392, 1412) and 833 not in run,
+              f"run={run} skipped={skipped}")
+        check("default build still runs the sizes at and below 832",
+              run == (828, 829, 831, 832), f"run={run}")
+        run, skipped = wire.partition_outbound_sizes(1412)
+        check("chunked build (MSG_TEXT_MAX=1412) skips nothing",
+              skipped == () and run == wire.OUTBOUND_TEXT_SIZES,
+              f"run={run} skipped={skipped}")
+    except Exception as exc:                                  # noqa: BLE001
+        check("test_wire_encryption_live exposes partition_outbound_sizes",
+              False, repr(exc))
+
     total = passed + failed
     print(f"\nResults: {passed}/{total} passed, {failed} failed")
     return 0 if failed == 0 else 1

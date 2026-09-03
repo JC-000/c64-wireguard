@@ -75,15 +75,17 @@ STEP_INIT, STEP_DHCP, STEP_LISTEN, STEP_SEND, STEP_POLL = 0x11, 0x22, 0x33, 0x44
 #     888  one part, exactly full          893  two parts, first > plain cap
 #     889  two parts (888 + 1)            1452  two parts (888 + 564)
 #     891  two parts, one below plain cap 1472  two parts (888 + 584), max
-#     892  two parts, == plain cap        anything above the build's
-#                                          NET_UDP_SEND_MAX must be refused
-#                                          with $8C and put NOTHING on the wire
+#     892  two parts, == plain cap        1473  one above the datagram cap
+#
+# Anything above the build's NET_UDP_SEND_MAX must be refused with $8C and
+# put NOTHING on the wire: on the default build that is 893 and up, on the
+# chunked build only 1473 exercises it (udp_recv_buf is 1500, so it stages).
 #
 # Whether a size is expected to go through is decided per BUILD, from the
 # NET_UDP_SEND_MAX the PRG exports: 892 on the default build, 1472 under
 # UCI_CHUNKED_WRITE=1. Pattern avoids $00 for trace eyeballing and differs
 # per size so an echo of the previous size cannot satisfy the next.
-SWEEP_SIZES = (888, 889, 891, 892, 893, 1452, 1472)
+SWEEP_SIZES = (888, 889, 891, 892, 893, 1452, 1472, 1473)
 
 
 def _payload_sizes() -> list[int]:

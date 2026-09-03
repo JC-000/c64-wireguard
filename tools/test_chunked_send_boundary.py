@@ -224,7 +224,32 @@ def main():
     print(f"Random seed: {seed} (reproduce with --seed {seed})")
 
     os.chdir(PROJECT_ROOT)
-    build()
+    built = not os.environ.get("C64_SKIP_BUILD")
+    try:
+        build()
+        _run(rng)
+    finally:
+        if built:
+            restore_default_tree()
+
+
+def restore_default_tree():
+    """Leave build/ as a plain `make` would.
+
+    This is the LAST serial suite in tools/run_regression.py; without this
+    every gate run left a flag-build PRG behind and the next C64_SKIP_BUILD
+    user silently tested UCI_CHUNKED_WRITE=1. Only when we built: with
+    C64_SKIP_BUILD the tree was not ours to touch.
+    """
+    print("Restoring the default build tree: make clean && make")
+    subprocess.run(["make", "clean"], capture_output=True, cwd=PROJECT_ROOT)
+    r = subprocess.run(["make"], capture_output=True, text=True,
+                       cwd=PROJECT_ROOT)
+    if r.returncode != 0:
+        print(f"WARNING: default rebuild failed:\n{r.stderr}")
+
+
+def _run(rng):
     labels = Labels.from_file(LABELS_PATH)
     required = ["transport_send", "net_udp_send", "tp_packet", "tp_packet_len",
                 "tp_payload_ptr", "tp_payload_len", "tp_send_counter",
@@ -239,6 +264,7 @@ def main():
     mtu, src = tree_mtu(labels)
     chunk = labels.address(CHUNK_PATH_LABEL)
     check(chunk is not None, f"{CHUNK_PATH_LABEL} linked",
+          f"{CHUNK_PATH_LABEL} at ${chunk:04X}" if chunk is not None else
           f"{CHUNK_PATH_LABEL} absent from labels.txt — this tree was not "
           f"built with UCI_CHUNKED_WRITE=1 (or the Makefile ignores the flag)")
     check(mtu == EXPECT_MTU, f"WG_MTU == {EXPECT_MTU}",
