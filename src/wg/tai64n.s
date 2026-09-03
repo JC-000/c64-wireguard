@@ -23,7 +23,8 @@
 ;     A re-anchor resets the anchor and seq but NOT tai64n_last: the
 ;     peer only knows greatest-seen per static key, so a re-anchor to a
 ;     LOWER base must still emit above what already went out, and the
-;     guard does exactly that. tai64n_last is zero only at cold start.
+;     guard does exactly that. Nothing in the program zeroes tai64n_last;
+;     only a PRG LOAD does (see below).
 ;   * session_initiate calls tai64n_now. The candidate is
 ;     base + (jiffies since the anchor) / 60 seconds, with the sub-second
 ;     sequence counter tai64n_seq (+1 per call) in the nanosecond field.
@@ -31,11 +32,15 @@
 ;     so the output advances even when the jiffy clock does not (VICE
 ;     jsr() tests run with interrupts masked and the clock never ticks).
 ;
-; Persistence across reboots is OUT of scope here (#87 follow-up):
-; tai64n_last and tai64n_seq live in BSS and the jiffy clock restarts at
-; power-on, so two runs with the same WG.CFG base time collide again. The
-; live tools stage tai64n_base_time from host time on every load, which
-; sidesteps it; a stored high-water mark would close it.
+; Persistence across loads is OUT of scope here (#87 follow-up). The PRG
+; file spans $0801-$9FFF and carries APP_BSS as zero bytes, so EVERY LOAD
+; zeroes tai64n_last, tai64n_seq and the anchor - not just a power cycle;
+; the jiffy clock keeps whatever it had. Two loads therefore start two
+; unrelated timelines. The live tools restage tai64n_base_time from host
+; time on each load; if that host time is not past the seconds the
+; previous run last emitted (a rekey-heavy run, or a clock that was set
+; ahead), a conformant peer still rejects every initiation until host
+; time catches up. A stored high-water mark would close it.
 ; =============================================================================
 
         .include "constants.inc"
@@ -86,7 +91,8 @@ tai64n_sync:
 ; tai64n_base_time into hs_timestamp[0..7] and tai64n_init_base,
 ; zeros nanoseconds and the sub-second sequence counter. It does NOT
 ; touch tai64n_last: what has already been emitted stays the floor for
-; everything that follows, whatever the new base is.
+; everything that follows, whatever the new base is. tai64n_last is zero
+; only because LOAD stamped the PRG's APP_BSS zeros over it.
 ;
 ; Clobbers: A, X
 ; =============================================================================

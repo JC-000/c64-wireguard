@@ -380,6 +380,11 @@ def test_tai64n_now_elapsed_seconds(transport, labels):
     # 3. Immediately calling tai64n_now
     # The few extra jiffies that pass during the trampoline setup mean we
     # expect seconds >= 2 (120/60) but allow a small margin.
+    #
+    # Clear the floor first. Sub-test A left tai64n_last = base + A || 1;
+    # if A happened to be >= 2 the guard's bump alone would put seconds at
+    # base + A and this check would pass on A's arithmetic, not B's.
+    cold_init(transport, labels)
     write_bytes(transport, labels["tai64n_seq"], bytes(4))
 
     cur_bytes = read_bytes(transport, 0xA0, 3)

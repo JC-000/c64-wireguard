@@ -239,6 +239,20 @@ WG_REU_BANKS_USED = $00
 .import __MAIN_AREA_LO_LAST__
 .assert __MAIN_AREA_LO_LAST__ <= WG_SQTAB_BASE, lderror, "image overruns the sqtab window — MAIN_AREA_LO now extends past WG_SQTAB_BASE"
 
+; --- APP_CODE alignment cliff (a WARNING, not an error) ------------------
+; LIB_CHACHA20_POLY1305_CODE follows APP_CODE in MAIN_AREA_LO with
+; align = $100 (a constant-time requirement, see the cfg). So APP_CODE
+; growing past the next page boundary does not cost the bytes it grew by:
+; it costs a whole page, because every later MAIN_AREA_LO segment moves up
+; $100 at once. That has happened silently before (#103: 3 bytes of growth
+; overran $7FFF by 42). The boundary is measured, not remembered: it is
+; wherever the chacha archive currently lands, $4900 as of #87, with 20 B
+; of APP_CODE headroom in every build. ldwarning so a DELIBERATE shift
+; still links - it just cannot happen unnoticed. When you move it on
+; purpose, update the constant here.
+.import __APP_CODE_RUN__, __APP_CODE_SIZE__
+.assert __APP_CODE_RUN__ + __APP_CODE_SIZE__ <= $4900, ldwarning, "APP_CODE crossed the chacha align; every later MAIN_AREA_LO segment moved up a page"
+
 .endif
 
 ; --- APP_BSS_OVERLAY guard (issue #103) --------------------------------------
