@@ -71,6 +71,27 @@ T2_OFF_MAC2      = T2_OFF_MAC1 + 16               # = 76
 T4_HDR_LEN = 16   # type(1)+reserved(3)+receiver_idx(4)+counter(8)
 
 
+class TimestampReplayError(ValueError):
+    """Type-1 TAI64N timestamp <= the greatest already accepted from this peer.
+
+    This is the handshake anti-replay rule every conformant WireGuard responder
+    applies (issue #87). A ValueError so that existing `except ValueError`
+    callers keep treating it as "initiation rejected", but a distinct type so
+    the bench can log it loudly and tests can tell it from a MAC/AEAD failure.
+    """
+
+    def __init__(self, peer_static_pub: bytes, timestamp: bytes, greatest: bytes) -> None:
+        self.peer_static_pub = peer_static_pub
+        self.timestamp = timestamp
+        self.greatest = greatest
+        rel = "==" if timestamp == greatest else "<"
+        super().__init__(
+            f"TAI64N replay: timestamp {timestamp.hex()} {rel} greatest accepted "
+            f"{greatest.hex()} from peer {peer_static_pub[:4].hex()}… "
+            f"(WireGuard drops this initiation; issue #87)"
+        )
+
+
 # ── MAC helpers ────────────────────────────────────────────────────────────
 
 def _blake2s(data: bytes) -> bytes:
@@ -138,6 +159,13 @@ class WireGuardResponder:
         self._my_sender_idx:  int = int.from_bytes(os.urandom(4), "little")
         self._send_counter:   int = 0
 
+        # Greatest TAI64N accepted, per peer static key. This responder only
+        # ever has one peer, but the rule is per static key in WireGuard and
+        # the state is kept that shape so a multi-peer bench can reuse it.
+        # Only ACCEPTED initiations update it — a rejected one changes nothing.
+        self._greatest_timestamp: dict[bytes, bytes] = {}
+        self.last_timestamp: Optional[bytes] = None
+
         self.handshake_complete = False
 
     # ── public API ────────────────────────────────────────────────────────
@@ -164,28 +192,57 @@ class WireGuardResponder:
                 f"actual={actual_mac1.hex()}"
             )
 
-        self._c64_sender_idx = struct.unpack_from("<I", packet, T1_OFF_SENDER)[0]
+        sender_idx = struct.unpack_from("<I", packet, T1_OFF_SENDER)[0]
         noise_payload = packet[T1_OFF_NOISE : T1_OFF_MAC1]   # 108 bytes
 
-        # (Re-)initialise Noise responder for this handshake
-        self._noise = NoiseConnection.from_name(CONSTRUCTION)
-        self._noise.set_prologue(IDENTIFIER)
-        self._noise.set_psks(psk=self._psk)
-        self._noise.set_keypair_from_private_bytes(Keypair.STATIC, self._static_priv)
-        self._noise.set_keypair_from_public_bytes(Keypair.REMOTE_STATIC, self._peer_static_pub)
-        self._noise.set_as_responder()
-        self._noise.start_handshake()
+        # A fresh Noise responder for THIS candidate handshake. It is built
+        # into a local and only promoted to self._noise once every check has
+        # passed: a rejected initiation must leave the live session exactly
+        # as it was, which is what wireguard-go does too (a dropped
+        # initiation is a no-op for the existing keypairs).
+        noise = NoiseConnection.from_name(CONSTRUCTION)
+        noise.set_prologue(IDENTIFIER)
+        noise.set_psks(psk=self._psk)
+        noise.set_keypair_from_private_bytes(Keypair.STATIC, self._static_priv)
+        noise.set_keypair_from_public_bytes(Keypair.REMOTE_STATIC, self._peer_static_pub)
+        noise.set_as_responder()
+        noise.start_handshake()
 
-        # Consume Type-1 noise payload; returns the decrypted timestamp
-        self._noise.read_message(noise_payload)
+        # Consume Type-1 noise payload; the decrypted payload is the 12-byte
+        # TAI64N timestamp (8-byte seconds BE || 4-byte nanoseconds BE).
+        timestamp = bytes(noise.read_message(noise_payload))
+        if len(timestamp) != 12:
+            raise ValueError(
+                f"Type-1 payload is {len(timestamp)} bytes, expected a 12-byte TAI64N"
+            )
+
+        # Greatest-seen rule (WireGuard whitepaper §5.4.2 / wireguard-go
+        # noise-protocol.go ConsumeMessageInitiation): drop an initiation whose
+        # timestamp is <= the greatest already ACCEPTED from this static key.
+        # Compared as one 96-bit big-endian integer, never per field. Issue #87:
+        # the C64 used to send the same timestamp on every initiation, and this
+        # responder let it, so the bench could not see what real WireGuard does.
+        greatest = self._greatest_timestamp.get(self._peer_static_pub)
+        if greatest is not None and int.from_bytes(timestamp, "big") <= int.from_bytes(greatest, "big"):
+            raise TimestampReplayError(self._peer_static_pub, timestamp, greatest)
 
         # Produce Type-2 noise payload (empty application payload → 48 bytes)
-        noise_msg2 = bytes(self._noise.write_message(b""))
+        noise_msg2 = bytes(noise.write_message(b""))
 
+        # Commit: everything above succeeded, this handshake replaces the session.
+        self._noise = noise
+        self._c64_sender_idx = sender_idx
+        self._greatest_timestamp[self._peer_static_pub] = timestamp
+        self.last_timestamp = timestamp
         self.handshake_complete = True
         self._send_counter = 0
 
         return self._build_type2(noise_msg2)
+
+    def greatest_timestamp(self, peer_static_pub: Optional[bytes] = None) -> Optional[bytes]:
+        """The greatest TAI64N accepted from *peer_static_pub* (default: our peer), or None."""
+        key = self._peer_static_pub if peer_static_pub is None else peer_static_pub
+        return self._greatest_timestamp.get(key)
 
     def decrypt_transport(self, packet: bytes) -> bytes:
         """Decrypt a Type-4 transport packet; return plaintext bytes."""

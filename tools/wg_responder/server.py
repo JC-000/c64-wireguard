@@ -33,6 +33,7 @@ from .responder import (
     MSG_TYPE_INITIATION,
     MSG_TYPE_RESPONSE,
     MSG_TYPE_TRANSPORT,
+    TimestampReplayError,
     WireGuardResponder,
 )
 
@@ -275,13 +276,30 @@ def run_server(
         if pkt_type == MSG_TYPE_INITIATION:
             if state != "WAIT_TYPE1":
                 _log("WARNING: received Type1 while not in WAIT_TYPE1 — re-handshaking")
-            peer_addr = addr
-            _log(f"STATE learned peer address: {peer_addr[0]}:{peer_addr[1]}")
             try:
                 response = responder.handle_initiation(data)
+            except TimestampReplayError as exc:
+                # The greatest-seen rule (issue #87). Loud on purpose: this is
+                # exactly what a real WireGuard peer does to a C64 that sends
+                # the same timestamp on every initiation, and it does it
+                # SILENTLY — no Type-2, the session just never comes up. The
+                # bench must not be quieter than the thing it stands in for.
+                _log("=" * 70)
+                _log(f"REJECT Type1 from {addr[0]}:{addr[1]} — {exc}")
+                _log("       No Type-2 will be sent. The existing session (if any) is "
+                     "untouched. A rekey/'H'/re-initiation that lands here is the "
+                     "#87 defect: the C64's TAI64N did not advance.")
+                _log("=" * 70)
+                continue
             except ValueError as exc:
                 _log(f"ERROR processing Type1: {exc}")
                 continue
+            peer_addr = addr
+            _log(f"STATE learned peer address: {peer_addr[0]}:{peer_addr[1]}")
+            ts = responder.last_timestamp
+            if ts is not None:
+                _log(f"TAI64N accepted {ts.hex()} (secs={int.from_bytes(ts[:8], 'big')} "
+                     f"nanos={int.from_bytes(ts[8:], 'big')}) — now the greatest for this peer")
             _log(f"SEND to {peer_addr[0]}:{peer_addr[1]} — {_decode_type(response)}")
             _log(f"  hex: {_hexdump32(response)}")
             sock.sendto(response, peer_addr)
