@@ -56,6 +56,7 @@ Build knobs (combine freely):
 | `REU` | `1` (default) / `0` | `1`: REU-DMA multiply tables (banks 0,1,3,4,5; ~4.3 min/scalarmult at 1 MHz). `0`: constant-time on-chip multiply, zero REU use anywhere (~7.3 min/scalarmult at 1 MHz). **Which is faster inverts with clock speed — `REU=0` wins on turbo hardware. See [Performance](#performance).** |
 | `UCI_CHUNKED_WRITE` | `0` (default) / `1` | **Requires `BACKEND=uci`** (an ip65 build with this set is a make error). `1`: every send uses the firmware's `$16` `WRITE_SOCKET_CHUNK` command instead of plain `SOCKET_WRITE`, raising `NET_UDP_SEND_MAX`/`WG_MTU` from 892/860 to 1472/1440. Needs a device running the [GideonZ/1541ultimate#807](https://github.com/GideonZ/1541ultimate/issues/807) spike firmware — released 3.15 answers `$16` with `21,UNKNOWN COMMAND` (`$8E`). See [Tunnel MTU](#tunnel-mtu). |
 | `USE_X25519_SIBLING` / `USE_CHACHA_SIBLING` | `1`/`1` (default) or `0`/`0` | Sibling archives vs legacy in-tree crypto. Must match — mixed configs are refused |
+| `MSG_PORT` | `9999` (default) / any 16-bit port | Compile-time UDP port for the chat/message path (`src/wg/data.s`), used by `src/wg/ip_build.s` as both src and dst port of the inner tunnel packet. Only meaningful for interop testing against a real peer that expects a specific port (e.g. `53` for DNS — see [Real-peer interop](#real-peer-interop-cloudflare-warp)). Default `9999` is not passed to ca65 at all, so an unadorned build is byte-identical to a tree without this knob. **The untouched default's on-wire port is actually 3879, not 9999 — [#113](https://github.com/JC-000/c64-wireguard/issues/113); not fixed here, see the caveat below.** |
 
 The sibling archives are built by the libraries' own `make lib` targets (contract §6) via `tools/integration/build_*.sh` and linked unmodified — no source staging. Both are built with `-D LIB_NO_BARE_EXPORTS=1` so each exports only its `LIB_<X>_`-prefixed manifest, which is what lets `src/contract_asserts.s` import both and check the composition at link time. The networking layer sits behind `src/net_abi.inc`; both backends share the WG core.
 
@@ -430,6 +431,34 @@ Issue [#70](https://github.com/JC-000/c64-wireguard/issues/70), firmware [Gideon
 - **1472 bytes** is the largest datagram that reaches the device at all: lwIP is built with `IP_REASSEMBLY = 0`, so anything that fragments is dropped before a socket sees it. That applies to every network service on the device, not just UCI, and is why 1440 rather than an unbounded ceiling applies even with chunked sends. It is, however, comfortably above 1420 — which is why the chunked build needs no peer-side MTU change at all (measured above).
 
 **Cost at stock speed.** Every byte read carries a `uci_fence`, and the C64-Ultimate-conformant fence (`UCI_FENCE_INNER = 217`) is ~5.45 ms at 1 MHz — so an 893-byte read takes several seconds of wall clock at stock speed, against roughly a tenth of that at 48 MHz. Raising the MTU raises that cost proportionally. It is a genuine tension between §13.6 conformance and the no-REU/1 MHz configuration.
+
+### Real-peer interop: Cloudflare WARP
+
+[`tools/test_warp_live.py`](tools/test_warp_live.py) ([#70](https://github.com/JC-000/c64-wireguard/issues/70), [#87](https://github.com/JC-000/c64-wireguard/issues/87)) drives the C64 through its own boot menu (`I`/`H`/`P`/`M`), not a host-side trampoline, against a **real** WireGuard responder — [Cloudflare WARP](https://developers.cloudflare.com/warp-client/) — rather than this project's own patient Python responder.
+
+**Setup, once, outside this repo** (the profile holds a private key — never commit it):
+
+```bash
+brew install wgcf wireguard-tools
+cd ~/somewhere-not-c64-wireguard
+wgcf register --accept-tos && wgcf generate      # writes wgcf-profile.conf
+```
+
+`test_warp_live.py` reads the private key from that file at run time, via `WARP_PROFILE`, and never writes it to the repo, a log line, or stdout — only its derived public key (`wg pubkey`) is logged. Cloudflare's own peer is fixed, not read from the profile: public key `bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=`, client address `172.16.0.2/32`. There is no on-device resolver, so the endpoint hostname `engage.cloudflareclient.com:2408` must be resolved to a literal dotted IPv4 by hand before staging — `162.159.192.1` worked for this test. WARP's own [terms of service](https://www.cloudflare.com/application/terms/) apply to the registration.
+
+```bash
+make BACKEND=uci REU=0 UCI_CHUNKED_WRITE=1                                # build/, msg_port 9999 (wire port 3879 — #113)
+make BACKEND=uci REU=0 UCI_CHUNKED_WRITE=1 MSG_PORT=53 \
+     BUILD_DIR=build_msgport53                                            # DNS stage, msg_port 53
+WARP_PROFILE=/path/to/wgcf-profile.conf U64_HOST=<device-ip> \
+    python3 tools/test_warp_live.py                                       # 48 MHz
+```
+
+Stage A/B handshakes against WARP on the first PRG, pings and messages `1.1.1.1` through the tunnel; Stage C loads the second, `MSG_PORT=53` PRG for a *fresh* handshake and rides it with two host-crafted DNS queries to `1.1.1.1:53`, checking the decrypted inbound reply's IP/UDP header and DNS transaction id/question section.
+
+**Measured 2026-09-03** (U64E, fw 3.15 + the [#807](https://github.com/GideonZ/1541ultimate/issues/807) spike firmware): handshake reached `SESSION_ACTIVE` in **48.5 s** and **48.4 s** across two runs, each staged with a fresh TAI64N base time (see the #87 caveat below); ping to `1.1.1.1` came back `PING REPLY OK`; a `namecheap.com TXT` query returned a 1278-byte reply, received whole — transaction id, QR bit, all 15 answer records, addresses and ports all verified. A second query sized above ~1280 bytes came back truncated (`TC` set) by `1.1.1.1` itself *inside* WARP, at any EDNS buffer size offered — that is Cloudflare's own WARP MTU policy on the resolver side, not a limit of this tunnel, so an inbound reply above ~1280 B from the open internet is not exercisable through WARP at all; the 1452/1472-byte inbound ceiling established in [Tunnel MTU](#tunnel-mtu) above is proven instead against this project's own Python responder on the LAN, which has no such policy.
+
+**Caveat — issue [#87](https://github.com/JC-000/c64-wireguard/issues/87):** the C64's TAI64N timestamp is byte-identical for every handshake staged from the same base time, and Cloudflare enforces per-key monotonicity, so a real peer accepts only **one** handshake per staged base time — a rekey or reconnect within a run is silently dropped until #87 is fixed. `test_warp_live.py` works around this by staging a fresh `time.time()`-derived base time (and a fresh `run_prg`) before each of its two handshakes; it does not exercise rekey against WARP.
 
 ### Session State Machine
 
