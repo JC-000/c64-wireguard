@@ -401,6 +401,30 @@ Do not "fix" the default.
   crosses the LAN in the clear. Filter `not port 80` in any capture meant
   to judge the tunnel.
 
+## 5b. Real-peer (Cloudflare WARP) interop (added 2026-09-03)
+
+[#70](https://github.com/JC-000/c64-wireguard/issues/70) / [#87](https://github.com/JC-000/c64-wireguard/issues/87). Tests against a **real** WireGuard responder — Cloudflare WARP — instead of the project's own patient Python responder. The profile holds a private key: generate it *outside this repo* and never commit it.
+
+```bash
+brew install wgcf wireguard-tools
+cd ~/somewhere-not-c64-wireguard && wgcf register --accept-tos && wgcf generate
+
+make BACKEND=uci REU=0 UCI_CHUNKED_WRITE=1
+make BACKEND=uci REU=0 UCI_CHUNKED_WRITE=1 MSG_PORT=53 BUILD_DIR=build_msgport53
+
+WARP_PROFILE=/path/to/wgcf-profile.conf U64_HOST=<device-ip> \
+    python3 tools/test_warp_live.py
+```
+
+Expected stage output (2026-09-03, U64E, upstream test-merge `d33b7802` + the [#807](https://github.com/GideonZ/1541ultimate/issues/807) spike, reporting fw 3.15 / fpga 124 / core 1.4F):
+
+- Stage A/B: `Stage A: ACTIVE in 48.5s` (log line), then `PING REPLY OK` on screen.
+- Stage C: a fresh `ACTIVE in ~48s` on the `MSG_PORT=53` PRG, then `reply_recv_len=1278` for the `namecheap.com` TXT query (the second query, above ~1280 B, is truncated by `1.1.1.1` inside WARP itself — expected, not a failure of this tool).
+
+**Restore:** on a clean run, the tool's own Stage D sets 1 MHz / REU off and asserts both by read-back, so no manual restore step is needed. Only the `DeviceLock` release is in a `finally` — an exception during Stage A/B/C skips Stage D and leaves the device at 48 MHz. Check `GET /v1/configs/U64%20Specific%20Settings` after any run that errored and restore turbo by hand if it is still fast.
+
+Only one handshake per staged TAI64N base time is accepted by a real peer (#87); this tool stages a fresh base time and a fresh `run_prg` before each of its two handshakes rather than rekeying in place.
+
 ## 6. After the session
 
 Record results (per-variant wall-clocks, stage-2 verdicts, the E
