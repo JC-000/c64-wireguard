@@ -52,12 +52,32 @@ from c64_test_harness.backends.ultimate64_helpers import (
 from test_uci_udp_echo_live import (  # type: ignore[import-not-found]
     BOOT_TIMEOUT, CARRY, DEBUG_PORT, GO_FLAG, SENTINEL, SEND_BUF,
     STEP_INIT, STEP_DHCP, STEP_LISTEN, STEP_SEND, STEP_POLL,
-    STEP_TIMEOUT, TEST_PAYLOAD, TRAMP,
+    STEP_TIMEOUT, TRAMP, _payload, resolve_seed,
     _install_trampoline, _local_ip_for, _run_step, _safe, _wait_boot,
     log,
 )
 
 from uci.udp_size_responder import UDPSizeResponder, make_pattern  # type: ignore[import-not-found]
+
+# --- the outbound kick payload ---------------------------------------------
+# REPAIRED 2026-09-03 WITHOUT A HARDWARE RUN. Broken by f021458 (on master,
+# shipped in PR #112), which moved tools/test_uci_udp_echo_live.py to seeded
+# random payloads and deleted the TEST_PAYLOAD this file imported. The import
+# is top-level, so this suite died at import — before argparse, before its
+# first assertion — and stayed dead until tools/test_suite_imports.py found
+# it. The repair below restores the payload from the echo suite's NEW seeded
+# API and changes nothing else; it has been import-checked only. NEXT PERSON
+# ON A U64E: verify this probe actually runs before trusting it. A green
+# import is not a green run.
+#
+# Same alphabet as the old constant (REQUEST_BYTE_ALPHABET is range(0x40,
+# 0x60); the old bytes were 0x40 + i % 32) and the same 32-byte length this
+# file's docstring documents as fixed. 32 also keeps the payload inside
+# SEND_BUF, which is under 64 bytes.
+KICK_LEN = 32
+KICK_SEED = resolve_seed()
+TEST_PAYLOAD = _payload(KICK_LEN, KICK_SEED)
+assert len(TEST_PAYLOAD) == KICK_LEN <= 64, "kick must fit in SEND_BUF"
 
 ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
 # Sweep chosen to bracket every boundary this adapter cares about:
@@ -248,6 +268,9 @@ def _print_summary(results: list[dict]) -> None:
 
 
 def main() -> int:
+    # Standing directive: log the seed once, reproducible via TEST_SEED.
+    print(f"kick payload: {KICK_LEN} B, seed {KICK_SEED} "
+          f"(reproduce with TEST_SEED={KICK_SEED})", flush=True)
     host = os.environ.get("U64_HOST")
     if not host:
         print("SKIP: U64_HOST not set", file=sys.stderr); return 77

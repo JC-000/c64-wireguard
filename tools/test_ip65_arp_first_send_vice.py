@@ -111,6 +111,7 @@ import random
 import re
 import socket
 import struct
+import tempfile
 import subprocess
 import sys
 import threading
@@ -121,7 +122,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from c64_test_harness import Labels, jsr, read_bytes, write_bytes  # noqa: E402
 from vice_eth_rig import (  # noqa: E402
     DEFAULT_VICE_BIN, IP65_MAP_PATH, LABELS_PATH, PRG_PATH, SKIP_EXIT,
-    EthVice, Tap, assert_ip65_build, boot_and_net_init, build_ip65, c64_ip,
+    EthVice, assert_ip65_build, boot_and_net_init, build_ip65, c64_ip,
+    classify_tcpdump_line,
     libpcap_node_note, log, parse_map_exports, selftest_classifier,
     selftest_map_parsers, vice_holders, vice_rawnet_problems,
 )
@@ -240,9 +242,10 @@ def selftest_arp() -> list[str]:
     return bad
 
 
-def arp_lines(tap: Tap, upto: int | None = None) -> list[tuple[str, str, str]]:
-    with tap._lock:
-        raw = list(tap.raw[:upto] if upto is not None else tap.raw)
+def arp_lines(tap, upto: int | None = None) -> list[tuple[str, str, str]]:
+    raw = tap.text_lines()
+    if upto is not None:
+        raw = raw[:upto]
     out = []
     for line in raw:
         kind, a, b = classify_arp_line(line)
@@ -413,49 +416,59 @@ def opt_byte(tr, L, name: str) -> int | None:
     return read_bytes(tr, L[name], 1)[0] if name in L else None
 
 
-class PayloadTap:
-    """tcpdump writing a pcap stream, parsed down to UDP payload BYTES.
+class WireTap:
+    """ONE tcpdump. Frames for bytes, and tcpdump's own text for classifying.
 
-    Counting datagrams is not enough here. ip65/ip.s:322 destroys the
-    outbound frame while it does the ARP lookup, which is precisely why the
-    fix has to REBUILD the packet rather than resume into the half-built
-    one. A resume-based fix would put a datagram of the right length on the
-    wire carrying corrupt bytes, and every presence-and-length check would
-    stay green. So the payload is compared byte for byte against what was
-    staged in udp_recv_buf.
+    ONE BPF HANDLE IS THE WHOLE POINT. This bench has exactly four world-rw
+    /dev/bpf nodes (bpf0-bpf3; bpf4+ are root-only) and they are shared by
+    every lane. VICE's pcap driver needs one, so a suite that opens two
+    leaves one spare for the entire rest of the machine — and when the
+    fourth is gone, VICE's eth_init fails, ip65_init returns carry set, and
+    the C64 prints NET INIT FAILED. That is not a network problem and looks
+    nothing like one. MEASURED: two concurrent tcpdumps plus VICE on en4
+    gave "cannot open BPF device /dev/bpf4: Permission denied" and three
+    consecutive runs died at network init. An earlier draft of this suite
+    ran a second live capture for payload bytes and caused exactly that.
 
-    Deliberately a second capture rather than a change to the shared text
-    Tap: that one's classifier is proven against real line shapes and is
-    what the counting and fragment arms rest on.
+    So: one live ``tcpdump -w`` writing a pcap file (``-U``, packet
+    buffered, so records land as they arrive), and two readers of that one
+    file:
+
+      frames()      parsed here, giving UDP payload and whole-IP-packet
+                    BYTES — what the packet-identity and content checks need.
+      text_lines()  ``tcpdump -r`` run OFFLINE against the same file. It
+                    opens no BPF device, and it produces exactly the line
+                    shapes classify_tcpdump_line and classify_arp_line are
+                    proven against, so the counting, fragment and ARP arms
+                    keep resting on the classifiers that have alarm proofs
+                    rather than on a hand-rolled decoder.
     """
 
     _GLOBAL = 24
     _REC = 16
 
     def __init__(self, bpf_filter: str, iface: str):
-        self.filter = bpf_filter
+        # Same fragment clause the shared Tap appends: a datagram torn by IP
+        # fragmentation must still be captured so it can be counted.
+        self.filter = f"({bpf_filter}) or (ip[6:2] & 0x1fff != 0)"
         self.iface = iface
-        self.payloads: list[tuple[str, int, str, int, bytes]] = []
-        self._lock = threading.Lock()
+        fd, self.path = tempfile.mkstemp(prefix="wg120-", suffix=".pcap")
+        os.close(fd)
         self._proc: subprocess.Popen | None = None
-        self._buf = b""
-        self._endian = "<"
-        self._have_global = False
 
-    def __enter__(self) -> "PayloadTap":
+    def __enter__(self) -> "WireTap":
         self._proc = subprocess.Popen(
-            ["tcpdump", "-i", self.iface, "-n", "-U", "-s", "0", "-w", "-",
-             self.filter],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        threading.Thread(target=self._pump, daemon=True).start()
+            ["tcpdump", "-i", self.iface, "-n", "-U", "-s", "0",
+             "-w", self.path, self.filter],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
-            line = self._proc.stderr.readline().decode("utf8", "replace")
+            line = self._proc.stderr.readline()
             if "listening on" in line:
                 return self
             if not line and self._proc.poll() is not None:
                 break
-        raise RuntimeError(f"payload tcpdump did not start on {self.iface}")
+        raise RuntimeError(f"tcpdump did not start listening on {self.iface}")
 
     def __exit__(self, *exc) -> None:
         if self._proc is not None:
@@ -464,66 +477,117 @@ class PayloadTap:
                 self._proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 self._proc.kill()
+        try:
+            os.unlink(self.path)
+        except OSError:
+            pass
 
-    def _pump(self) -> None:
-        assert self._proc is not None and self._proc.stdout is not None
-        while True:
-            chunk = self._proc.stdout.read(4096)
-            if not chunk:
-                return
-            self._buf += chunk
-            self._drain()
+    # -- frames (bytes) ---------------------------------------------------
 
-    def _drain(self) -> None:
-        if not self._have_global:
-            if len(self._buf) < self._GLOBAL:
-                return
-            magic = self._buf[:4]
-            if magic in (b"\xd4\xc3\xb2\xa1", b"\x4d\x3c\xb2\xa1"):
-                self._endian = "<"
-            elif magic in (b"\xa1\xb2\xc3\xd4", b"\xa1\xb2\x3c\x4d"):
-                self._endian = ">"
-            else:
-                return                      # not a pcap stream; give up quietly
-            self._buf = self._buf[self._GLOBAL:]
-            self._have_global = True
-        while len(self._buf) >= self._REC:
+    def frames(self) -> list[tuple[str, int, str, int, bytes, bytes]]:
+        """Every UDP record in the capture so far, decoded to bytes.
+
+        Re-reads the whole file; these captures are a handful of packets.
+        A partial trailing record (tcpdump mid-write) is simply not yet
+        complete and is skipped, not mis-parsed.
+        """
+        try:
+            with open(self.path, "rb") as fh:
+                buf = fh.read()
+        except OSError:
+            return []
+        if len(buf) < self._GLOBAL:
+            return []
+        magic = buf[:4]
+        if magic in (b"\xd4\xc3\xb2\xa1", b"\x4d\x3c\xb2\xa1"):
+            endian = "<"
+        elif magic in (b"\xa1\xb2\xc3\xd4", b"\xa1\xb2\x3c\x4d"):
+            endian = ">"
+        else:
+            return []
+        out = []
+        off = self._GLOBAL
+        while off + self._REC <= len(buf):
             _s, _u, incl, _orig = struct.unpack(
-                self._endian + "IIII", self._buf[:self._REC])
-            if len(self._buf) < self._REC + incl:
-                return
-            frame = self._buf[self._REC:self._REC + incl]
-            self._buf = self._buf[self._REC + incl:]
-            rec = self._parse(frame)
+                endian + "IIII", buf[off:off + self._REC])
+            off += self._REC
+            if off + incl > len(buf):
+                break                       # record still being written
+            rec = parse_frame(buf[off:off + incl])
+            off += incl
             if rec:
-                with self._lock:
-                    self.payloads.append(rec)
+                out.append(rec)
+        return out
 
-    @staticmethod
-    def _parse(frame: bytes):
-        if len(frame) < 14 or frame[12:14] != b"\x08\x00":
-            return None                     # not IPv4 over Ethernet
-        ip = frame[14:]
-        if len(ip) < 20:
-            return None
-        ihl = (ip[0] & 0x0F) * 4
-        if ip[9] != 17 or len(ip) < ihl + 8:
-            return None                     # not UDP
-        src = ".".join(str(b) for b in ip[12:16])
-        dst = ".".join(str(b) for b in ip[16:20])
-        udp = ip[ihl:]
-        sport, dport, ulen = struct.unpack(">HHH", udp[0:6])
-        return src, sport, dst, dport, udp[8:8 + max(0, ulen - 8)]
+    def matching(self, src: str, dst: str, dport: int):
+        return [f for f in self.frames()
+                if f[0] == src and f[2] == dst and f[3] == dport]
 
-    def matching(self, src: str, dst: str, dport: int
-                 ) -> list[tuple[str, int, str, int, bytes]]:
-        with self._lock:
-            return [p for p in self.payloads
-                    if p[0] == src and p[2] == dst and p[3] == dport]
+    # -- text (classified by the proven classifiers) ----------------------
+
+    def text_lines(self) -> list[str]:
+        """``tcpdump -r`` over the same file. Offline: opens no BPF device."""
+        r = subprocess.run(
+            ["tcpdump", "-r", self.path, "-n", "-q"],
+            capture_output=True, text=True)
+        return r.stdout.splitlines()
+
+    @property
+    def raw(self) -> list[str]:
+        return self.text_lines()
+
+    def udp(self, src: str | None = None, dst: str | None = None,
+            dport: int | None = None) -> list:
+        recs = []
+        for line in self.text_lines():
+            kind, value = classify_tcpdump_line(line)
+            if kind == "udp":
+                recs.append(value)
+        return [r for r in recs
+                if (src is None or r.src == src)
+                and (dst is None or r.dst == dst)
+                and (dport is None or r.dport == dport)]
+
+    @property
+    def frags(self) -> list[str]:
+        out = []
+        for line in self.text_lines():
+            kind, value = classify_tcpdump_line(line)
+            if kind == "frag":
+                out.append(value)
+        return out
+
+    def fragments(self) -> int:
+        return len(self.frags)
+
+
+def parse_frame(frame: bytes):
+    """One Ethernet frame -> (src, sport, dst, dport, payload, ip) or None.
+
+    The whole IP packet is carried too (index 5). ip65 hardcodes the IP ID
+    to $1234 for every UDP packet (ip65/ip65/udp.s:330) and
+    ip_create_packet skips the ID field, so failed attempts consume no IDs
+    and nothing in the header varies per attempt — which makes a
+    byte-identical comparison between the RETRY path and the direct path a
+    legitimate assertion rather than a flaky one.
+    """
+    if len(frame) < 14 or frame[12:14] != b"\x08\x00":
+        return None                         # not IPv4 over Ethernet
+    ip = frame[14:]
+    if len(ip) < 20:
+        return None
+    ihl = (ip[0] & 0x0F) * 4
+    if ip[9] != 17 or len(ip) < ihl + 8:
+        return None                         # not UDP
+    src = ".".join(str(b) for b in ip[12:16])
+    dst = ".".join(str(b) for b in ip[16:20])
+    udp = ip[ihl:]
+    sport, dport, ulen = struct.unpack(">HHH", udp[0:6])
+    return src, sport, dst, dport, udp[8:8 + max(0, ulen - 8)], ip
 
 
 def selftest_payload_parser() -> list[str]:
-    """Alarm proof for PayloadTap._parse: a hand-built frame it must decode.
+    """Alarm proof for parse_frame: a hand-built frame it must decode.
 
     Without this, "the bytes matched" could be a claim resting on a parser
     that never returned anything at all — an empty list is not a mismatch.
@@ -533,19 +597,24 @@ def selftest_payload_parser() -> list[str]:
     ip = (bytes([0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 17, 0, 0])
           + bytes([10, 43, 23, 225]) + bytes([162, 159, 192, 1]) + udp)
     frame = b"\x00" * 12 + b"\x08\x00" + ip
-    got = PayloadTap._parse(frame)
+    got = parse_frame(frame)
     if got is None:
-        return ["PayloadTap._parse returned None for a valid UDP frame"]
-    src, sport, dst, dport, body = got
+        return ["parse_frame returned None for a valid UDP frame"]
+    src, sport, dst, dport, body, ip_raw = got
     bad = []
     if (src, sport, dst, dport) != ("10.43.23.225", 51820,
                                     "162.159.192.1", 2408):
-        bad.append(f"PayloadTap._parse decoded the wrong header: {got[:4]}")
+        bad.append(f"parse_frame decoded the wrong header: {got[:4]}")
     if body != payload:
-        bad.append(f"PayloadTap._parse decoded {len(body)} payload bytes, "
+        bad.append(f"parse_frame decoded {len(body)} payload bytes, "
                    f"expected {len(payload)}")
-    if PayloadTap._parse(b"\x00" * 12 + b"\x86\xdd" + b"\x00" * 40) is not None:
-        bad.append("PayloadTap._parse accepted a non-IPv4 frame")
+    if ip_raw != ip:
+        bad.append(f"parse_frame returned {len(ip_raw)} IP bytes, expected "
+                   f"{len(ip)} — the packet-identity check compares these, "
+                   "so an empty or truncated slice would make two packets "
+                   "look equal for the wrong reason")
+    if parse_frame(b"\x00" * 12 + b"\x86\xdd" + b"\x00" * 40) is not None:
+        bad.append("parse_frame accepted a non-IPv4 frame")
     return bad
 
 
@@ -785,9 +854,7 @@ def main() -> int:
     # cold" is a claim about the whole run, not about a window.
     bpf = (f"arp or (udp and (port 67 or port 68 or port {dest_port}))")
     rc = 1
-    with Tap(bpf, iface=args.iface) as tap, \
-            PayloadTap(f"udp and dst host {dest_ip} and dst port {dest_port}",
-                       args.iface) as ptap:
+    with WireTap(bpf, args.iface) as tap:
         with EthVice(args.vice_bin, iface=args.iface) as vice:
             tr = vice.tr
             boot_and_net_init(tr, L)
@@ -867,7 +934,7 @@ def main() -> int:
             ceiling = max(2.0, args.budget * 3)
             set_dest(tr, L, dest_ip, dest_port)
             mark_udp = len(tap.udp(src=c64, dst=dest_ip))
-            mark_bytes = len(ptap.matching(c64, dest_ip, dest_port))
+            mark_bytes = len(tap.matching(c64, dest_ip, dest_port))
             carry1, took1 = send_once(tr, L, payload,
                                       timeout=max(30.0, args.budget * 10))
             time.sleep(WIRE_SETTLE)
@@ -903,7 +970,7 @@ def main() -> int:
             # into the half-built packet instead of rebuilding it would emit
             # a right-sized datagram full of wrong bytes and every check
             # above would still pass.
-            body1 = ptap.matching(c64, dest_ip, dest_port)[mark_bytes:]
+            body1 = tap.matching(c64, dest_ip, dest_port)[mark_bytes:]
             check(len(body1) == 1 and body1[0][4] == payload,
                   "attempt 1's datagram carried the staged bytes EXACTLY",
                   f"captured {len(body1)} payload(s); "
@@ -957,7 +1024,7 @@ def main() -> int:
             log("=== Phase 2: control — pump net_poll, send again ===")
             pump(tr, L)
             mark_udp = len(tap.udp(src=c64, dst=dest_ip))
-            mark_bytes = len(ptap.matching(c64, dest_ip, dest_port))
+            mark_bytes = len(tap.matching(c64, dest_ip, dest_port))
             carry2, took2 = send_once(tr, L, payload, timeout=30.0)
             time.sleep(WIRE_SETTLE)
             sent2 = tap.udp(src=c64, dst=dest_ip)[mark_udp:]
@@ -982,7 +1049,7 @@ def main() -> int:
                              "control: that send put exactly one datagram on "
                              "the wire",
                              f"tap saw {len(sent2)}")
-            body2 = ptap.matching(c64, dest_ip, dest_port)[mark_bytes:]
+            body2 = tap.matching(c64, dest_ip, dest_port)[mark_bytes:]
             ok_ctrl &= check(len(body2) == 1 and body2[0][4] == payload,
                              "control: the warm send's bytes on the wire are "
                              "the staged bytes",
