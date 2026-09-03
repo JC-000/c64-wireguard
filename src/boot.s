@@ -40,6 +40,9 @@
         .import ip_packet_buf
         .import ip_pkt_len
         .import msg_input_len
+.ifdef UCI_CHUNKED_WRITE
+        .import net_last_error          ; UCI adapter only (issue #70)
+.endif
 
 ; --- Imports: strings from src/wg/strings.s ------------------------------
         .import title_msg
@@ -541,11 +544,48 @@ do_message_input:
         lda     ip_pkt_len+1
         sta     tp_payload_len+1
         jsr     transport_send
+.ifdef UCI_CHUNKED_WRITE
+        bcs     @msg_send_fail
+.endif
         jsr     timer_mark_send
         lda     #<send_ok_msg
         ldy     #>send_ok_msg
         jsr     print_string
         rts
+.ifdef UCI_CHUNKED_WRITE
+@msg_send_fail:
+        ; transport_send said C=1. In a chunked build (issue #70) that is
+        ; how a firmware WITHOUT the $16 command shows up — every send fails
+        ; with net_last_error = $8E — so print the code instead of the
+        ; unconditional "PACKET SENT OK" the default build shows. (The
+        ; default build is left as it was so its PRG stays byte-identical;
+        ; ip65 has no net_last_error to print.)
+        lda     #<@msg_send_err_str
+        ldy     #>@msg_send_err_str
+        jsr     print_string
+        lda     net_last_error
+        pha
+        lsr     a
+        lsr     a
+        lsr     a
+        lsr     a
+        jsr     @msg_hex_nibble
+        pla
+        and     #$0f
+        jsr     @msg_hex_nibble
+        lda     #$0d
+        jsr     chrout
+        rts
+@msg_hex_nibble:
+        cmp     #10
+        bcc     :+
+        adc     #6                      ; C=1 here: +7, so 10 -> 'A' after '0'
+:
+        adc     #'0'
+        jmp     chrout
+@msg_send_err_str:
+        .byte   "SEND FAILED, NET ERR $", 0
+.endif
 
 ; =============================================================================
 ; do_load_config - load configuration from disk

@@ -129,11 +129,25 @@ our side. The 3.14d notes are kept because the other quirks still apply.
   (`IP_REASSEMBLY = 0`, device-wide).
   `NET_UDP_RECV_MAX = 1472` in `src/net/uci/net_caps.inc`.
 - **SOCKET_WRITE: 892 bytes per datagram, and this is what pins the MTU
-  (2026-08-27).** There is no `WRITE_SOCKET_MORE` (GideonZ/1541ultimate#802),
-  so anything larger goes out as two datagrams and the peer drops both. Hence
+  (2026-08-27).** Stock 3.15 has no continuation command, so anything larger
+  goes out as two datagrams and the peer drops both. Hence
   `NET_UDP_SEND_MAX = 892` and `WG_MTU = 892 − 32 = 860` (not 861, which was
-  read-side arithmetic). The host tools take these from the .inc files via
-  `tools/c64_caps.py`; do not hardcode them.
+  read-side arithmetic). The host tools take these from `build/labels.txt`
+  via `tools/c64_caps.py` (the .inc files are only a fallback, and they
+  describe the DEFAULT build); do not hardcode them.
+- **Chunked send, `make BACKEND=uci REU=0 UCI_CHUNKED_WRITE=1` (issue #70,
+  device = the GideonZ/1541ultimate#807 spike firmware ONLY).** Every
+  datagram goes out as `$16` parts of ≤ 888 bytes (`uci_send_part`, present
+  in labels.txt only for this build); the firmware emits one wire datagram of
+  up to 1472, so `NET_UDP_SEND_MAX = 1472`, `WG_MTU = 1440`, peer `MTU =
+  1440`. Build ONCE and run every live tool with `C64_SKIP_BUILD=1` — the
+  live tools rebuild without the flag otherwise; check the PRG fingerprint
+  line. On stock 3.15 the first send fails with `$8E` (`21,UNKNOWN
+  COMMAND`) and the screen prints `SEND FAILED, NET ERR $8E`. After a
+  non-completing part the adapter leaves `uci_resp_count` / `uci_write_resp`
+  / `uci_status_buf` readable over DMA: `uci_resp_count` should read 0 if the
+  spec's "no reply for a non-completing part" holds — that is the one reply
+  semantic the bench did not verify, so read it.
 
   **The red-screen incident (PR #62) was the sentinel, not an over-claim.**
   `net_poll` trusted the response header as a byte count and fed it to an

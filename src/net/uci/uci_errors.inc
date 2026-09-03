@@ -49,8 +49,9 @@ UCI_ERR_SHORT_WRITE    = $87    ; SOCKET_WRITE's returned count != requested
 NET_ERR_TIMEBASE_STOPPED = $01
 UCI_ERR_NO_SOCKET      = $88    ; socket-open response yielded no socket_id
 UCI_ERR_WAIT_TIMEOUT   = $89    ; a bounded wait exceeded its wall-clock budget
-UCI_ERR_SEND_TOO_LONG  = $8C    ; datagram exceeds NET_UDP_SEND_MAX (892, the
-                                ; adapter's published net_caps.inc guarantee);
+UCI_ERR_SEND_TOO_LONG  = $8C    ; datagram exceeds NET_UDP_SEND_MAX (the
+                                ; adapter's published net_caps.inc guarantee:
+                                ; 892, or 1472 under UCI_CHUNKED_WRITE);
                                 ; refused BEFORE any register is touched
                                 ; (c64-lib-contract#141/#142) because a split
                                 ; would emit multiple UDP packets.
@@ -71,6 +72,19 @@ UCI_ERR_OPEN_REFUSED   = $8D    ; the firmware REFUSED a socket open: it cleared
                                 ; The captured line (uci_status_buf) carries the
                                 ; firmware's decimal STATUS code (85).
                                 ; c64-lib-contract#147 allocates it in §13.2.
+UCI_ERR_CMD_UNKNOWN    = $8E    ; the firmware does not know the command: the
+                                ; $DF1F STATUS line read `21,UNKNOWN COMMAND`.
+                                ; Raised by the UCI_CHUNKED_WRITE send path when
+                                ; NET_CMD_WRITE_SOCKET_CHUNK ($16, issue #70,
+                                ; GideonZ/1541ultimate#807) is pushed at a
+                                ; firmware without it — stock 3.15 included —
+                                ; so a chunked build on the wrong firmware fails
+                                ; on its very first send (the 148-byte Type-1)
+                                ; with a named code instead of a generic $85/$87.
+                                ; TODO: contract §13.2 allocation pending
+                                ; (c64-lib-contract issue to be filed by the
+                                ; main thread; $8E is the next free UCI code
+                                ; after #147's $8D).
 
 ; TCP state values stored in net_tcp_state
 UCI_TCP_CLOSED         = $00    ; no active socket
@@ -98,9 +112,25 @@ UCI_TCP_CONNECT_FAIL   = $03    ; connect did not yield a usable socket
 ;
 ; NOTE THE ASYMMETRY: reads can exceed this. fw 3.15 returns datagrams up to
 ; 1472 B by splitting the REPLY across Data More blocks
-; (GideonZ/1541ultimate#806), and net_poll reassembles them. No equivalent
-; exists for the command direction, so the tunnel MTU is bounded by SEND.
+; (GideonZ/1541ultimate#806), and net_poll reassembles them. In stock 3.15 no
+; equivalent exists for the command direction, so the tunnel MTU is bounded
+; by SEND.
+;
+; UCI_CHUNKED_WRITE (issue #70): the #807 spike firmware adds
+; NET_CMD_WRITE_SOCKET_CHUNK ($16), which accumulates PARTS into one datagram
+; and emits it on the part that completes the announced total. The datagram
+; ceiling becomes the firmware's own 1472 (IP_REASSEMBLY = 0), and the
+; per-part ceiling is the same 895-byte command buffer minus the 7-byte
+; header ($03 $16 id off_lo off_hi tot_lo tot_hi) = 888. The adapter never
+; offers more than UCI_CHUNK_PART_MAX in one part (net.s asserts it), so the
+; 893-style silent truncation cannot recur at the part boundary.
+.ifdef UCI_CHUNKED_WRITE
+UCI_DATA_QUEUE_MAX     = 1472
+.else
 UCI_DATA_QUEUE_MAX     = 892
+.endif
+UCI_CHUNK_PART_MAX     = 895 - 7
+.assert UCI_CHUNK_PART_MAX = 888, error, "UCI_CHUNK_PART_MAX must be 888: 895-byte command buffer minus the 7-byte $16 header (GideonZ/1541ultimate#807)"
 
 ; SOCKET_READ max-length cap we ask for per net_poll cycle.
 ;

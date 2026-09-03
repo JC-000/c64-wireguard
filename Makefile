@@ -93,6 +93,23 @@ ifeq ($(REU),0)
 CA65FLAGS += -D WG_NO_REU=1
 endif
 
+# --- UCI chunked send (issue #70) ---
+# UCI_CHUNKED_WRITE=1 makes the UCI adapter send every datagram with the
+# firmware's chunked NET_CMD_WRITE_SOCKET_CHUNK ($16, GideonZ/1541ultimate#807
+# spike builds; NOT in stock 3.15) in parts of at most 888 bytes, lifting
+# NET_UDP_SEND_MAX from 892 to 1472 and the tunnel MTU from 860 to 1440.
+# Default 0: the shipped adapter uses plain SOCKET_WRITE and the default
+# build is byte-identical to a tree without this flag. UCI only — ip65 has
+# no chunked path and its caps are already 1472/1472 (clamped by
+# WG_DATAGRAM_CAP for RAM, see src/constants.inc).
+UCI_CHUNKED_WRITE ?= 0
+ifeq ($(UCI_CHUNKED_WRITE),1)
+ifneq ($(BACKEND),uci)
+$(error UCI_CHUNKED_WRITE=1 requires BACKEND=uci: the chunked SOCKET_WRITE is a UCI firmware command, ip65 has no equivalent)
+endif
+CA65FLAGS += -D UCI_CHUNKED_WRITE=1
+endif
+
 # Common ca65 source set — shared by every backend. The in-tree crypto
 # modules that the siblings replace are filtered out below.
 COMMON_SRCS_ALL = $(SRC_DIR)/loadaddr.s \

@@ -129,3 +129,13 @@ UCI_CMD_LISTEN_START    = $12
 UCI_CMD_LISTEN_ACCEPT   = $13
 UCI_CMD_LISTEN_STOP     = $14
 UCI_CMD_LISTEN_STATUS   = $15
+; Chunked datagram write (GideonZ/1541ultimate#807; bench-verified on the
+; #807 spike build, NOT in stock 3.15, which answers `21,UNKNOWN COMMAND`):
+;   $03 $16 socket_id off_lo off_hi total_lo total_hi <payload>
+; The part at offset 0 announces the datagram total (> 1472 -> `82,PARAMETER(S)
+; OUT OF RANGE`, nothing queued); later parts are checked against it (overrun
+; -> `81,INVALID PARAMS`, payload discarded). The part that completes the
+; total emits ONE wire datagram and replies with the 2-byte total count, like
+; SOCKET_WRITE. Header is 7 bytes, so a part carries at most 895 - 7 = 888.
+; Used only under UCI_CHUNKED_WRITE (issue #70).
+UCI_CMD_SOCKET_WRITE_CHUNK = $16
