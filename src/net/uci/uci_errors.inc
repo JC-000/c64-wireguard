@@ -1,5 +1,10 @@
 ; src/net/uci/uci_errors.inc — UCI backend error codes
 ;
+; CANONICAL REGISTRY: src/net_abi.inc. That table covers BOTH backends and
+; records which values came from the retired c64-lib-contract §13.2 table and
+; which are ours; this file is the UCI half, with the per-code reasoning.
+; Add a code there first. A published value is never reassigned.
+;
 ; Values stored in net_last_error by the UCI adapter. 0 = OK.
 ; Kept deliberately small and distinct from any ip65 error values so
 ; that future multi-backend debugging can tell them apart at a glance.
@@ -81,10 +86,13 @@ UCI_ERR_CMD_UNKNOWN    = $8E    ; the firmware does not know the command: the
                                 ; so a chunked build on the wrong firmware fails
                                 ; on its very first send (the 148-byte Type-1)
                                 ; with a named code instead of a generic $85/$87.
-                                ; TODO: contract §13.2 allocation pending
-                                ; (c64-lib-contract issue to be filed by the
-                                ; main thread; $8E is the next free UCI code
-                                ; after #147's $8D).
+                                ; OURS, minted in this repo's own registry
+                                ; (src/net_abi.inc): $8E was the next free UCI
+                                ; code after #147's $8D. The contract filing
+                                ; this once said was pending never happened
+                                ; and never will — §13 was retired wholesale
+                                ; at contract v1.0.0 and the numbering came
+                                ; home with it.
 
 ; TCP state values stored in net_tcp_state
 UCI_TCP_CLOSED         = $00    ; no active socket
