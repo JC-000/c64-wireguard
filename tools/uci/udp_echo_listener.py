@@ -35,6 +35,13 @@ class UDPEchoListener:
         # (the default UCI build sends at most 892 bytes but receives 1472 —
         # issue #70's multi-block SOCKET_READ). ``received`` still records
         # what arrived. Settable between datagrams via :attr:`reply_fn`.
+        #
+        # This listener never invents payload/reply content itself — the
+        # caller (test_uci_udp_echo_live.py) supplies both, seeded per run
+        # from a disjoint byte alphabet per direction so a caller cannot be
+        # gamed by echoing a fixed pattern back. See that module's
+        # ``_payload``/``_reply`` for the standing randomisation contract
+        # (2026-09-03).
         self._reply_fn = reply_fn
         self._sock: socket.socket | None = None
         self._thread: threading.Thread | None = None

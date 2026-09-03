@@ -44,9 +44,11 @@ how many leading bytes matched (893 = one reply block = the #70 signature).
 """
 from __future__ import annotations
 
+import argparse
 import datetime as _dt
 import logging
 import os
+import random
 import struct
 import socket
 import subprocess
@@ -101,9 +103,19 @@ STEP_INIT, STEP_DHCP, STEP_LISTEN, STEP_SEND, STEP_POLL = 0x11, 0x22, 0x33, 0x44
 #
 # Whether a size is expected to go through is decided per BUILD, from the
 # NET_UDP_SEND_MAX the PRG exports: 892 on the default build, 1472 under
-# UCI_CHUNKED_WRITE=1. Pattern avoids $00 for trace eyeballing and differs
-# per size so an echo of the previous size cannot satisfy the next.
+# UCI_CHUNKED_WRITE=1. Content is random bytes per run (see _payload/_reply
+# below), seeded and reproducible via --seed/TEST_SEED (standing directive,
+# 2026-09-03): a fixed byte pattern could in principle be "gamed" by a stale
+# buffer that happens to match, and randomising per run rules that out. $00
+# is excluded from both alphabets for trace eyeballing.
 SWEEP_SIZES = (888, 889, 891, 892, 893, 1452, 1472, 1473)
+
+# Disjoint per-direction byte alphabets: an echo of what the C64 sent (or a
+# stale buffer left over from the previous size) can never satisfy the other
+# direction's assertion, because the two ranges never overlap.
+REQUEST_BYTE_ALPHABET = bytes(range(0x40, 0x60))    # C64 -> host (_payload)
+REPLY_BYTE_ALPHABET = bytes(range(0x61, 0x7A))      # host -> C64 (_reply)
+assert not (set(REQUEST_BYTE_ALPHABET) & set(REPLY_BYTE_ALPHABET))
 
 
 def _payload_sizes() -> list[int]:
@@ -113,8 +125,13 @@ def _payload_sizes() -> list[int]:
             if s.strip()]
 
 
-def _payload(n: int) -> bytes:
-    return bytes(0x40 + ((i + n) % 32) for i in range(n))
+def _payload(n: int, seed: int) -> bytes:
+    """n random bytes from REQUEST_BYTE_ALPHABET, deterministic per
+    (seed, n) via plain-int seeding (never a str/tuple hash, which
+    PYTHONHASHSEED randomises per process) so --seed/TEST_SEED actually
+    reproduces a run."""
+    rng = random.Random((seed + n * 97 + 1) & 0xFFFFFFFF)
+    return bytes(rng.choice(REQUEST_BYTE_ALPHABET) for _ in range(n))
 
 
 def _reply_sizes() -> list[int]:
@@ -124,11 +141,33 @@ def _reply_sizes() -> list[int]:
             if s.strip()]
 
 
-def _reply(n: int) -> bytes:
-    """Reply pattern: a DIFFERENT alphabet ($61-$79) from _payload's
-    ($40-$5F) and a different stride, so an echo of what the C64 sent, or
-    a stale buffer from the previous size, cannot satisfy the assertion."""
-    return bytes(0x61 + ((3 * i + n) % 25) for i in range(n))
+def _reply(n: int, seed: int) -> bytes:
+    """n random bytes from REPLY_BYTE_ALPHABET — a DISJOINT alphabet from
+    _payload's — deterministic per (seed, n), so an echo of what the C64
+    sent, or a stale buffer from the previous size, cannot satisfy the
+    assertion."""
+    rng = random.Random((seed + n * 97 + 2) & 0xFFFFFFFF)
+    return bytes(rng.choice(REPLY_BYTE_ALPHABET) for _ in range(n))
+
+
+def resolve_seed(cli_seed: int | None = None) -> int:
+    """--seed wins; else TEST_SEED env; else a fresh random seed."""
+    if cli_seed is not None:
+        return cli_seed
+    env = os.environ.get("TEST_SEED")
+    if env:
+        return int(env)
+    return random.SystemRandom().randint(0, 2**32 - 1)
+
+
+def _resolve_seed_from_argv() -> int:
+    """Parses only --seed out of sys.argv (this tool's other knobs are all
+    env vars — ECHO_TURBO_MHZ, ECHO_PAYLOAD_LEN, etc. — so this stays
+    additive to the existing CLI/env contract rather than replacing it)."""
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--seed", type=int, default=None)
+    args, _ = parser.parse_known_args()
+    return resolve_seed(args.seed)
 
 
 PAYLOAD_SIZES = _payload_sizes()
@@ -555,7 +594,7 @@ def _echo_once(
 
 def _run_sequence(
     tr: Ultimate64Transport, L: dict[str, int], labels: Labels,
-    listener: UDPEchoListener, local_ip: str,
+    listener: UDPEchoListener, local_ip: str, seed: int,
 ) -> list[str]:
     """Drive init/dhcp/listen once, then one echo per payload size;
     return a list of failure descriptions."""
@@ -633,9 +672,9 @@ def _run_sequence(
            [(n, r) for n in PAYLOAD_SIZES for r in REPLY_SIZES]
     for n, r in plan:
         try:
-            fail.extend(_echo_once(tr, L, labels, listener, _payload(n),
+            fail.extend(_echo_once(tr, L, labels, listener, _payload(n, seed),
                                    send_max,
-                                   reply=None if r is None else _reply(r)))
+                                   reply=None if r is None else _reply(r, seed)))
         except TimeoutError as exc:
             fail.append(f"[{n} B] {exc}")
             log.error("[%d B] step timed out — the adapter may be wedged; "
@@ -653,6 +692,10 @@ def _safe(fn, *args, **kw):
 
 
 def main() -> int:
+    seed = _resolve_seed_from_argv()
+    print(f"Random seed: {seed} (reproduce with --seed {seed} or "
+          f"TEST_SEED={seed})", flush=True)
+
     host = os.environ.get("U64_HOST", DEFAULT_HOST)
     if not host:
         _skip("U64_HOST not set")
@@ -783,7 +826,7 @@ def main() -> int:
         client.run_prg(prg_bytes)
         log.info("PRG sent; waiting for boot...")
         _wait_boot_ready(tr, labels, L)
-        failures = _run_sequence(tr, L, labels, listener, local_ip)
+        failures = _run_sequence(tr, L, labels, listener, local_ip, seed)
         _safe(client.stream_debug_stop)
         streamed = False
         time.sleep(0.3)

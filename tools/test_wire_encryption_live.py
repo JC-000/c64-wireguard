@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import random
 import sys
 import time
 from pathlib import Path
@@ -54,6 +55,73 @@ import wg_c64_input                                          # noqa: E402
 # Distinct per direction so a hit can never be attributed to the wrong one.
 import os as _os
 
+# Standing directive (2026-09-03): red/green tests that send data across the
+# wire must randomise their initial words/payload per run, seeded and
+# reproducible via --seed/TEST_SEED, so a fixed string cannot be gamed by
+# something left over from a previous run. Applied here to the three items
+# that actually send content: the keyboard-typed message (MARKER_C64,
+# section 1), the outbound size probes (1b) and the inbound probes (4b).
+# REQUEST_ALPHABET/REPLY_ALPHABET are disjoint so an echo of a C64->host
+# message can never satisfy a host->C64 assertion or vice versa. Both are
+# restricted to uppercase letters because the screen-RAM check in
+# `_screen_text` only converts screen codes 1-26 -> A-Z and 32 -> space;
+# anything else would print as '.' and never match.
+REQUEST_ALPHABET = "ABCDEFGHIJKLM"    # C64 -> host (MARKER_C64, OUT probes)
+REPLY_ALPHABET = "NOPQRSTUVWXYZ"      # host -> C64 (IN probes)
+assert not (set(REQUEST_ALPHABET) & set(REPLY_ALPHABET))
+
+_WORD_LEN_RANGE = (4, 7)
+_SUFFIX_LEN = 8
+
+SEED: int | None = None    # set by main() before build_probe()'s hook runs
+
+
+def resolve_seed(cli_seed: int | None) -> int:
+    """--seed wins; else TEST_SEED env; else a fresh random seed."""
+    if cli_seed is not None:
+        return cli_seed
+    env = os.environ.get("TEST_SEED")
+    if env:
+        return int(env)
+    return random.SystemRandom().randint(0, 2**32 - 1)
+
+
+def random_words(seed: int, alphabet: str, min_len: int = 20) -> str:
+    """Deterministic-per-seed leading words, space-separated, drawn only
+    from *alphabet*. Same seed -> identical string; a different seed ->
+    a different one. Seeded with a plain int (never a str/tuple hash,
+    which PYTHONHASHSEED randomises per process) so --seed/TEST_SEED
+    actually reproduces a run.
+    """
+    rng = random.Random(seed)
+    out: list[str] = []
+    while len(out) < min_len:
+        if out:
+            out.append(" ")
+        out.extend(rng.choice(alphabet)
+                   for _ in range(rng.randint(*_WORD_LEN_RANGE)))
+    return "".join(out)
+
+
+def random_suffix(seed: int, alphabet: str, length: int = _SUFFIX_LEN) -> str:
+    """`length` random chars from *alphabet*, for a fixed-format marker
+    suffix (e.g. ``END <8 random chars>``) that a hardcoded prior-run
+    string cannot satisfy."""
+    rng = random.Random(seed)
+    return "".join(rng.choice(alphabet) for _ in range(length))
+
+
+def _random_filler(rng: random.Random, alphabet: str, length: int) -> str:
+    """Exactly *length* chars shaped as random space-separated words."""
+    out: list[str] = []
+    while len(out) < length:
+        if out:
+            out.append(" ")
+        out.extend(rng.choice(alphabet)
+                   for _ in range(rng.randint(*_WORD_LEN_RANGE)))
+    return "".join(out[:length])
+
+
 def _sized(marker: str, tail: str) -> str:
     """WIRE_MSG_LEN pads a marker with filler to that many chars (832 =
     MSG_TEXT_MAX drives the full-size tunnel path); unset keeps it short."""
@@ -64,7 +132,29 @@ def _sized(marker: str, tail: str) -> str:
     body = (filler * (n // len(filler) + 1))[: n - len(marker) - len(tail) - 2]
     return f"{marker} {body} {tail}"
 
-MARKER_C64 = _sized("ZEBRA QUARTZ ONE TWO THREE", "END ZEBRA")
+
+def _build_marker_c64(seed: int) -> str:
+    """Keyboard-typed message (section 1): random leading words plus a
+    fixed-format END suffix carrying 8 random chars, so neither half can
+    be satisfied by a string a previous run already used. WIRE_MSG_LEN
+    still pads with additional random filler when set, matching the
+    historical full-size-tunnel-path knob.
+    """
+    words = random_words(seed + 1, REQUEST_ALPHABET)
+    suffix = random_suffix(seed + 2, REQUEST_ALPHABET)
+    marker = f"{words} END {suffix}"
+    n = int(_os.environ.get("WIRE_MSG_LEN", "0"))
+    if n <= len(marker) + 1:
+        return marker
+    pad_rng = random.Random(seed + 3)
+    body = _random_filler(pad_rng, REQUEST_ALPHABET, n - len(marker) - 1)
+    return f"{marker} {body}"
+
+
+# Placeholder until main() resolves the seed and calls _build_marker_c64;
+# build_probe()'s inner `probe()` reads this as a module global at call
+# time, which is after main() has set it.
+MARKER_C64: str | None = None
 MARKER_HOST = _sized("QUASAR EIGHT NINE SIXTY", "END QUASAR")
 MARKER_TAMPER = "MUTANT PACKET SHOULD NOT APPEAR"
 
@@ -101,19 +191,28 @@ def partition_outbound_sizes(text_max: int, sizes=OUTBOUND_TEXT_SIZES):
 INBOUND_WINDOW = 4.0    # seconds for the C64 to poll, decrypt and print
 
 
-def _sized_text(prefix: str, n: int) -> str:
-    """Exactly n chars: a per-size prefix, filler, and a unique 40-char tail.
+def _sized_text(prefix: str, n: int, seed: int, alphabet: str) -> str:
+    """Exactly n chars: random leading words, then a fixed-format END tail
+    carrying the size plus 8 random chars from *alphabet* (e.g. ``END 0888
+    QDXKMZLR``) so neither the body nor the tail can be satisfied by a
+    string a previous run already used. Deterministic per (seed, n,
+    prefix) via plain-int seeding, so --seed/TEST_SEED reproduces a run.
 
     The tail is what the screen check looks for: a 1420-char message scrolls
     a 1000-char screen, so only its END can be expected to be visible.
+    Callers additionally assert the WHOLE text (random body + tail)
+    byte-for-byte, so the random part is checked for length AND content,
+    not merely presence.
     """
-    tail = f"END OF {n:04d} CHAR MESSAGE {prefix}".ljust(END_MARKER_LEN, "Z")
+    tag = 1 if prefix == "OUT" else 2
+    rng = random.Random((seed + n * 97 + tag * 7919) & 0xFFFFFFFF)
+    suffix = "".join(rng.choice(alphabet) for _ in range(_SUFFIX_LEN))
+    tail = f"END {n:04d} {suffix}".ljust(END_MARKER_LEN, "Z")
     assert len(tail) == END_MARKER_LEN
     head = f"{prefix} SIZE {n:04d} "
-    filler = "THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG "
     body_len = n - len(head) - len(tail)
     assert body_len >= 0, f"{n} is too short for the markers"
-    body = (filler * (body_len // len(filler) + 1))[:body_len]
+    body = _random_filler(rng, alphabet, body_len)
     text = head + body + tail
     assert len(text) == n
     return text
@@ -250,7 +349,7 @@ def build_probe():
                   f"(not a claim of the {'chunked' if has_chunk else 'plain'}"
                   f" build)", flush=True)
         for n in run_sizes:
-            text = _sized_text("OUT", n)
+            text = _sized_text("OUT", n, SEED, REQUEST_ALPHABET)
             tail = text[-END_MARKER_LEN:]
             expect_dgram = n + OUTBOUND_OVERHEAD
             base_w, base_s = len(tap.datagrams), len(seen)
@@ -355,7 +454,7 @@ def build_probe():
         # so the previous message's length can never satisfy this one's.
         tp_len_addr = L["tp_payload_len"]
         for n in INBOUND_TEXT_SIZES:
-            text = _sized_text("IN", n)
+            text = _sized_text("IN", n, SEED, REPLY_ALPHABET)
             tail = text[-END_MARKER_LEN:]
             pkt = responder.encrypt_transport(ascii_to_petscii(text))
             check(len(pkt) == n + T4_HDR_LEN + 16,
@@ -412,10 +511,19 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--host", default=os.environ.get("U64_HOST"))
     p.add_argument("--turbo", type=int, default=48)
+    p.add_argument("--seed", type=int, default=None,
+                   help="Reproduce a prior run's randomised messages "
+                        "(else TEST_SEED env, else a fresh random seed)")
     args = p.parse_args()
     if not args.host:
         print("ERROR: pass --host <ip> or set U64_HOST", file=sys.stderr)
         return 2
+
+    global SEED, MARKER_C64
+    SEED = resolve_seed(args.seed)
+    print(f"Random seed: {SEED} (reproduce with --seed {SEED} or "
+          f"TEST_SEED={SEED})", flush=True)
+    MARKER_C64 = _build_marker_c64(SEED)
 
     os.environ.setdefault("U64_ALLOW_MUTATE", "1")
     import test_uci_handshake_live as live
