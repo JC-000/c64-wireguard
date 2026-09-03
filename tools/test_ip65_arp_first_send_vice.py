@@ -1159,11 +1159,33 @@ def main() -> int:
                 else:
                     probe = (bytes(rng.randrange(0x80, 0x100)
                                    for _ in range(28)) + b"MIDP")
-                    # Warm the HOST's ARP for the C64 first. Otherwise the
-                    # probe is the packet that triggers the host's own ARP
-                    # resolution and can leave late, after the send has
-                    # already returned — the window is only ~0.35 s wide.
-                    ping_silent(c64)
+                    # Warm the HOST's ARP for the C64 — and it has to be
+                    # done WHILE THE C64 IS EXECUTING. Under jsr() takeover
+                    # the 6510 is halted between monitor commands, so a ping
+                    # sent at any other moment is never answered: ip65 is
+                    # polled, and nothing polls while the machine is stopped.
+                    # Measured: with the probe socket bound, an unwarmed
+                    # send fails outright with EHOSTUNREACH; unbound, it is
+                    # silently queued behind an ARP that resolves after the
+                    # send window has closed. Either way the counter goes
+                    # unexercised. So: ping from a thread while the main
+                    # thread runs net_poll, which is the only window in
+                    # which the C64 can answer.
+                    warm = threading.Thread(
+                        target=subprocess.run,
+                        args=(["ping", "-c", "4", "-i", "0.3", "-W", "400",
+                               c64],),
+                        kwargs={"capture_output": True}, daemon=True)
+                    warm.start()
+                    pump(tr, L, calls=250)
+                    warm.join(timeout=5.0)
+                    if not arp_known(c64):
+                        log(f"  note: the host still has no MAC for {c64} "
+                            "after warming during a net_poll burst — the "
+                            "probe cannot be delivered inside the window and "
+                            "the counter will go unasserted")
+                    else:
+                        log(f"  host ARP warm for {c64}")
                     mark_probe = len(tap.matching(host_ip, c64, listen_port))
                     injector = MidPumpSender(c64, listen_port,
                                              args.budget * 0.2, probe,
