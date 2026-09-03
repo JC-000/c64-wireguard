@@ -10,7 +10,7 @@ WireGuard Noise protocol implementation for the Commodore 64, written in 6502 as
 
 **The wire is verified encrypted, by assertion rather than inference (2026-08-17).** [`tools/test_wire_encryption_live.py`](tools/test_wire_encryption_live.py) passes 9/9 on hardware: the plaintext is absent from real datagrams in both directions, identical plaintext yields different ciphertext with an advancing counter, and the C64 rejects a packet with one flipped ciphertext bit while the session survives the rejection. See [Verifying encryption on the wire](#verifying-encryption-on-the-wire) — including what is cleartext by design, and the control-plane caveat.
 
-**v1.1.0 is being prepared** (`docs/RELEASE_NOTES_v1.1.0.md`): adds the standard-MTU `wireguard-uci-*-mtu1440.prg` variants and a `wireguard-mtu1440.d64`. All `wireguard-uci-*` PRGs require Ultimate firmware 3.15 or newer, which as of 2026-09-03 is not a public release (U64/U64E: preview/test-merge builds only; C64 Ultimate firmware line: untested); the `*-mtu1440` PRGs additionally need the `WRITE_SOCKET_CHUNK` command from [GideonZ/1541ultimate#807](https://github.com/GideonZ/1541ultimate/issues/807) (open issue, unmerged) — see the warning below. `wireguard-rrnet-*` PRGs need no Ultimate firmware (RR-Net/ip65; VICE-verified only since PR #83). **[v1.0.0](https://github.com/JC-000/c64-wireguard/releases/tag/v1.0.0) was the first tagged release** (2026-07-28): ready-to-run `.prg` and `.d64` artifacts for both network backends in REU and stock-C64 (no-REU) variants. The released UCI/REU build repeated the full handshake + bidirectional transport on hardware post-tag (`docs/RELEASE_NOTES_v1.0.0.md` §Verification).
+**v1.1.0 is being prepared** (`docs/RELEASE_NOTES_v1.1.0.md`): it repairs the RR-Net (ip65) backend, which had never completed a handshake with a real peer, and adds the standard-MTU `wireguard-uci-*-mtu1440.prg` variants and a `wireguard-mtu1440.d64`. All `wireguard-uci-*` PRGs require Ultimate firmware 3.15 or newer, which as of 2026-09-03 is not a public release (U64/U64E: preview/test-merge builds only; C64 Ultimate firmware line: untested); the `*-mtu1440` PRGs additionally need the `WRITE_SOCKET_CHUNK` command from [GideonZ/1541ultimate#807](https://github.com/GideonZ/1541ultimate/issues/807) (open issue, unmerged) — see the warning below. `wireguard-rrnet-*` PRGs need no Ultimate firmware at all. **[v1.0.0](https://github.com/JC-000/c64-wireguard/releases/tag/v1.0.0) was the first tagged release** (2026-07-28): ready-to-run `.prg` and `.d64` artifacts for both network backends in REU and stock-C64 (no-REU) variants. The released UCI/REU build repeated the full handshake + bidirectional transport on hardware post-tag (`docs/RELEASE_NOTES_v1.0.0.md` §Verification).
 
 The shipped build links the sibling crypto libraries [c64-x25519](https://github.com/JC-000/c64-x25519) (v0.11.2) and [c64-ChaCha20-Poly1305](https://github.com/JC-000/c64-ChaCha20-Poly1305) (v0.9.0) as archives per the [c64-lib-contract](https://github.com/JC-000/c64-lib-contract) conventions — every reachable multiply on the X25519 and Poly1305 paths is the contract's constant-time `ct_mul_8x8` body. The in-tree crypto remains available behind `USE_*_SIBLING=0` as a legacy/dev configuration.
 
@@ -24,15 +24,17 @@ The shipped build links the sibling crypto libraries [c64-x25519](https://github
 
 **Timestamps now monotonic** — [#87](https://github.com/JC-000/c64-wireguard/issues/87) is fixed (PR [#115](https://github.com/JC-000/c64-wireguard/pull/115)): Type-1 TAI64N timestamps strictly increase across initiations, and the bench responder enforces the greatest-seen rule. Persistence of the counter across a power cycle / fresh load is still open.
 
-> **⚠️ Firmware requirement for UCI builds.** All `wireguard-uci-*` PRGs need Ultimate firmware 3.15 or newer, which as of 2026-09-03 is **not a public release** (U64/U64E: preview/test-merge builds only; C64 Ultimate firmware line: untested). The `*-mtu1440` PRGs additionally require the `WRITE_SOCKET_CHUNK` command from [GideonZ/1541ultimate#807](https://github.com/GideonZ/1541ultimate/issues/807) (open issue, unmerged). On any released firmware, a chunked build's first send — the Type-1 handshake — is expected to fail: the screen shows `HANDSHAKE SEND FAILED` with no error code, though `net_last_error` is `$8E`; the code is visible only over DMA or on the 'S' message path ([#116](https://github.com/JC-000/c64-wireguard/issues/116)). This has never been observed on hardware — our rig runs the #807 spike. `wireguard-rrnet-*` PRGs need no Ultimate firmware at all (RR-Net/ip65; VICE-verified only since PR #83).
+> **⚠️ Firmware requirement for UCI builds.** All `wireguard-uci-*` PRGs need Ultimate firmware 3.15 or newer, which as of 2026-09-03 is **not a public release** (U64/U64E: preview/test-merge builds only; C64 Ultimate firmware line: untested). The `*-mtu1440` PRGs additionally require the `WRITE_SOCKET_CHUNK` command from [GideonZ/1541ultimate#807](https://github.com/GideonZ/1541ultimate/issues/807) (open issue, unmerged). On any released firmware, a chunked build's first send — the Type-1 handshake — is expected to fail: the screen shows `HANDSHAKE SEND FAILED` with no error code, though `net_last_error` is `$8E`; the code is visible only over DMA or on the 'S' message path ([#116](https://github.com/JC-000/c64-wireguard/issues/116)). This has never been observed on hardware — our rig runs the #807 spike. `wireguard-rrnet-*` PRGs need no Ultimate firmware at all (RR-Net/ip65).
 
 Still-open caveats:
 
 - [#113](https://github.com/JC-000/c64-wireguard/issues/113) — the default build's message port reaches the wire as 3879, not the documented 9999.
 - [#69](https://github.com/JC-000/c64-wireguard/issues/69) — the REU build fails the handshake at 48 MHz on fw 3.15; use `REU=0` for hardware.
-- [#80](https://github.com/JC-000/c64-wireguard/issues/80) — RR-Net/ip65 builds overwrite application code; shipped `wireguard-rrnet-*.prg` artifacts are untrustworthy as built.
+- [#121](https://github.com/JC-000/c64-wireguard/issues/121) — a hardware-only suite sat dead at module load since a rename earlier in this release; repaired, but not yet re-run on a U64E. Found by the new gate-wide import guard (`tools/test_suite_imports.py`), which imports every `tools/test_*.py` and fails on a missing name.
+- [#123](https://github.com/JC-000/c64-wireguard/issues/123) — `ip65_recv_dropped`'s increment path has never executed on any target; only its zero case is asserted.
 - [#104](https://github.com/JC-000/c64-wireguard/issues/104) — the constant-time invariant (`CRYPTO_BSS` alignment) is unenforced; nothing catches a regression.
 - [#106](https://github.com/JC-000/c64-wireguard/issues/106) — a forged cookie reply in `HS_SENT` still buys an attacker three X25519 scalarmults per 64-byte packet.
+- [#98](https://github.com/JC-000/c64-wireguard/issues/98) — `test_wire_encryption_live`'s default invocation is the exact REU + 48 MHz combination #69 says is broken; pass `REU=0` explicitly at turbo.
 
 Development-phase history (per-suite test counts have drifted since; `tools/run_regression.py` reports current totals):
 
@@ -61,6 +63,7 @@ make                 # ip65/RR-Net backend, REU profile, sibling crypto (default
 make BACKEND=uci     # Ultimate 64 / C64U UCI backend instead of ip65
 make REU=0           # no-REU build (x25519 onchip profile) — FASTEST on turbo hardware
 make BACKEND=uci UCI_CHUNKED_WRITE=1   # chunked send, MTU 1440 — needs #807 spike firmware
+make WG_MTU1440=1                      # ip65, MTU 1440 — opt-in, RR-Net unmeasured at 1472 (#80)
 make release         # all 4 PRG variants + 2 D64 images + SHA256SUMS in build/release/
 make run             # build and launch in VICE (x64sc)
 make clean
@@ -73,6 +76,7 @@ Build knobs (combine freely):
 | `BACKEND` | `ip65` (default) / `uci` | RR-Net via ip65 blob, or Ultimate Command Interface ($DF1B-$DF1F) |
 | `REU` | `1` (default) / `0` | `1`: REU-DMA multiply tables (banks 0,1,3,4,5; ~4.3 min/scalarmult at 1 MHz). `0`: constant-time on-chip multiply, zero REU use anywhere (~7.3 min/scalarmult at 1 MHz). **Which is faster inverts with clock speed — `REU=0` wins on turbo hardware. See [Performance](#performance).** |
 | `UCI_CHUNKED_WRITE` | `0` (default) / `1` | **Requires `BACKEND=uci`** (an ip65 build with this set is a make error). `1`: every send uses the firmware's `$16` `WRITE_SOCKET_CHUNK` command instead of plain `SOCKET_WRITE`, raising `NET_UDP_SEND_MAX`/`WG_MTU` from 892/860 to 1472/1440. Needs a device running the [GideonZ/1541ultimate#807](https://github.com/GideonZ/1541ultimate/issues/807) spike firmware — stock 3.15 (itself not a public release as of 2026-09-03) answers `$16` with `21,UNKNOWN COMMAND`, mapped to `$8E`; on screen that is `HANDSHAKE SEND FAILED` with no code (#116). See [Tunnel MTU](#tunnel-mtu). |
+| `WG_MTU1440` | `0` (default) / `1` | Generic opt-in that lifts `WG_DATAGRAM_CAP` from 892 to 1472 and the tunnel `WG_MTU` from 860 to 1440 for **either** backend; `0` keeps both backends byte-identical to a tree without the knob. Under `BACKEND=ip65` the flag alone suffices (ip65's caps are natively 1472/1472; the RR-Net path is unmeasured at 1472 and [#80](https://github.com/JC-000/c64-wireguard/issues/80) is open, hence opt-in). Under `BACKEND=uci` it must be paired with `UCI_CHUNKED_WRITE=1` — alone it is a make error, because plain `SOCKET_WRITE` caps sends at 892. RAM: the ip65 1472 build's `APP_BSS` ends at `$9E8B` with 371 B of `MAIN_AREA_HI` free (fits since `msg_input_buf` went in [#112](https://github.com/JC-000/c64-wireguard/pull/112)). See [Tunnel MTU](#tunnel-mtu). |
 | `USE_X25519_SIBLING` / `USE_CHACHA_SIBLING` | `1`/`1` (default) or `0`/`0` | Sibling archives vs legacy in-tree crypto. Must match — mixed configs are refused |
 | `MSG_PORT` | `9999` (default) / any 16-bit port | Compile-time UDP port for the chat/message path (`src/wg/data.s`), used by `src/wg/ip_build.s` as both src and dst port of the inner tunnel packet. Only meaningful for interop testing against a real peer that expects a specific port (e.g. `53` for DNS — see [Real-peer interop](#real-peer-interop-cloudflare-warp)). Default `9999` is not passed to ca65 at all, so an unadorned build is byte-identical to a tree without this knob. **The untouched default's on-wire port is actually 3879, not 9999 — [#113](https://github.com/JC-000/c64-wireguard/issues/113); not fixed here, see the caveat below.** |
 
@@ -467,9 +471,13 @@ wgcf register --accept-tos && wgcf generate      # writes wgcf-profile.conf
 ```bash
 make BACKEND=uci REU=0 UCI_CHUNKED_WRITE=1                                # build/, msg_port 9999 (wire port 3879 — #113)
 make BACKEND=uci REU=0 UCI_CHUNKED_WRITE=1 MSG_PORT=53 \
-     BUILD_DIR=build_msgport53                                            # DNS stage, msg_port 53
+     BUILD_DIR=build_msgport53                                            # DNS stage, msg_port 53 (own tree + lib/, no clean needed)
 WARP_PROFILE=/path/to/wgcf-profile.conf U64_HOST=<device-ip> \
     python3 tools/test_warp_live.py                                       # 48 MHz
+# RR-Net (ip65) instead — MTU 1440 via the generic knob, DHCP at 1 MHz then turbo:
+make BACKEND=ip65 REU=0 WG_MTU1440=1
+make BACKEND=ip65 REU=0 WG_MTU1440=1 MSG_PORT=53 BUILD_DIR=build_msgport53
+WARP_PROFILE=... U64_HOST=<device-ip> python3 tools/test_warp_live.py --backend ip65
 ```
 
 Stage A/B handshakes against WARP on the first PRG, pings and messages `1.1.1.1` through the tunnel; Stage C loads the second, `MSG_PORT=53` PRG for a *fresh* handshake and rides it with two host-crafted DNS queries to `1.1.1.1:53`, checking the decrypted inbound reply's IP/UDP header and DNS transaction id/question section.

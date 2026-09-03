@@ -410,10 +410,16 @@ brew install wgcf wireguard-tools
 cd ~/somewhere-not-c64-wireguard && wgcf register --accept-tos && wgcf generate
 
 make BACKEND=uci REU=0 UCI_CHUNKED_WRITE=1
-make BACKEND=uci REU=0 UCI_CHUNKED_WRITE=1 MSG_PORT=53 BUILD_DIR=build_msgport53
+make BACKEND=uci REU=0 UCI_CHUNKED_WRITE=1 MSG_PORT=53 BUILD_DIR=build_msgport53   # own tree + lib/; do NOT `make clean` in between (it wipes build/)
 
 WARP_PROFILE=/path/to/wgcf-profile.conf U64_HOST=<device-ip> \
     python3 tools/test_warp_live.py
+
+# ip65 / RR-Net (issue #70): generic WG_MTU1440 knob, --backend ip65 (DHCP runs at 1 MHz, turbo after net_initialized)
+make BACKEND=ip65 REU=0 WG_MTU1440=1
+make BACKEND=ip65 REU=0 WG_MTU1440=1 MSG_PORT=53 BUILD_DIR=build_msgport53
+WARP_PROFILE=/path/to/wgcf-profile.conf U64_HOST=<device-ip> \
+    python3 tools/test_warp_live.py --backend ip65
 ```
 
 Expected stage output (2026-09-03, U64E, upstream test-merge `d33b7802` + the [#807](https://github.com/GideonZ/1541ultimate/issues/807) spike, reporting fw 3.15 / fpga 124 / core 1.4F):

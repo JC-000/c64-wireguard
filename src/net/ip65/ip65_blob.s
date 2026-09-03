@@ -36,6 +36,46 @@ ip65_blob_start:
 ip65_blob_end:
 
 ; =============================================================================
+; LOADER tail guard (issue #120) — a WARNING, not an error.
+;
+; This lives here because ip65_blob.s is assembled ONLY in ip65 builds; the
+; uci cfg lays LOADER out differently (it spills into NET_CODE via
+; LOADER_OVERFLOW), so this threshold is not meaningful there.
+;
+; LOADER is $0801-$1FFF and ends with LIB_X25519_DATA, which is align = $100
+; and $E00 long. That alignment is a cliff of exactly the shape the APP_CODE
+; one in contract_asserts.s guards, and nothing was watching it: #120's
+; BOOT_CODE growth pushed LIB_X25519_DATA from $1000 to $1100, which cost a
+; whole page of tail, not the bytes it grew by. Measured after that shift:
+;   BOOT_CODE       $080D-$0D4B
+;   CRYPTO_RODATA   $0D4C-$1036
+;   (align gap      $1037-$10FF = 201 B — the room BOOT_CODE can grow into
+;                   without moving anything)
+;   LIB_X25519_DATA $1100-$1EFF
+;   (tail           $1F00-$1FFF = 256 B)
+;
+; MEASURED, not derived, by padding BOOT_CODE and rebuilding: growth of
+; 0..201 B links silently; 202 B takes the page step and trips this warning;
+; 457 B is the last that links at all; 458 B is a hard ld65 area overflow.
+; So the warning fires 256 bytes before the link actually breaks. That is
+; deliberate runway, not an alarm on the last byte: at the page step
+; LIB_X25519_DATA moves to $1200 and ends at $1FFF EXACTLY, and what is left
+; is CRYPTO_RODATA drifting through that final page.
+;
+; MEASURE THIS ONLY AFTER FORCING A RELINK. `make` alone will happily leave
+; build/wireguard.prg untouched, and a sweep that does not delete net.o and
+; the PRG produces NON-MONOTONIC results — the warning appearing at 203 and
+; 205, vanishing at 208 and 210, returning at 212 — because ld65 never ran.
+; That is this project's standing staleness trap wearing a new hat. The
+; figures above come from a forced-relink sweep; an earlier hand measurement
+; that skipped it reported 454 / ~199 / warn-at-210, all three wrong.
+;
+; When you move the constant on purpose, re-measure the same way.
+; =============================================================================
+.import __LOADER_LAST__
+.assert __LOADER_LAST__ <= $1F00, ldwarning, "LOADER: LIB_X25519_DATA has taken its last page step; about 256 bytes of runway remain before LOADER overflows at $1FFF (measured: 457 B of BOOT_CODE growth links, 458 B does not)"
+
+; =============================================================================
 ; c64-lib-contract SPEC §13.7 — fixed-address blob footprint
 ;
 ; ip65 is a position-linked driver blob, not a relocatable §4 segment
@@ -48,10 +88,15 @@ ip65_blob_end:
 ; These live here rather than in a net_manifest.s because this is the
 ; translation unit that owns the `.incbin`, so BLOB_SIZE can be asserted
 ; against the bytes actually embedded without a cross-TU import. The §13.0
-; NET_BACKEND_FAMILIES half of the manifest is deliberately still absent —
-; the ip65 backend has no net_last_error channel, so a NET_FAMILY_CORE claim
-; would link green over an error surface that does not exist (see the
-; non-conformance note in src/net_abi.inc; blocked on c64-lib-contract#148).
+; NET_BACKEND_FAMILIES half of the manifest is deliberately still absent,
+; and now permanently so: §13 was retired wholesale at c64-lib-contract
+; v1.0.0 (text at `git show v0.17.1:SPEC.md`), which is what the families
+; bitmask and the manifest TU were for. Nothing external consumes such a
+; claim any more. Two of its facts are still worth recording where a reader
+; will look: this backend DOES have a net_last_error channel as of issue
+; #120 (src/net/ip65/net.s; codes registered in src/net_abi.inc), and it
+; still exports no net_local_ip, which is the one gap left in the lifecycle
+; surface — see the "NOT DECLARED HERE" note in src/net_abi.inc.
 ;
 ; Values are measured from OUR blob, NOT copied from SPEC §13.7's snippet —
 ; that snippet's $1B27 / $0F8C are c64-https's TCP-and-DNS build. Ours is a

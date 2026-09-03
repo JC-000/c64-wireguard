@@ -40,7 +40,12 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 LIB_ROOT="$PROJECT_ROOT/libs/chacha20poly1305"
-OUT_DIR="$PROJECT_ROOT/build/lib"
+# Archive output dir. The Makefile passes OUT_DIR=$(LIB_DIR) so a BUILD_DIR
+# override (e.g. BUILD_DIR=build_msgport53) links against an archive in ITS
+# OWN tree instead of build/lib — before this, every such build failed at
+# ld65 with "build_msgport53/lib/chacha20poly1305.a not found". Standalone runs keep
+# the historical default.
+OUT_DIR="${OUT_DIR:-$PROJECT_ROOT/build/lib}"
 ARCHIVE="$OUT_DIR/chacha20poly1305.a"
 
 DEFS='-D SHARED_SQTAB_INIT=1 -D SHARED_CT_MUL_8X8=1 -D POLY1305_MULTIPLY_ROLLED_OUTER=1 -D LIB_NO_BARE_EXPORTS=1'

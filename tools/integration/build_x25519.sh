@@ -51,7 +51,12 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 LIB_ROOT="$PROJECT_ROOT/libs/x25519"
-OUT_DIR="$PROJECT_ROOT/build/lib"
+# Archive output dir. The Makefile passes OUT_DIR=$(LIB_DIR) so a BUILD_DIR
+# override (e.g. BUILD_DIR=build_msgport53) links against an archive in ITS
+# OWN tree instead of build/lib — before this, every such build failed at
+# ld65 with "build_msgport53/lib/x25519.a not found". Standalone runs keep
+# the historical default.
+OUT_DIR="${OUT_DIR:-$PROJECT_ROOT/build/lib}"
 ARCHIVE="$OUT_DIR/x25519.a"
 
 PROFILE="${X25519_PROFILE:-default}"

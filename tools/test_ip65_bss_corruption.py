@@ -1,67 +1,58 @@
 #!/usr/bin/env python3
 """test_ip65_bss_corruption.py — issue #80: ip65's BSS overwrites our code.
 
-WHAT THIS PROVES
+WHAT THIS PROVED
 ================
 
-The vendored ip65 blob is linked with its BSS at ``$4000`` (see
-``ip65-build/ip65.cfg``: ``BSS: file = "", start = $4000, size = $2000``).
-Our own ip65-backend link script puts ``MAIN_AREA_LO`` at ``$32F0-$7FFF``
-and routes code and read-only data into it.  The two overlap.  ip65's
-``eth_inp`` / ``eth_outp`` frame buffers live in that BSS, so the moment
-the driver moves an ethernet frame it writes network bytes over
-application code — including part of the ChaCha20-Poly1305
-implementation the tunnel's encryption depends on.
+The vendored ip65 blob used to be linked with its BSS at ``$4000``
+(``ip65-build/ip65.cfg``), inside ``MAIN_AREA_LO`` ($32F0-$7FFF) on top of
+application code. ip65's ``eth_inp`` / ``eth_outp`` frame buffers live in
+that BSS, so the moment the driver moved an ethernet frame it wrote
+network bytes over the ChaCha20-Poly1305 implementation and the
+transport path. Measured on the ethernet VICE rig with this probe: ONE
+DHCP exchange overwrote 1017 bytes.
 
 Two memory maps in this repo (``README.md`` and the header comment of
 ``cfg/c64-wireguard-ip65.cfg``) claimed ip65's BSS lived at
-``$A000-$BFFF``.  #79 corrected the prose; this test measures the thing
+``$A000-$BFFF``. #79 corrected the prose; this test measured the thing
 the prose was hiding.
 
-METHOD
-======
+STATUS: #80 IS FIXED — the blob is relinked at $A000, the consumer cfg
+reserves IP65_BSS, and src/net/ip65/ip65_blob.s carries link-time asserts.
+There is therefore no loaded WG byte inside the blob's BSS to watch, and
+this runtime probe has nothing to measure. The separation is now asserted
+STRUCTURALLY, in the gate, by tools/test_ip65_bss_guard.py — which also
+reads the blob's own map (ip65-build/ip65-c64.map), the one input the
+link-time asserts cannot see. When this probe finds no overlap it defers
+to that guard and passes on its verdict rather than exiting FATAL as it
+did when the overlap was expected to exist.
+
+Should a relink ever put the blob's BSS back over loaded content, this
+probe becomes live again automatically: it derives the overlap from the
+maps, boots the PRG on the rig, presses 'I' and diffs RAM against the
+PRG after DHCP.
+
+METHOD (when there IS an overlap)
+=================================
 
 1. Derive the overlap from the two map files, never from constants here.
-   ``ip65-build/ip65-c64.map`` gives ip65's BSS extent; ``build/wireguard.map``
-   gives our segment layout; ``cfg/c64-wireguard-ip65.cfg`` gives each
-   segment's type so ``type = bss`` segments (legitimately written at
-   runtime) are excluded.  Hardcoding the numbers is exactly the failure
-   mode #80 is about — a memory map believed rather than measured.
 2. Take each surviving span's expected bytes from ``build/wireguard.prg``
-   itself.  The PRG is one contiguous stream (``$0801-$9FFF``, every
-   region ``fill = yes``), so address -> offset is
-   ``2 + addr - load_address`` and the post-LOAD contents of any loaded
-   address are known exactly.
-3. Boot the PRG under an ethernet-capable VICE with the RR-Net cart
-   active, wait for ``boot_ready``, and confirm every span still MATCHES
-   the PRG.  A baseline mismatch means something else is wrong and the
-   rest of the run would be meaningless, so that is a hard failure.
-4. Press ``I`` (``do_net_init`` -> ``net_init`` -> ip65 init + DHCP) so
-   the driver starts moving frames, wait for DHCP, then re-read and diff.
+   itself (one contiguous stream; address -> offset is
+   ``2 + addr - load_address``).
+3. Boot under an ethernet-capable VICE with the RR-Net cart, wait for
+   ``boot_ready``, confirm every span still MATCHES the PRG (a baseline
+   mismatch is a hard failure — the rest would be meaningless).
+4. Press ``I`` (``do_net_init`` -> ip65 init + DHCP), wait for
+   ``net_initialized``, re-read and diff.
 5. Assert NO span diverged.
-
-CURRENT STATUS: THIS TEST FAILS ON MASTER — that is the point.  It
-demonstrates #80 today and becomes the regression guard once the blob's
-BSS is relinked outside every WG-claimed region.  It is deliberately NOT
-in ``tools/run_regression.py``; a known-failing entry there would take
-the gate off 22/22.  Add it to the gate as part of fixing #80.
 
 RIG
 ===
 
-Needs the macOS feth/pcap rig (one privileged setup per boot, done
-outside this test) and an ethernet-capable ``x64sc``.  Stock macOS VICE
-gates the pcap rawnet driver on euid 0 and Homebrew's bottle is built
-without networking at all — it starts, serves the binary monitor and
-attaches no BPF device, so ethernet tests pass against dead silence
-(c64-test-harness#144).  ``$VICE_ETHERNET_BIN`` (or ``--vice-bin``) must
-name a build that can actually do it.  Every rig prerequisite is checked
-up front and a missing one SKIPs (exit 77) rather than failing
-confusingly.
-
-``warp`` MUST stay off: warp compresses ip65's DHCP retry budget below
-dnsmasq's OFFER latency and DHCP fails every time.  Runs are therefore
-honest-speed — budget ~25 s to boot and up to ~120 s for DHCP.
+tools/vice_eth_rig.py: the feth/pcap rig (one privileged setup per boot,
+done outside this test) and an ethernet-capable ``x64sc``
+(``$VICE_ETHERNET_BIN`` / ``--vice-bin``). Missing prerequisites SKIP
+(exit 77). ``warp`` stays off — warp breaks ip65's DHCP.
 
 Usage::
 
@@ -76,54 +67,23 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
-import stat
-import subprocess
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from c64_test_harness import Labels, ScreenGrid  # noqa: E402
-from c64_test_harness.backends.vice_binary import BinaryViceTransport  # noqa: E402
-from c64_test_harness.backends.vice_lifecycle import (  # noqa: E402
-    ViceConfig, ViceProcess, bpf_capture_available,
+from c64_test_harness import Labels  # noqa: E402
+from vice_eth_rig import (  # noqa: E402
+    CFG_PATH, DEFAULT_VICE_BIN, DHCP_TIMEOUT, IP65_MAP_PATH, LABELS_PATH,
+    PRG_PATH, WG_MAP_PATH, EthVice, assert_ip65_build, build_ip65, log,
+    parse_cfg_memory, parse_cfg_segment_types, parse_map_segments, press_key,
+    read_span, screen_text, skip_if_rig_down, wait_boot_ready,
+    wait_net_initialized,
 )
-from c64_test_harness.backends.vice_manager import PortAllocator  # noqa: E402
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PRG_PATH = os.path.join(PROJECT_ROOT, "build", "wireguard.prg")
-LABELS_PATH = os.path.join(PROJECT_ROOT, "build", "labels.txt")
-WG_MAP_PATH = os.path.join(PROJECT_ROOT, "build", "wireguard.map")
-IP65_MAP_PATH = os.path.join(PROJECT_ROOT, "ip65-build", "ip65-c64.map")
-CFG_PATH = os.path.join(PROJECT_ROOT, "cfg", "c64-wireguard-ip65.cfg")
-
-# The rig from c64-https' tools/rig-up-macos.sh: an feth pair, the host
-# on feth1, VICE's pcap driver on feth0, dnsmasq serving DHCP on feth1.
-HOST_IP = "10.0.65.1"
-ETH_IFACE = "feth0"
-DNSMASQ_PIDFILE = "/tmp/c64-rig-dnsmasq.pid"
-DEFAULT_VICE_BIN = os.path.expanduser("~/opt/vice-eth/bin/x64sc")
-
-# KERNAL keyboard queue — see tools/wg_c64_input.py for the full mechanics.
-# Bytes first, count last: the IRQ scan reads the count to decide whether
-# the queue is live.
-KBD_BUFFER = 0x0277
-KBD_COUNT = 0x00C6
-
-BOOT_TIMEOUT = 180.0
-DHCP_TIMEOUT = 120.0
 SETTLE_SECONDS = 10.0
 
-# do_net_init's own strings (src/wg/strings.s), matched on screen.
-NET_OK_NEEDLE = "LISTENING ON PORT"
-NET_FAIL_NEEDLES = ("NET INIT FAILED", "DHCP FAILED", "LISTEN FAILED")
-
 VERBOSE = False
-
-
-def log(msg: str) -> None:
-    print(msg, flush=True)
 
 
 def vlog(msg: str) -> None:
@@ -132,136 +92,8 @@ def vlog(msg: str) -> None:
 
 
 # ============================================================================
-# Rig preflight
-# ============================================================================
-
-def rig_problems(vice_bin: str) -> list[str]:
-    """Return missing-prerequisite messages; empty means the rig is up."""
-    problems: list[str] = []
-    if sys.platform != "darwin":
-        return ["not macOS — this rig is the feth/pcap one from "
-                "c64-https' tools/rig-up-macos.sh"]
-    if not os.path.exists(vice_bin):
-        problems.append(
-            f"{vice_bin} missing — an ethernet-capable x64sc is required "
-            "(stock macOS VICE gates pcap on euid 0; Homebrew's bottle has "
-            "networking compiled out entirely — c64-test-harness#144). "
-            "Set VICE_ETHERNET_BIN or pass --vice-bin.")
-    if not bpf_capture_available():
-        # Both nodes need world rw; the perms reset on reboot.
-        modes = []
-        for node in ("/dev/bpf0", "/dev/bpf1"):
-            try:
-                m = os.stat(node).st_mode
-                modes.append(f"{node} {'rw' if (m & stat.S_IROTH and m & stat.S_IWOTH) else 'not world-rw'}")
-            except FileNotFoundError:
-                modes.append(f"{node} missing")
-        problems.append("no usable /dev/bpf node (" + ", ".join(modes) + ")")
-    r = subprocess.run(["ifconfig", ETH_IFACE], capture_output=True, text=True)
-    if r.returncode != 0:
-        problems.append(f"{ETH_IFACE} missing")
-    r = subprocess.run(["ifconfig", "feth1"], capture_output=True, text=True)
-    if r.returncode != 0 or f"inet {HOST_IP} " not in r.stdout:
-        problems.append(f"feth1 missing or not at {HOST_IP}")
-    # Another VICE on feth0 is a hard conflict: every ip65 instance uses
-    # the same default MAC, so a leftover instance is a live duplicate-MAC
-    # node eating the DHCP traffic this test depends on. Other projects'
-    # x64sc processes NOT on feth0 share this bench — never touch those.
-    r = subprocess.run(["pgrep", "-fl", f"ethernetioif {ETH_IFACE}"],
-                       capture_output=True, text=True)
-    if r.stdout.strip():
-        problems.append(
-            f"another VICE is already attached to {ETH_IFACE} "
-            f"(duplicate-MAC conflict):\n      {r.stdout.strip()}")
-    try:
-        pid = int(open(DNSMASQ_PIDFILE).read().strip())
-        os.kill(pid, 0)
-    except PermissionError:
-        pass  # EPERM == the root-owned process exists; rig is up
-    except (OSError, ValueError):
-        problems.append(f"rig dnsmasq not running ({DNSMASQ_PIDFILE} "
-                        "stale or absent) — no DHCP server on the wire")
-    return problems
-
-
-# ============================================================================
 # Deriving the overlap from the build, not from constants
 # ============================================================================
-
-_SEG_ROW = re.compile(
-    r"^(\S+)\s+([0-9A-Fa-f]{6})\s+([0-9A-Fa-f]{6})\s+([0-9A-Fa-f]{6})\s")
-
-
-def parse_map_segments(path: str) -> dict[str, tuple[int, int]]:
-    """Parse an ld65 map's `Segment list:` into {name: (start, end)}.
-
-    `end` is inclusive, as printed.  Zero-size segments are dropped: ld65
-    prints them with end == start - 1 under the six-digit format, which
-    would otherwise read as a one-byte span.
-    """
-    out: dict[str, tuple[int, int]] = {}
-    with open(path) as fh:
-        lines = fh.read().splitlines()
-    try:
-        i = lines.index("Segment list:")
-    except ValueError:
-        raise RuntimeError(f"{path}: no 'Segment list:' section")
-    for line in lines[i + 1:]:
-        if line.startswith("Name") or line.startswith("---") or not line.strip():
-            if out and not line.strip():
-                break
-            continue
-        m = _SEG_ROW.match(line)
-        if not m:
-            break
-        name, start, end, size = m.group(1), int(m.group(2), 16), \
-            int(m.group(3), 16), int(m.group(4), 16)
-        if size:
-            out[name] = (start, end)
-    if not out:
-        raise RuntimeError(f"{path}: parsed no segments")
-    return out
-
-
-def parse_cfg_segment_types(path: str) -> dict[str, str]:
-    """{segment name: ld65 type} from the cfg's SEGMENTS block."""
-    text = open(path).read()
-    m = re.search(r"^SEGMENTS\s*\{(.*?)^\}", text, re.S | re.M)
-    if not m:
-        raise RuntimeError(f"{path}: no SEGMENTS block")
-    types: dict[str, str] = {}
-    for line in m.group(1).splitlines():
-        line = line.split("#", 1)[0].strip()
-        hit = re.match(r"(\w+)\s*:\s*(.*);", line)
-        if not hit:
-            continue
-        t = re.search(r"\btype\s*=\s*(\w+)", hit.group(2))
-        if t:
-            types[hit.group(1)] = t.group(1)
-    if not types:
-        raise RuntimeError(f"{path}: parsed no segment types")
-    return types
-
-
-def parse_cfg_memory(path: str) -> dict[str, tuple[int, int]]:
-    """{region: (start, end inclusive)} from the cfg's MEMORY block."""
-    text = open(path).read()
-    m = re.search(r"^MEMORY\s*\{(.*?)^\}", text, re.S | re.M)
-    if not m:
-        raise RuntimeError(f"{path}: no MEMORY block")
-    out: dict[str, tuple[int, int]] = {}
-    for line in m.group(1).splitlines():
-        line = line.split("#", 1)[0].strip()
-        hit = re.match(r"(\w+)\s*:\s*(.*);", line)
-        if not hit:
-            continue
-        s = re.search(r"\bstart\s*=\s*\$([0-9A-Fa-f]+)", hit.group(2))
-        z = re.search(r"\bsize\s*=\s*\$([0-9A-Fa-f]+)", hit.group(2))
-        if s and z:
-            start, size = int(s.group(1), 16), int(z.group(1), 16)
-            out[hit.group(1)] = (start, start + size - 1)
-    return out
-
 
 class Span:
     """One checkable overlap: a WG segment's intersection with ip65's BSS."""
@@ -318,79 +150,6 @@ def derive_spans() -> tuple[list[Span], tuple[int, int], dict]:
 
 
 # ============================================================================
-# VICE plumbing
-# ============================================================================
-
-def connect(port: int, proc: ViceProcess, timeout: float = 30.0) -> BinaryViceTransport:
-    deadline = time.monotonic() + timeout
-    last: Exception | None = None
-    while time.monotonic() < deadline:
-        try:
-            return BinaryViceTransport(port=port)
-        except Exception as e:  # noqa: BLE001
-            last = e
-            if proc._proc is not None and proc._proc.poll() is not None:
-                raise RuntimeError(
-                    f"VICE on port {port} exited early — is {proc.config.executable} "
-                    "really ethernet-capable?") from e
-            time.sleep(0.25)
-    raise RuntimeError(f"could not reach VICE's binary monitor on {port}: {last}")
-
-
-def wait_boot_ready(tr, labels: Labels, timeout: float) -> bool:
-    """Poll boot_ready, resuming between reads.
-
-    The binary monitor auto-pauses the CPU on every command, so a poll
-    loop that never resumes leaves the machine frozen and looks exactly
-    like a hang.  boot_ready (not the "Q=QUIT" banner) is the true
-    boot-complete marker — see tools/vice_util.py and issue #55.
-    """
-    addr = labels["boot_ready"]
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if tr.read_memory(addr, 1) == b"\x01":
-            return True
-        tr.resume()
-        time.sleep(1.0)
-    return False
-
-
-def press_key(tr, char: str, timeout: float = 15.0) -> bool:
-    """Type one key into the KERNAL queue, resuming between polls."""
-    def drained() -> bool:
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if tr.read_memory(KBD_COUNT, 1)[0] == 0:
-                return True
-            tr.resume()
-            time.sleep(0.1)
-        return False
-
-    if not drained():
-        return False
-    tr.write_memory(KBD_BUFFER, char.encode("ascii"))
-    tr.write_memory(KBD_COUNT, bytes([1]))
-    tr.resume()
-    return drained()
-
-
-def read_span(tr, start: int, end: int) -> bytes:
-    """Read [start, end] via DMA in monitor-friendly chunks."""
-    out = bytearray()
-    addr, remaining = start, end - start + 1
-    while remaining:
-        n = min(256, remaining)
-        out += tr.read_memory(addr, n)
-        addr += n
-        remaining -= n
-    return bytes(out)
-
-
-def screen_text(tr) -> str:
-    return ScreenGrid.from_transport(tr).continuous_text().upper()
-
-
-# ============================================================================
 # Comparison + reporting
 # ============================================================================
 
@@ -423,8 +182,6 @@ def report(spans: list[Span], result: dict, phase: str) -> int:
         chunk = slice(lo, min(len(s.expected), lo + 16))
         log(f"       PRG  ${s.start + lo:04X}: {s.expected[chunk].hex(' ')}")
         log(f"       RAM  ${s.start + lo:04X}: {got[chunk].hex(' ')}")
-        # The contiguous run containing the first divergence, so the
-        # report says how much of the segment went, not just where.
         runs, run_start, prev = [], bad[0], bad[0]
         for j in bad[1:]:
             if j != prev + 1:
@@ -437,34 +194,6 @@ def report(spans: list[Span], result: dict, phase: str) -> int:
         more = "" if len(runs) <= 6 else f" (+{len(runs) - 6} more)"
         log(f"       diverged ranges: {shown}{more}")
     return corrupted
-
-
-# ============================================================================
-# Build
-# ============================================================================
-
-def build_ip65() -> None:
-    if os.environ.get("C64_SKIP_BUILD"):
-        log("C64_SKIP_BUILD set — reusing build/wireguard.prg")
-        return
-    log("=== make clean && make BACKEND=ip65 ===")
-    for cmd in (["make", "clean"], ["make", "BACKEND=ip65"]):
-        r = subprocess.run(cmd, cwd=PROJECT_ROOT, capture_output=True, text=True)
-        if r.returncode != 0:
-            sys.stderr.write(r.stdout[-2000:])
-            sys.stderr.write(r.stderr[-2000:])
-            raise SystemExit(f"build failed: {' '.join(cmd)}")
-
-
-def assert_ip65_build() -> None:
-    """Refuse to run against a UCI build — the blob would not be linked in."""
-    with open(WG_MAP_PATH) as fh:
-        text = fh.read()
-    if "ip65_blob.o" not in text:
-        raise SystemExit(
-            "FATAL: build/wireguard.map has no ip65_blob.o — this is not a "
-            "BACKEND=ip65 build. Run `make clean && make BACKEND=ip65` (or "
-            "unset C64_SKIP_BUILD).")
 
 
 # ============================================================================
@@ -488,16 +217,7 @@ def main() -> int:
     log("test_ip65_bss_corruption.py — issue #80")
     log("")
 
-    problems = rig_problems(args.vice_bin)
-    if problems:
-        log("SKIP: ethernet rig not ready:")
-        for p in problems:
-            log(f"    - {p}")
-        log("  The rig needs one privileged setup per boot and is not created "
-            "here;")
-        log("  see c64-https' tools/rig-up-macos.sh (feth pair + dnsmasq + "
-            "bpf perms).")
-        return 77
+    skip_if_rig_down(args.vice_bin)
 
     build_ip65()
     for path in (PRG_PATH, LABELS_PATH, WG_MAP_PATH, IP65_MAP_PATH, CFG_PATH):
@@ -516,10 +236,23 @@ def main() -> int:
     log(f"  PRG image (build/wireguard.prg)      ${info['image'][0]:04X}-"
         f"${info['image'][1]:04X}")
     if not spans:
-        log("FATAL: no loaded WG segment overlaps ip65's BSS — nothing to "
-            "test. If the blob has been relinked, this test should be "
-            "rewritten to assert the separation at link time instead.")
-        return 1
+        # #80 is fixed: nothing of ours is loaded inside the blob's BSS, so
+        # there is nothing a runtime diff could catch. The separation is a
+        # link-level fact and tools/test_ip65_bss_guard.py asserts it (in
+        # the gate) from the blob's own map — run it here and pass on its
+        # verdict rather than calling an absence of overlap a FATAL.
+        log("  no loaded WG segment overlaps ip65's BSS — deferring to the "
+            "structural guard (tools/test_ip65_bss_guard.py)")
+        import test_ip65_bss_guard as guard
+        problems = guard.check_layout(*guard.measured_inputs())
+        if problems:
+            log("FAIL: the structural guard reports:")
+            for p in problems:
+                log(f"  - {p}")
+            return 1
+        log("PASS: link-level separation holds (blob BSS inside IP65_BSS, "
+            "disjoint from every WG segment); no runtime probe needed.")
+        return 0
     total = 0
     for s in spans:
         log(f"  checking {s.name:<26s} ${s.start:04X}-${s.end:04X}  "
@@ -532,47 +265,11 @@ def main() -> int:
     log("")
 
     labels = Labels.from_file(LABELS_PATH)
-
-    allocator = PortAllocator(port_range_start=6570, port_range_end=6590)
-    port = args.port or allocator.allocate()
-    if not args.port:
-        res = allocator.take_socket(port)
-        if res is not None:
-            res.close()
-
-    config = ViceConfig(
-        prg_path=PRG_PATH,
-        port=port,
-        # Load-bearing: warp compresses ip65's DHCP retry budget below
-        # dnsmasq's OFFER latency and DHCP fails every single time.
-        warp=False,
-        ntsc=True,
-        sound=False,
-        minimize=True,
-        ethernet=True,
-        ethernet_mode="rrnet",
-        ethernet_interface=ETH_IFACE,
-        ethernet_driver="pcap",
-        ethernet_executable=args.vice_bin,
-        # The BPF nodes are world-rw on this rig, so no sudo wrapper.
-        run_as_root=False,
-        # The default build is REU=1; boot's reu_mul_init needs the REU
-        # to be there or the tables are built from hardware that is not.
-        extra_args=["-reu", "-reusize", "512"],
-    )
-
-    proc = ViceProcess(config)
-    proc.start()
-    log(f"=== VICE pid={proc._proc.pid if proc._proc else '?'} port={port} "
-        f"iface={ETH_IFACE} (warp OFF) ===")
-
-    tr = None
-    rc = 1
     t0 = time.monotonic()
-    try:
-        tr = connect(port, proc)
-        if not wait_boot_ready(tr, labels, BOOT_TIMEOUT):
-            log(f"FATAL: boot_ready never set within {BOOT_TIMEOUT:.0f}s")
+    with EthVice(args.vice_bin, port=args.port) as vice:
+        tr = vice.tr
+        if not wait_boot_ready(tr, labels):
+            log("FATAL: boot_ready never set")
             log(screen_text(tr))
             return 1
         log(f"  boot complete (+{time.monotonic() - t0:.0f}s)")
@@ -597,27 +294,15 @@ def main() -> int:
         if not press_key(tr, "I"):
             log("FATAL: the C64 never consumed the keystroke")
             return 1
-        deadline = time.monotonic() + args.dhcp_timeout
-        outcome, text = None, ""
-        while time.monotonic() < deadline:
-            tr.resume()
-            time.sleep(2.0)
-            text = screen_text(tr)
-            if NET_OK_NEEDLE in text:
-                outcome = "ok"
-                break
-            hit = [n for n in NET_FAIL_NEEDLES if n in text]
-            if hit:
-                outcome = hit[0]
-                break
+        outcome, text = wait_net_initialized(tr, labels, args.dhcp_timeout)
         if outcome == "ok":
             log(f"  network up (+{time.monotonic() - t0:.0f}s): "
                 f"{text[text.find('NETWORK READY'):][:60].strip()}")
-        elif outcome:
-            log(f"  network init reported: {outcome}")
-        else:
+        elif outcome == "timeout":
             log(f"  network init neither succeeded nor reported failure "
                 f"within {args.dhcp_timeout:.0f}s")
+        else:
+            log(f"  network init reported: {outcome}")
         vlog(text)
 
         # ip65 keeps handling frames from main_loop's net_poll; give it a
@@ -641,30 +326,17 @@ def main() -> int:
             log(f"      across {corrupted} of {len(spans)} checked segments.")
             log("      ip65's frame buffers are writing over application "
                 "code — issue #80.")
-            log("      Expected until the blob's BSS is relinked outside "
-                "every WG-claimed region.")
-            rc = 1
-        elif outcome != "ok":
+            return 1
+        if outcome != "ok":
             log("INCONCLUSIVE (reported as FAIL): nothing was corrupted, but "
                 "network init did")
             log("      not complete either, so ip65 may never have moved a "
                 "frame. Check the rig")
             log("      (dnsmasq on feth1, no second VICE on feth0) and rerun.")
-            rc = 1
-        else:
-            log("PASS: DHCP completed and no loaded byte inside ip65's BSS "
-                "was disturbed.")
-            rc = 0
-        return rc
-    finally:
-        if tr is not None:
-            try:
-                tr.close()
-            except Exception:  # noqa: BLE001
-                pass
-        proc.stop()
-        if not args.port:
-            allocator.release(port)
+            return 1
+        log("PASS: DHCP completed and no loaded byte inside ip65's BSS "
+            "was disturbed.")
+        return 0
 
 
 if __name__ == "__main__":
