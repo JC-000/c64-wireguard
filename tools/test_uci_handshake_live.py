@@ -64,7 +64,7 @@ from test_uci_udp_echo_live import (  # noqa: E402
 from wg_responder.keys import generate_keypair  # noqa: E402
 from wg_responder.responder import (  # noqa: E402
     MSG_TYPE_INITIATION, MSG_TYPE_RESPONSE, MSG_TYPE_TRANSPORT,
-    T1_TOTAL, WireGuardResponder,
+    T1_TOTAL, TimestampReplayError, WireGuardResponder,
 )
 from wg_responder.server import (  # noqa: E402
     ascii_to_petscii, petscii_to_ascii, strip_tunnel_headers,
@@ -409,6 +409,18 @@ class _ResponderThread(threading.Thread):
     def _handle_type1(self, data: bytes, src: tuple[str, int]) -> None:
         try:
             type2 = self._responder.handle_initiation(data)
+        except TimestampReplayError as exc:
+            # Issue #87: the greatest-seen TAI64N rule, which every conformant
+            # WireGuard responder applies silently. Named here so a second
+            # initiation from the same C64 in one run (config-reload probe,
+            # wg_demo rekey, re-initiation after the 90 s deadline) reads as
+            # "the C64's timestamp did not advance" and not as a MAC/AEAD
+            # failure. No Type-2 is sent; the live session is left as it was.
+            log.error("responder: Type-1 REJECTED by the greatest-seen TAI64N "
+                      "rule (issue #87): %s", exc)
+            with self._lock:
+                self.last_error = f"type1: tai64n replay: {exc}"
+            return
         except Exception as exc:
             # Print the TYPE and repr, not just str(): the noise library
             # raises several validation failures with an empty message, so
