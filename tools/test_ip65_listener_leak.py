@@ -122,7 +122,7 @@ from c64_test_harness.backends.vice_lifecycle import (  # noqa: E402
 # /dev/bpf* is open"), so this import had been raising ImportError and this
 # suite could not start at all. Ask VICE's own gate instead.
 from vice_eth_rig import (  # noqa: E402
-    libpcap_node_note, vice_rawnet_problems,
+    libpcap_node_note, vice_holders, vice_rawnet_problems,
 )
 from c64_test_harness.backends.vice_manager import PortAllocator  # noqa: E402
 
@@ -188,35 +188,51 @@ def vlog(msg: str) -> None:
 # Rig preflight (same prerequisites as test_ip65_bss_corruption.py)
 # ============================================================================
 
-def rig_problems(vice_bin: str) -> list[str]:
+def rig_problems(vice_bin: str, iface: str = ETH_IFACE) -> list[str]:
+    """Prerequisites for whichever rig *iface* names.
+
+    Two shapes. ``feth0`` is the feth/dnsmasq rig from c64-https'
+    rig-up-macos.sh, which needs its host end at 10.0.65.1 and a dnsmasq
+    serving DHCP. Any other name is a REAL NIC in bridged mode: VICE binds
+    a libpcap interface by name, so the wired port IS the bridge, the C64
+    joins the real LAN and the router does DHCP — no feth1, no dnsmasq.
+    Nothing this suite measures (udp_cbcount, listen/close ownership) cares
+    which LAN it is on, and bridged is the rig that is actually up on this
+    bench, so hardcoding feth0 was the only thing keeping this suite
+    unrunnable here.
+    """
     problems: list[str] = []
     if sys.platform != "darwin":
-        return ["not macOS — this rig is the feth/pcap one from "
-                "c64-https' tools/rig-up-macos.sh"]
+        return ["not macOS — this suite drives VICE's pcap driver"]
     problems += vice_rawnet_problems(vice_bin)
     note = libpcap_node_note()
     if note:
         problems.append(note)
-    r = subprocess.run(["ifconfig", ETH_IFACE], capture_output=True, text=True)
+    r = subprocess.run(["ifconfig", iface], capture_output=True, text=True)
     if r.returncode != 0:
-        problems.append(f"{ETH_IFACE} missing")
-    r = subprocess.run(["ifconfig", "feth1"], capture_output=True, text=True)
-    if r.returncode != 0 or f"inet {HOST_IP} " not in r.stdout:
-        problems.append(f"feth1 missing or not at {HOST_IP}")
-    r = subprocess.run(["pgrep", "-fl", f"ethernetioif {ETH_IFACE}"],
-                       capture_output=True, text=True)
-    if r.stdout.strip():
+        problems.append(f"{iface} missing")
+    elif iface != ETH_IFACE and "status: active" not in r.stdout \
+            and "RUNNING" not in r.stdout:
+        problems.append(f"{iface} is down — bridged mode needs a live NIC "
+                        "on a LAN with a DHCP server")
+    holders = vice_holders(iface)
+    if holders:
         problems.append(
-            f"another VICE is already attached to {ETH_IFACE} "
-            f"(duplicate-MAC conflict):\n      {r.stdout.strip()}")
-    try:
-        pid = int(open(DNSMASQ_PIDFILE).read().strip())
-        os.kill(pid, 0)
-    except PermissionError:
-        pass
-    except (OSError, ValueError):
-        problems.append(f"rig dnsmasq not running ({DNSMASQ_PIDFILE} "
-                        "stale or absent) — no DHCP server on the wire")
+            f"another VICE is already attached to {iface} "
+            f"(duplicate-MAC conflict):\n      " + "\n      ".join(holders))
+    if iface == ETH_IFACE:
+        r = subprocess.run(["ifconfig", "feth1"], capture_output=True,
+                           text=True)
+        if r.returncode != 0 or f"inet {HOST_IP} " not in r.stdout:
+            problems.append(f"feth1 missing or not at {HOST_IP}")
+        try:
+            pid = int(open(DNSMASQ_PIDFILE).read().strip())
+            os.kill(pid, 0)
+        except PermissionError:
+            pass
+        except (OSError, ValueError):
+            problems.append(f"rig dnsmasq not running ({DNSMASQ_PIDFILE} "
+                            "stale or absent) — no DHCP server on the wire")
     return problems
 
 
@@ -662,6 +678,12 @@ def main() -> int:
     ap.add_argument("--vice-bin", default=os.environ.get(
         "VICE_ETHERNET_BIN", DEFAULT_VICE_BIN))
     ap.add_argument("--port", type=int, default=0)
+    ap.add_argument("--iface", default=os.environ.get("C64_ETH_IFACE",
+                                                      ETH_IFACE),
+                    help="NIC VICE binds by pcap name. feth0 (default) is "
+                         "the feth/dnsmasq rig; a real NIC such as en4 is "
+                         "BRIDGED mode, where the C64 joins the real LAN and "
+                         "the router does DHCP.")
     ap.add_argument("--rounds", type=int, default=5,
                     help="cycle A rounds (default 5, > udp_cbmax)")
     ap.add_argument("--dhcp-timeout", type=float, default=DHCP_TIMEOUT)
@@ -671,7 +693,7 @@ def main() -> int:
     log("test_ip65_listener_leak.py — issue #84")
     log("")
 
-    problems = rig_problems(args.vice_bin)
+    problems = rig_problems(args.vice_bin, args.iface)
     if problems:
         log("SKIP: ethernet rig not ready:")
         for p in problems:
@@ -740,7 +762,7 @@ def main() -> int:
         minimize=True,
         ethernet=True,
         ethernet_mode="rrnet",
-        ethernet_interface=ETH_IFACE,
+        ethernet_interface=args.iface,
         ethernet_driver="pcap",
         ethernet_executable=args.vice_bin,
         run_as_root=False,
@@ -750,7 +772,7 @@ def main() -> int:
     proc = ViceProcess(config)
     proc.start()
     log(f"=== VICE pid={proc._proc.pid if proc._proc else '?'} port={port} "
-        f"iface={ETH_IFACE} (warp OFF) ===")
+        f"iface={args.iface} (warp OFF) ===")
 
     tr = None
     rc = 1
