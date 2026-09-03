@@ -74,14 +74,27 @@ probed rather than assumed so the unfixed tree simply reports them SKIPPED:
   ip65_send_pump       must read 0 after every net_udp_send returns, the
                        give-up path included; a leaked flag silently deafens
                        the receive callback.
+  ip65_recv_dropped    inbound datagrams discarded during a pump. 0 on the
+                       happy path, where nothing is aimed at the C64; and
+                       NON-ZERO in the budget phase, where one datagram is
+                       deliberately landed inside the pump window. That
+                       counter exists so the cost of the inbound disarm is
+                       observable, so a suite that never moved it would
+                       leave the design unproven.
 
-RANDOMISED PER RUN (seeded, logged): the payload bytes and length, and the
-UDP source port. ``--seed`` / ``TEST_SEED`` reproduce a run.
+net_init must also clear ip65_send_attempts. Checked last, because
+re-running net_init tears the stack down, and only after asserting the
+counter was non-zero going in — a reset from 0 to 0 proves nothing.
 
-NOTHING IS SENT AT THE C64 while a send is in flight, deliberately: the
-retry loop's pump drops inbound UDP (the caller may still be holding
-udp_recv_buf), so a suite that echoed into a budget window would be
-measuring a documented design decision and calling it a regression.
+RANDOMISED PER RUN (seeded, logged): the payload bytes and length, the UDP
+source port, and the mid-pump probe's bytes (a disjoint high alphabet).
+``--seed`` / ``TEST_SEED`` reproduce a run.
+
+THE ONLY THING SENT AT THE C64 is that one mid-pump probe, and only in the
+budget phase. It is aimed at ip65_listen_port read from the adapter, never
+at an assumed port, and the assertion is made only when the host's send
+timestamp actually falls inside the call: if it lands late, the run says
+so and does not assert.
 
 WHAT THIS CANNOT COVER: nothing here is UCI. VICE has no Ultimate command
 interface ($DF1D reads $FF), so the ip65 backend is the only one this
@@ -96,9 +109,11 @@ import hashlib
 import os
 import random
 import re
+import socket
 import struct
 import subprocess
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -106,8 +121,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from c64_test_harness import Labels, jsr, read_bytes, write_bytes  # noqa: E402
 from vice_eth_rig import (  # noqa: E402
     DEFAULT_VICE_BIN, IP65_MAP_PATH, LABELS_PATH, PRG_PATH, SKIP_EXIT,
-    EthVice, Tap, assert_ip65_build, boot_and_net_init, bpf_capture_available,
-    build_ip65, c64_ip, log, parse_map_exports, selftest_classifier,
+    EthVice, Tap, assert_ip65_build, boot_and_net_init, build_ip65, c64_ip,
+    libpcap_node_note, log, parse_map_exports, selftest_classifier,
+    selftest_map_parsers, vice_holders, vice_rawnet_problems,
 )
 
 # Cloudflare WARP, the endpoint issue #120 was measured against. Any
@@ -117,7 +133,11 @@ from vice_eth_rig import (  # noqa: E402
 DEFAULT_DEST = "162.159.192.1:2408"
 
 DEFAULT_IFACE = "en4"
-DEFAULT_BUDGET = 2.0          # the ~2 s the issue proposes for the retry
+# 30 jiffies ~= 0.5 s, the budget after adversarial review. arp_lookup
+# retransmits every 100 ms, so 0.5 s still covers five attempts, and it cuts
+# the inbound-deafness window fourfold on the eviction path where Type 4
+# loss actually bites. The issue's original ~2 s is superseded.
+DEFAULT_BUDGET = 0.5
 
 # Scratch past jsr()'s own $0334 trampoline and below screen RAM, matching
 # tools/test_ip65_udp_echo_vice.py so the two suites cannot collide.
@@ -134,6 +154,10 @@ ARP_ROW_LEN = 10              # 6 MAC + 4 IP; ac_mac = 0, ac_ip = 6
 # asserting a stale value.
 NET_ERR_TIMEBASE_STOPPED = 0x01
 NET_ERR_IP65_WAIT_TIMEOUT = 0x48
+# Defined and exported so a redefinition is a hard assembler error, but
+# deliberately never emitted. Seeing it in net_last_error is a bug in the
+# adapter, not an expected value.
+NET_ERR_IP65_UDP_SEND = 0x47
 
 WIRE_SETTLE = 2.0
 POLL_CALLS = 120              # net_poll calls used to pump one ARP exchange
@@ -251,15 +275,13 @@ def bridged_rig_problems(vice_bin: str, iface: str) -> list[str]:
     problems: list[str] = []
     if sys.platform != "darwin":
         return ["not macOS — this suite drives VICE's pcap driver on a real NIC"]
-    if not os.path.exists(vice_bin):
-        problems.append(
-            f"{vice_bin} missing — an ethernet-capable x64sc is required "
-            "(stock macOS VICE gates pcap on euid 0; Homebrew's bottle has "
-            "networking compiled out — c64-test-harness#144). Set "
-            "VICE_ETHERNET_BIN or pass --vice-bin.")
-    if not bpf_capture_available():
-        problems.append("/dev/bpf0 or /dev/bpf1 is not world read-write — "
-                        "VICE cannot open a pcap handle unelevated")
+    # VICE's own gate — a rawnet-capable binary and archdep_rawnet_capability
+    # — not libpcap's /dev/bpf* permissions. See vice_rawnet_problems for why
+    # the difference matters (harness c3fe7aa).
+    problems += vice_rawnet_problems(vice_bin, "pcap")
+    note = libpcap_node_note()
+    if note:
+        problems.append(note)
     inet = iface_inet(iface)
     if inet is None:
         problems.append(f"{iface} is missing, down, or has no IPv4 address — "
@@ -271,16 +293,7 @@ def bridged_rig_problems(vice_bin: str, iface: str) -> list[str]:
     # wait loop matches itself, and this preflight then reports a busy rig
     # against a rig that is idle (measured while writing this suite). Require
     # an x64sc binary in argv[0] and drop our own process tree.
-    r = subprocess.run(["pgrep", "-fl", f"ethernetioif {iface}"],
-                       capture_output=True, text=True)
-    holders = []
-    for line in r.stdout.splitlines():
-        pid, _, cmd = line.partition(" ")
-        if not pid.isdigit() or int(pid) == os.getpid():
-            continue
-        if os.path.basename(cmd.split()[0] if cmd.split() else "") \
-                .startswith("x64"):
-            holders.append(line)
+    holders = vice_holders(iface)
     if holders:
         problems.append(
             f"another VICE is already attached to {iface} (every ip65 "
@@ -398,6 +411,176 @@ def equate_from_sources(name: str) -> int | None:
 def opt_byte(tr, L, name: str) -> int | None:
     """One byte at an OPTIONAL label — None when the build does not export it."""
     return read_bytes(tr, L[name], 1)[0] if name in L else None
+
+
+class PayloadTap:
+    """tcpdump writing a pcap stream, parsed down to UDP payload BYTES.
+
+    Counting datagrams is not enough here. ip65/ip.s:322 destroys the
+    outbound frame while it does the ARP lookup, which is precisely why the
+    fix has to REBUILD the packet rather than resume into the half-built
+    one. A resume-based fix would put a datagram of the right length on the
+    wire carrying corrupt bytes, and every presence-and-length check would
+    stay green. So the payload is compared byte for byte against what was
+    staged in udp_recv_buf.
+
+    Deliberately a second capture rather than a change to the shared text
+    Tap: that one's classifier is proven against real line shapes and is
+    what the counting and fragment arms rest on.
+    """
+
+    _GLOBAL = 24
+    _REC = 16
+
+    def __init__(self, bpf_filter: str, iface: str):
+        self.filter = bpf_filter
+        self.iface = iface
+        self.payloads: list[tuple[str, int, str, int, bytes]] = []
+        self._lock = threading.Lock()
+        self._proc: subprocess.Popen | None = None
+        self._buf = b""
+        self._endian = "<"
+        self._have_global = False
+
+    def __enter__(self) -> "PayloadTap":
+        self._proc = subprocess.Popen(
+            ["tcpdump", "-i", self.iface, "-n", "-U", "-s", "0", "-w", "-",
+             self.filter],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        threading.Thread(target=self._pump, daemon=True).start()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            line = self._proc.stderr.readline().decode("utf8", "replace")
+            if "listening on" in line:
+                return self
+            if not line and self._proc.poll() is not None:
+                break
+        raise RuntimeError(f"payload tcpdump did not start on {self.iface}")
+
+    def __exit__(self, *exc) -> None:
+        if self._proc is not None:
+            self._proc.terminate()
+            try:
+                self._proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+
+    def _pump(self) -> None:
+        assert self._proc is not None and self._proc.stdout is not None
+        while True:
+            chunk = self._proc.stdout.read(4096)
+            if not chunk:
+                return
+            self._buf += chunk
+            self._drain()
+
+    def _drain(self) -> None:
+        if not self._have_global:
+            if len(self._buf) < self._GLOBAL:
+                return
+            magic = self._buf[:4]
+            if magic in (b"\xd4\xc3\xb2\xa1", b"\x4d\x3c\xb2\xa1"):
+                self._endian = "<"
+            elif magic in (b"\xa1\xb2\xc3\xd4", b"\xa1\xb2\x3c\x4d"):
+                self._endian = ">"
+            else:
+                return                      # not a pcap stream; give up quietly
+            self._buf = self._buf[self._GLOBAL:]
+            self._have_global = True
+        while len(self._buf) >= self._REC:
+            _s, _u, incl, _orig = struct.unpack(
+                self._endian + "IIII", self._buf[:self._REC])
+            if len(self._buf) < self._REC + incl:
+                return
+            frame = self._buf[self._REC:self._REC + incl]
+            self._buf = self._buf[self._REC + incl:]
+            rec = self._parse(frame)
+            if rec:
+                with self._lock:
+                    self.payloads.append(rec)
+
+    @staticmethod
+    def _parse(frame: bytes):
+        if len(frame) < 14 or frame[12:14] != b"\x08\x00":
+            return None                     # not IPv4 over Ethernet
+        ip = frame[14:]
+        if len(ip) < 20:
+            return None
+        ihl = (ip[0] & 0x0F) * 4
+        if ip[9] != 17 or len(ip) < ihl + 8:
+            return None                     # not UDP
+        src = ".".join(str(b) for b in ip[12:16])
+        dst = ".".join(str(b) for b in ip[16:20])
+        udp = ip[ihl:]
+        sport, dport, ulen = struct.unpack(">HHH", udp[0:6])
+        return src, sport, dst, dport, udp[8:8 + max(0, ulen - 8)]
+
+    def matching(self, src: str, dst: str, dport: int
+                 ) -> list[tuple[str, int, str, int, bytes]]:
+        with self._lock:
+            return [p for p in self.payloads
+                    if p[0] == src and p[2] == dst and p[3] == dport]
+
+
+def selftest_payload_parser() -> list[str]:
+    """Alarm proof for PayloadTap._parse: a hand-built frame it must decode.
+
+    Without this, "the bytes matched" could be a claim resting on a parser
+    that never returned anything at all — an empty list is not a mismatch.
+    """
+    payload = bytes(range(0, 40))
+    udp = struct.pack(">HHHH", 51820, 2408, 8 + len(payload), 0) + payload
+    ip = (bytes([0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 17, 0, 0])
+          + bytes([10, 43, 23, 225]) + bytes([162, 159, 192, 1]) + udp)
+    frame = b"\x00" * 12 + b"\x08\x00" + ip
+    got = PayloadTap._parse(frame)
+    if got is None:
+        return ["PayloadTap._parse returned None for a valid UDP frame"]
+    src, sport, dst, dport, body = got
+    bad = []
+    if (src, sport, dst, dport) != ("10.43.23.225", 51820,
+                                    "162.159.192.1", 2408):
+        bad.append(f"PayloadTap._parse decoded the wrong header: {got[:4]}")
+    if body != payload:
+        bad.append(f"PayloadTap._parse decoded {len(body)} payload bytes, "
+                   f"expected {len(payload)}")
+    if PayloadTap._parse(b"\x00" * 12 + b"\x86\xdd" + b"\x00" * 40) is not None:
+        bad.append("PayloadTap._parse accepted a non-IPv4 frame")
+    return bad
+
+
+class MidPumpSender(threading.Thread):
+    """Fire one UDP datagram AT the C64 *delay* seconds from now.
+
+    The point is to land it inside a net_udp_send that is spinning in its
+    ARP retry pump, so the adapter's documented disarm — inbound UDP is
+    discarded while the caller may still be holding udp_recv_buf — actually
+    executes and ip65_recv_dropped moves. Without this the counter is a
+    design claim no test has exercised.
+
+    The destination port is read from the adapter's own ip65_listen_port,
+    never assumed: this suite randomises wg_local_port after net_init, so
+    the registered listener is NOT on the port the sends go out from.
+    """
+
+    def __init__(self, dst_ip: str, dst_port: int, delay: float,
+                 payload: bytes):
+        super().__init__(daemon=True)
+        self.dst = (dst_ip, dst_port)
+        self.delay = delay
+        self.payload = payload
+        self.sent_at: float | None = None
+        self.error: str | None = None
+
+    def run(self) -> None:
+        time.sleep(self.delay)
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.sendto(self.payload, self.dst)
+            self.sent_at = time.monotonic()
+            s.close()
+        except OSError as exc:
+            self.error = str(exc)
 
 
 def install_send_tramp(tr, L) -> None:
@@ -524,6 +707,16 @@ def main() -> int:
             log(f"    {b}")
         return 1
     log("  UDP/fragment classifier self-test: OK")
+    for label, fn in (("payload parser", selftest_payload_parser),
+                      ("ld65 map parsers", selftest_map_parsers)):
+        bad = fn()
+        if bad:
+            log(f"FATAL: the {label} self-test failed, so anything it "
+                "reports below would be meaningless:")
+            for b in bad:
+                log(f"    {b}")
+            return 1
+        log(f"  {label} self-test: OK")
 
     problems = bridged_rig_problems(args.vice_bin, args.iface)
     if problems:
@@ -562,16 +755,19 @@ def main() -> int:
     have_err = "net_last_error" in L
     have_attempts = "ip65_send_attempts" in L
     have_pump = "ip65_send_pump" in L
+    have_dropped = "ip65_recv_dropped" in L
     for name, present in (("net_last_error", have_err),
                           ("ip65_send_attempts", have_attempts),
-                          ("ip65_send_pump", have_pump)):
+                          ("ip65_send_pump", have_pump),
+                          ("ip65_recv_dropped", have_dropped)):
         state = ("exported" if present else
                  "ABSENT — its assertions are SKIPPED on this build")
         log(f"  {name}: {state}")
     for cname, mine in (("NET_ERR_IP65_WAIT_TIMEOUT",
                          NET_ERR_IP65_WAIT_TIMEOUT),
                         ("NET_ERR_TIMEBASE_STOPPED",
-                         NET_ERR_TIMEBASE_STOPPED)):
+                         NET_ERR_TIMEBASE_STOPPED),
+                        ("NET_ERR_IP65_UDP_SEND", NET_ERR_IP65_UDP_SEND)):
         found = equate_from_sources(cname)
         if found is None:
             log(f"  {cname}: not defined in src/ — this suite expects "
@@ -589,7 +785,9 @@ def main() -> int:
     # cold" is a claim about the whole run, not about a window.
     bpf = (f"arp or (udp and (port 67 or port 68 or port {dest_port}))")
     rc = 1
-    with Tap(bpf, iface=args.iface) as tap:
+    with Tap(bpf, iface=args.iface) as tap, \
+            PayloadTap(f"udp and dst host {dest_ip} and dst port {dest_port}",
+                       args.iface) as ptap:
         with EthVice(args.vice_bin, iface=args.iface) as vice:
             tr = vice.tr
             boot_and_net_init(tr, L)
@@ -666,9 +864,10 @@ def main() -> int:
                   f"UDP {c64} -> {dest_ip}: {len(udp_before)}")
 
             # ---- THE RED -------------------------------------------------
-            ceiling = max(8.0, args.budget * 4)
+            ceiling = max(2.0, args.budget * 3)
             set_dest(tr, L, dest_ip, dest_port)
             mark_udp = len(tap.udp(src=c64, dst=dest_ip))
+            mark_bytes = len(ptap.matching(c64, dest_ip, dest_port))
             carry1, took1 = send_once(tr, L, payload,
                                       timeout=max(30.0, args.budget * 10))
             time.sleep(WIRE_SETTLE)
@@ -699,6 +898,21 @@ def main() -> int:
                       f"saw {d.src}:{d.sport} -> {d.dst}:{d.dport} "
                       f"len {d.length}; expected {c64}:{sport} -> "
                       f"{dest_ip}:{dest_port} len {len(payload)}")
+            # BYTES, not just presence and length. ip65/ip.s:322 destroys the
+            # outbound frame during the ARP lookup, so a fix that RESUMED
+            # into the half-built packet instead of rebuilding it would emit
+            # a right-sized datagram full of wrong bytes and every check
+            # above would still pass.
+            body1 = ptap.matching(c64, dest_ip, dest_port)[mark_bytes:]
+            check(len(body1) == 1 and body1[0][4] == payload,
+                  "attempt 1's datagram carried the staged bytes EXACTLY",
+                  f"captured {len(body1)} payload(s); "
+                  + (f"first differs at byte "
+                     f"{next((i for i, (a, b) in enumerate(zip(body1[0][4], payload)) if a != b), 'n/a')} "
+                     f"({len(body1[0][4])} B on the wire vs "
+                     f"{len(payload)} B staged)" if body1 else "none to compare")
+                  + " — a resume-based fix reuses the frame ip65 already "
+                    "destroyed doing the ARP lookup (ip65/ip.s:322)")
             check(any(r[0] == gw for r in rows_after1),
                   "attempt 1 left the gateway resolved in ip65's arp_cache",
                   f"rows: {rows_after1}")
@@ -729,12 +943,21 @@ def main() -> int:
                       "ip65_send_pump is clear after net_udp_send returns",
                       "a leaked pump flag silently deafens the receive "
                       "callback")
+            if have_dropped:
+                drop1 = opt_byte(tr, L, "ip65_recv_dropped")
+                check(drop1 == 0,
+                      "ip65_recv_dropped is 0 on the happy path — the disarm "
+                      "cost nothing here",
+                      f"ip65_recv_dropped = {drop1}; nothing was sent at the "
+                      "C64 during this send, so the pump had no inbound "
+                      "datagram to discard")
 
             # ---- the control: recovery -----------------------------------
             log("")
             log("=== Phase 2: control — pump net_poll, send again ===")
             pump(tr, L)
             mark_udp = len(tap.udp(src=c64, dst=dest_ip))
+            mark_bytes = len(ptap.matching(c64, dest_ip, dest_port))
             carry2, took2 = send_once(tr, L, payload, timeout=30.0)
             time.sleep(WIRE_SETTLE)
             sent2 = tap.udp(src=c64, dst=dest_ip)[mark_udp:]
@@ -759,6 +982,11 @@ def main() -> int:
                              "control: that send put exactly one datagram on "
                              "the wire",
                              f"tap saw {len(sent2)}")
+            body2 = ptap.matching(c64, dest_ip, dest_port)[mark_bytes:]
+            ok_ctrl &= check(len(body2) == 1 and body2[0][4] == payload,
+                             "control: the warm send's bytes on the wire are "
+                             "the staged bytes",
+                             f"captured {len(body2)} payload(s)")
             ok_ctrl &= check(bool(req) and bool(rep),
                              "control: the ARP request/reply pair for the "
                              "gateway appears at the tap",
@@ -781,6 +1009,17 @@ def main() -> int:
                 ok_ctrl &= check(opt_byte(tr, L, "ip65_send_pump") == 0,
                                  "control: ip65_send_pump is clear after the "
                                  "warm send returns")
+            if have_dropped:
+                # Cumulative since net_init, so this covers phases 1 AND 2.
+                drop2 = opt_byte(tr, L, "ip65_recv_dropped")
+                ok_ctrl &= check(drop2 == 0,
+                                 "control: ip65_recv_dropped is still 0 — "
+                                 "nothing was thrown away during either "
+                                 "cold-ARP send",
+                                 f"ip65_recv_dropped = {drop2}; the counter "
+                                 "is cumulative, so a non-zero here means "
+                                 "real inbound traffic was discarded and the "
+                                 "phase-3 delta would be confounded")
             ok_ctrl &= check(tap.fragments() == 0,
                              "control: nothing was torn by IP fragmentation",
                              "\n".join(tap.frags[:5]))
@@ -795,7 +1034,32 @@ def main() -> int:
             log(f"=== Phase 3: the retry budget is BOUNDED "
                 f"(on-subnet {blackhole}, unanswered) ===")
             set_dest(tr, L, blackhole, dest_port)
+
+            # Land one datagram INSIDE the retry pump, so the documented
+            # disarm actually executes and ip65_recv_dropped moves. The
+            # listener's port comes from the adapter's own ip65_listen_port:
+            # wg_local_port was randomised AFTER net_init, so the registered
+            # port is not the one the sends go out from.
+            injector = None
+            drop_before3 = opt_byte(tr, L, "ip65_recv_dropped") or 0
+            if have_dropped:
+                lp = read_bytes(tr, L["ip65_listen_port"], 2)
+                listen_port = lp[0] | (lp[1] << 8)
+                if listen_port == 0:
+                    log("  note: ip65_listen_port is 0 — no listener to aim "
+                        "at, so the mid-pump arrival is NOT attempted")
+                else:
+                    probe = (bytes(rng.randrange(0x80, 0x100)
+                                   for _ in range(28)) + b"MIDP")
+                    injector = MidPumpSender(c64, listen_port,
+                                             args.budget * 0.3, probe)
+                    log(f"  mid-pump probe: {len(probe)} B at {c64}:"
+                        f"{listen_port} (ip65_listen_port), fired "
+                        f"{args.budget * 0.3:.2f}s into the send")
+                    injector.start()
+
             hung = False
+            t_send_start = time.monotonic()
             try:
                 carry3, took3 = send_once(tr, L, payload,
                                           timeout=max(45.0, args.budget * 20))
@@ -803,7 +1067,9 @@ def main() -> int:
                 hung, carry3, took3 = True, -1, float("nan")
                 log(f"  send attempt 3 NEVER RETURNED: {type(exc).__name__}: "
                     f"{exc}")
+                t_send_end = time.monotonic()
             else:
+                t_send_end = time.monotonic()
                 log(f"  send attempt 3: carry={carry3} in {took3:.2f}s "
                     f"(budget {args.budget:.1f}s, ceiling {ceiling:.1f}s, "
                     f"jsr floor {floor:.2f}s)")
@@ -821,9 +1087,22 @@ def main() -> int:
                 check(took3 <= ceiling,
                       f"it returned inside the ceiling ({ceiling:.1f}s)",
                       f"took {took3:.2f}s")
-                log(f"  MEASURED retry budget: {took3:.2f}s "
-                    f"(floor {floor:.2f}s) — ~0 means no retry loop is "
-                    f"present; ~{args.budget:.1f}s means the bounded wait is "
+                # The BAND, not just the ceiling. A ceiling alone is satisfied
+                # by a tree with no retry loop at all (0.00 s), which is
+                # exactly the unfixed tree. The floor half is what says the
+                # bounded wait is REAL.
+                floor_want = args.budget * 0.5
+                check(took3 >= floor_want,
+                      f"the bounded wait actually happened "
+                      f"(>= {floor_want:.2f}s, half the {args.budget:.2f}s "
+                      f"budget)",
+                      f"took {took3:.2f}s — a send that gives up in ~0 s "
+                      "never entered the retry loop, which is the unfixed "
+                      "tree's behaviour")
+                log(f"  MEASURED retry budget: {took3:.2f}s in "
+                    f"[{floor_want:.2f}, {ceiling:.1f}] "
+                    f"(jsr floor {floor:.3f}s) — ~0 means no retry loop is "
+                    f"present; ~{args.budget:.2f}s means the bounded wait is "
                     f"real")
                 if have_attempts:
                     att3 = opt_byte(tr, L, "ip65_send_attempts")
@@ -837,6 +1116,33 @@ def main() -> int:
                           "returns too",
                           "the give-up path is the one most likely to leak "
                           "the flag")
+                if injector is not None:
+                    injector.join(timeout=5.0)
+                    drop3 = opt_byte(tr, L, "ip65_recv_dropped")
+                    landed = (injector.sent_at is not None
+                              and injector.error is None
+                              and injector.sent_at <= t_send_end)
+                    if injector.error:
+                        log(f"  mid-pump probe FAILED TO SEND: "
+                            f"{injector.error} — the counter is NOT asserted")
+                    elif not landed:
+                        log(f"  mid-pump probe was sent but AFTER the call had "
+                            f"already returned (send ran {took3:.2f}s) — the "
+                            f"arrival was not inside the pump, so the counter "
+                            f"is NOT asserted. ip65_recv_dropped = {drop3}")
+                    else:
+                        check(drop3 is not None and drop3 > drop_before3,
+                              "a datagram arriving DURING the pump is counted "
+                              "in ip65_recv_dropped",
+                              f"ip65_recv_dropped = {drop3} (was "
+                              f"{drop_before3}; the counter is cumulative and "
+                              f"saturates at $FF) after a datagram "
+                              f"was delivered to {c64}:{listen_port} "
+                              f"{injector.sent_at - t_send_start:.2f}s into a "
+                              f"{took3:.2f}s send. The counter exists so the "
+                              "cost of the inbound disarm is observable; a "
+                              "zero here means the drop path is not counting, "
+                              "or the datagram never reached ip65.")
                 if have_err:
                     err = opt_byte(tr, L, "net_last_error")
                     check(err == NET_ERR_IP65_WAIT_TIMEOUT,
@@ -851,11 +1157,44 @@ def main() -> int:
                           "attempt-count backstop "
                           f"(net_last_error != ${NET_ERR_TIMEBASE_STOPPED:02X})",
                           f"net_last_error = ${err:02X} = "
-                          "NET_ERR_TIMEBASE_STOPPED: the jiffy clock at "
-                          "$A0-$A2 never advanced, so the budget was spent "
-                          "by counting attempts, not by measuring time. The "
-                          "elapsed figure above is then an accident of "
-                          "loop cost, not a bound.")
+                          "NET_ERR_TIMEBASE_STOPPED. On a healthy LAN this "
+                          "is the stopped-clock DETECTOR MISFIRING, not a "
+                          "flake: it fires when 256 retry iterations show a "
+                          "zero jiffy delta, and that 256 rests on a static "
+                          "cycle argument with no rig behind it. REPORT IT "
+                          "rather than re-running — the constant is the "
+                          "thing to suspect. The elapsed figure above is "
+                          "then an accident of loop cost, not a bound.")
+                    check(err != NET_ERR_IP65_UDP_SEND,
+                          f"net_last_error is not ${NET_ERR_IP65_UDP_SEND:02X} "
+                          "(NET_ERR_IP65_UDP_SEND, defined but never emitted)",
+                          f"net_last_error = ${err:02X}: this code exists so "
+                          "a redefinition is an assembler error and is "
+                          "deliberately never written. Seeing it is a bug in "
+                          "the adapter.")
+
+            # ---- net_init resets the counter -----------------------------
+            # LAST, because re-running net_init tears the stack down: it
+            # re-inits ip65 and drops the listener. Nothing after this can
+            # use the network.
+            if have_attempts:
+                log("")
+                log("=== Phase 4: net_init clears ip65_send_attempts ===")
+                before = opt_byte(tr, L, "ip65_send_attempts")
+                jsr(tr, L["net_init"], timeout=30.0)
+                after = opt_byte(tr, L, "ip65_send_attempts")
+                log(f"  ip65_send_attempts: {before} -> {after} across "
+                    f"net_init")
+                check(before is not None and before > 0,
+                      "the counter was non-zero going in (so the reset is "
+                      "actually observable)",
+                      f"ip65_send_attempts = {before} before net_init — a "
+                      "reset from 0 to 0 proves nothing")
+                check(after == 0,
+                      "net_init clears ip65_send_attempts",
+                      f"ip65_send_attempts = {after} after net_init; a "
+                      "counter that survives a re-init reports the previous "
+                      "run's send to the next one")
 
             # ---- report --------------------------------------------------
             log("")

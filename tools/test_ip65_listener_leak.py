@@ -115,7 +115,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from c64_test_harness import Labels, ScreenGrid  # noqa: E402
 from c64_test_harness.backends.vice_binary import BinaryViceTransport  # noqa: E402
 from c64_test_harness.backends.vice_lifecycle import (  # noqa: E402
-    ViceConfig, ViceProcess, bpf_capture_available,
+    ViceConfig, ViceProcess,
+)
+# bpf_capture_available used to come from vice_lifecycle. The harness
+# DELETED it in c3fe7aa ("ask whether VICE can get rawnet, not whether
+# /dev/bpf* is open"), so this import had been raising ImportError and this
+# suite could not start at all. Ask VICE's own gate instead.
+from vice_eth_rig import (  # noqa: E402
+    libpcap_node_note, vice_rawnet_problems,
 )
 from c64_test_harness.backends.vice_manager import PortAllocator  # noqa: E402
 
@@ -186,21 +193,10 @@ def rig_problems(vice_bin: str) -> list[str]:
     if sys.platform != "darwin":
         return ["not macOS — this rig is the feth/pcap one from "
                 "c64-https' tools/rig-up-macos.sh"]
-    if not os.path.exists(vice_bin):
-        problems.append(
-            f"{vice_bin} missing — an ethernet-capable x64sc is required "
-            "(stock macOS VICE gates pcap on euid 0; Homebrew's bottle has "
-            "networking compiled out entirely — c64-test-harness#144). "
-            "Set VICE_ETHERNET_BIN or pass --vice-bin.")
-    if not bpf_capture_available():
-        modes = []
-        for node in ("/dev/bpf0", "/dev/bpf1"):
-            try:
-                m = os.stat(node).st_mode
-                modes.append(f"{node} {'rw' if (m & stat.S_IROTH and m & stat.S_IWOTH) else 'not world-rw'}")
-            except FileNotFoundError:
-                modes.append(f"{node} missing")
-        problems.append("no usable /dev/bpf node (" + ", ".join(modes) + ")")
+    problems += vice_rawnet_problems(vice_bin)
+    note = libpcap_node_note()
+    if note:
+        problems.append(note)
     r = subprocess.run(["ifconfig", ETH_IFACE], capture_output=True, text=True)
     if r.returncode != 0:
         problems.append(f"{ETH_IFACE} missing")
