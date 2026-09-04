@@ -412,13 +412,24 @@ session_handle_packet:
         lda #<msg_recv_hdr
         ldy #>msg_recv_hdr
         jsr print_string
-        ; print msg_recv_len (16-bit) bytes from msg_recv_ptr, raw
+        ; Print msg_recv_len (16-bit) bytes from msg_recv_ptr through the
+        ; SAME printable filter display_payload uses (issue #129). These
+        ; bytes are peer-supplied and go straight to KERNAL CHROUT, so
+        ; unfiltered they are not text but PETSCII CONTROL CODES that
+        ; EXECUTE on the display: $93 clears the screen, $12/$92 toggle
+        ; reverse, $0E/$8E switch charset, $90-$9F and $05/$1C.. set the
+        ; text colour, $13 homes the cursor. A remote peer could therefore
+        ; drive the local display through the tunnel. print_buf16's filter
+        ; (zp_tmp1 != 0) maps everything outside $20..$7E to '.', which
+        ; leaves ordinary printable text byte-for-byte unchanged.
+        ; DO NOT set zp_tmp1 back to 0 to "show the message as sent" —
+        ; that is the bug, and it costs zero bytes to keep it right.
         lda msg_recv_ptr
         sta zp_ptr1
         lda msg_recv_ptr+1
         sta zp_ptr1+1
-        lda #0
-        sta zp_tmp1             ; no printable filter
+        lda #1
+        sta zp_tmp1             ; replace non-printables with '.' (issue #129)
         ldx msg_recv_len
         lda msg_recv_len+1
         jsr print_buf16
@@ -431,8 +442,26 @@ session_handle_packet:
 
 @decrypt_fail:
         ; Deliberately NOT a teardown, unlike @hs_fail above. This is one
-        ; datagram that failed AEAD, not an abandoned session: the keys are
-        ; still good and the peer is still there. Tearing down here would be
+        ; REJECTED datagram, not an abandoned session: the keys are
+        ; still good and the peer is still there.
+        ;
+        ; THIS IS NOT AN AEAD FAILURE MESSAGE. transport_decrypt has a single
+        ; exit (lda #$ff, transport.s:403-786) shared by FIVE causes:
+        ;   1. type byte != 4
+        ;   2. counter byte 7 >= $10
+        ;   3. replay-window / duplicate-bit reject
+        ;   4. udp_recv_len < 32 (underflow)
+        ;   5. Poly1305 tag mismatch  <-- only THIS one is "failed AEAD"
+        ; and there is no counter, so decrypt_fail_msg is the ONLY signal any
+        ; of the five ever produces. Do not read this message as evidence of
+        ; a crypto fault. Issue #128's "inbound replies of 1049-1187 B always
+        ; fail AEAD 9/9" was retracted precisely because a host-side tool
+        ; scraped this string and reported cause 5; cause 3 was never
+        ; excluded, and a truncated multi-block SOCKET_READ (short
+        ; udp_recv_len copies the tag out of the ciphertext, transport.s:562-573)
+        ; is indistinguishable from cause 5 from here. Discriminate before
+        ; concluding — host-side from udp_recv_buf/udp_recv_len if you can,
+        ; distinct codes in A if you cannot. Tearing down here would be
         ; a remotely triggerable session kill — under ip65 anything on the
         ; LAN can put a type-4 byte into udp_recv_buf, and WireGuard's own
         ; answer to an undecryptable packet is to discard it.

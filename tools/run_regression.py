@@ -123,6 +123,52 @@ TESTS = [
     # of defect at all. No emulator, no hardware — a loopback UDP socket for
     # the server.py case; milliseconds.
     ("responder_ts",   ["tools/test_wg_responder_timestamp.py"]),
+    # Issue #129. @t4_udp printed a peer's chat payload through CHROUT with
+    # the printable filter OFF, so PETSCII control codes arriving from the
+    # wire were EXECUTED on the display ($93 clear, $13 home, $12 reverse,
+    # $0E/$8E charset, $90-$9F colour). The oracle is an identity, not a log
+    # line: the same message is delivered twice, once with the control bytes
+    # already replaced by '.', and the whole observable display state (screen
+    # RAM, colour RAM, cursor, $C7/$D4/$D8, the line-link table, $0286, and
+    # VIC $D011/$D016/$D018/$D020-$D024) must match. Ordinary VICE suite,
+    # honours C64_SKIP_BUILD, no build-tree mutation. Deliberately UNSEEDED
+    # here — the payload, the codes and their positions are random per run
+    # and the seed is on the first line of its output (reproduce with --seed).
+    ("petscii_ctrl",   ["tools/test_issue_129_petscii_control.py"]),
+    # Issue #128, the INSTRUMENT half. The "1049-1187 B band" was retracted
+    # as an artifact of tools/test_warp_live.py, which had no assertion that
+    # had ever been observed failing — so nothing in this gate could have
+    # caught it. This suite drives the REAL run_stage_c() against a scripted
+    # fake device (64 KiB of RAM and a 25x40 screen behind the ordinary
+    # transport surface), so the ground truth of every trial is known and
+    # the tool's verdict can be compared to it. Covers the stale receive
+    # state, the peer-controlled screen scrape (both its content and its
+    # MSG> boundary), the size reported from a host-side table rather than
+    # measured, and the sweep ladder's size/position confound.
+    #
+    # Host-side only: no VICE, no device, no build — it reads whichever
+    # labels.txt the gate's build left behind (either backend). Deliberately
+    # UNSEEDED here; the payloads are random per run and the seed is on the
+    # first line of its output (reproduce with --seed).
+    ("warp_instrument", ["tools/test_warp_instrument_unit.py"]),
+    # Issue #128, the firmware half of the same retraction. transport_decrypt
+    # has ONE `lda #$ff` shared by five rejection causes, so "DECRYPT FAILED"
+    # is not evidence of an AEAD failure — which is how "9/9 fail AEAD" was
+    # manufactured. Drives all five causes plus a genuinely ChaCha20-Poly1305
+    # -sealed packet through jsr.
+    #
+    # Its contract is CONDITIONAL on the build, so it is honest without
+    # crying wolf. No `tp_reject_cause` (every build today): it PINS THE
+    # CONFLATION — all five causes must share the one $ff exit — and prints
+    # that conflation as a measured property. It goes red the day any of the
+    # five stops sharing it, i.e. the day the contract changes and the tests
+    # do not. With `tp_reject_cause` present it requires five DISTINCT and
+    # CORRECT codes, so a correct fix stays green and an incorrect one fails.
+    # Both branches verified: 5/5 today, 12/12 on a tree carrying the cause
+    # byte, and red when either contract is violated.
+    #
+    # Ordinary VICE suite, honours C64_SKIP_BUILD, no build-tree mutation.
+    ("warp_instrument_vice", ["tools/test_warp_instrument_vice.py"]),
     # NOT listed, deliberately: tools/test_uci_*_live.py and
     # tools/test_wg_responder*.py need real hardware or a live responder.
 ]
@@ -181,6 +227,17 @@ SERIAL_TESTS = [
     # map. Serial: needs a BACKEND=ip65 tree and builds one. Retires the
     # FATAL path of tools/test_ip65_bss_corruption.py (rig-only, opt-in).
     ("ip65_bss_guard", ["tools/test_ip65_bss_guard.py"]),
+    # Issue #130. net_poll's @block_end block-drain decision: a reply that
+    # ends with uci_poll_rem non-zero must be DROPPED with a distinct error,
+    # and a continuation staged inside the fence must still be DRAINED.
+    # VICE cannot reach any of it — $DF1D reads $FF there, so the multi-block
+    # SOCKET_READ path does not exist — so this runs the real assembled
+    # net_poll on a host-side 6502 (tools/uci/mos6502.py) against a model of
+    # $DF1C-$DF1F. Serial: needs `make BACKEND=uci`, which it builds itself,
+    # so it mutates the shared tree exactly like uci_stub. Unseeded here; the
+    # announced lengths and payloads are random per run and the seed is on
+    # the first line of its output (reproduce with --seed).
+    ("uci_short_read", ["tools/test_uci_short_read_drop.py"]),
     # NOT listed, deliberately: tools/test_ip65_udp_echo_vice.py and
     # tools/test_ip65_handshake_vice.py need the ethernet VICE rig (feth
     # pair + dnsmasq + a pcap-capable x64sc); they exit 77 without it.
