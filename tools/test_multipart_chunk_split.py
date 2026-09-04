@@ -441,7 +441,8 @@ def locate_push_store(transport, before, after, span):
     return store, f"push sink at ${store:04X}, source operand at ${opnd:04X}"
 
 
-def group_bytes(transport, L, put_byte_stub, rng, part_max, store, capture):
+def group_bytes(transport, L, put_byte_stub, rng, part_max, store, capture,
+                why=""):
     """With the sink redirected to a capture routine: the bytes the parts
     push, concatenated, ARE the datagram — no gap, no overlap, no reorder.
 
@@ -451,6 +452,17 @@ def group_bytes(transport, L, put_byte_stub, rng, part_max, store, capture):
     """
     print("\n=== the parts concatenate to the datagram, byte for byte ===")
     buf = L["udp_recv_buf"]
+    if store is None:
+        # The sink could not be located, so these claims are UNTESTED. Say so
+        # as failures rather than by quietly running four checks fewer: a
+        # suite whose check count drops when the adapter changes shape is the
+        # exact failure mode this location trick could otherwise introduce.
+        for total in (part_max + 1, EXPECT_SEND_MAX):
+            check(False, f"{total} B: exactly {total} payload bytes pushed "
+                         f"across all parts", why)
+            check(False, f"{total} B: the pushed bytes are the datagram, "
+                         f"byte-exact", why)
+        return
     write_bytes(transport, store,
                 bytes([0x20, lo(capture), hi(capture)]))
     for total in (part_max + 1, EXPECT_SEND_MAX):
@@ -465,10 +477,13 @@ def group_bytes(transport, L, put_byte_stub, rng, part_max, store, capture):
         pushed = end - CAPBUF
         got = bytes(read_bytes(transport, CAPBUF, total)) if 0 < pushed else b""
         print(f"\n--- {total}-byte datagram, {len(parts)} parts ---")
-        check(carry == 0, f"{total} B: C=0", f"net_last_error=${err:02X}")
+        # No C=0 check here: group_splitting already asserts it at both of
+        # these lengths, and a check that can only ever agree with another
+        # is noise.
         check(pushed == total,
               f"{total} B: exactly {total} payload bytes pushed across all "
-              f"parts", f"pushed {pushed}")
+              f"parts", f"pushed {pushed} (carry={carry} "
+                        f"net_last_error=${err:02X})")
         diff = next((i for i in range(min(len(got), len(payload)))
                      if got[i] != payload[i]), None)
         check(got == payload,
@@ -692,9 +707,9 @@ def _run(rng):
               why)
 
         group_splitting(transport, L, put_byte_stub, rng, part_max)
+        group_bytes(transport, L, put_byte_stub, rng, part_max, store,
+                    blobs["payload"], why=why)
         if store is not None:
-            group_bytes(transport, L, put_byte_stub, rng, part_max, store,
-                        blobs["payload"])
             # Put the sink back before anything else runs.
             write_bytes(transport, store,
                         bytes([STA_ABS, lo(UCI_CMD_DATA), hi(UCI_CMD_DATA)]))
