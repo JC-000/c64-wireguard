@@ -412,13 +412,24 @@ session_handle_packet:
         lda #<msg_recv_hdr
         ldy #>msg_recv_hdr
         jsr print_string
-        ; print msg_recv_len (16-bit) bytes from msg_recv_ptr, raw
+        ; Print msg_recv_len (16-bit) bytes from msg_recv_ptr through the
+        ; SAME printable filter display_payload uses (issue #129). These
+        ; bytes are peer-supplied and go straight to KERNAL CHROUT, so
+        ; unfiltered they are not text but PETSCII CONTROL CODES that
+        ; EXECUTE on the display: $93 clears the screen, $12/$92 toggle
+        ; reverse, $0E/$8E switch charset, $90-$9F and $05/$1C.. set the
+        ; text colour, $13 homes the cursor. A remote peer could therefore
+        ; drive the local display through the tunnel. print_buf16's filter
+        ; (zp_tmp1 != 0) maps everything outside $20..$7E to '.', which
+        ; leaves ordinary printable text byte-for-byte unchanged.
+        ; DO NOT set zp_tmp1 back to 0 to "show the message as sent" —
+        ; that is the bug, and it costs zero bytes to keep it right.
         lda msg_recv_ptr
         sta zp_ptr1
         lda msg_recv_ptr+1
         sta zp_ptr1+1
-        lda #0
-        sta zp_tmp1             ; no printable filter
+        lda #1
+        sta zp_tmp1             ; replace non-printables with '.' (issue #129)
         ldx msg_recv_len
         lda msg_recv_len+1
         jsr print_buf16
