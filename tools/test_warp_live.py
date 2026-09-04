@@ -440,6 +440,64 @@ RECV_STATE_CLEARED = (
 SHORT_READ_STATE_LABEL = "uci_short_read_state"
 SHORT_READ_STATE_NAMES = {0x80: "IDLE ($00)", 0xA0: "DATA_LAST ($20)"}
 
+# UCI STATUS CHANNEL (issue #132). uci_cmd.s captures the first
+# UCI_STATUS_MAX bytes of each status line into uci_status_buf and the total
+# seen into uci_status_len; NOTHING in the firmware ever reads either, so
+# the line has been drained unread for the life of this adapter. A healthy
+# two-block read leaves "00,OK"; "03,MORE DATA NOT SUPPORTED" would mean the
+# reply was DESTROYED by the firmware rather than merely delivered late,
+# which is a different defect from the one this branch fixes.
+#
+# TRAP: uci_status_len is STICKY-FIRST (uci_cmd.s:644-657) — it is only
+# armed when zero, so a non-zero value survives every subsequent line. Read
+# without zeroing it first and what comes back is the oldest line since
+# LOAD, attributed to whatever query happened to read it. Hence it is
+# cleared and verified per query, exactly like net_last_error.
+STATUS_BUF_LABEL = "uci_status_buf"
+STATUS_LEN_LABEL = "uci_status_len"
+
+
+def _status_buf_capacity(L: dict) -> int:
+    """UCI_STATUS_MAX from the MAP, not from a constant retyped here.
+
+    uci_cmd.s lays uci_status_len immediately after the buffer, so the gap
+    IS the capacity. Deriving it means a build that resizes the buffer is
+    read correctly instead of silently truncated or over-read.
+    """
+    span = L[STATUS_LEN_LABEL] - L[STATUS_BUF_LABEL]
+    return span if 0 < span <= 256 else 48
+
+
+def _read_status_line(tr: Ultimate64Transport, L: dict) -> dict:
+    """The captured UCI status line, or why it could not be read.
+
+    `seen` is the TOTAL length the adapter saw; `text` is only the captured
+    prefix, so seen > captured means the line was longer than the buffer and
+    the tail is gone. Rendered as printable ASCII with the rest escaped —
+    the line is device-authored text, never executed or matched loosely.
+    """
+    out: dict = {}
+    if STATUS_BUF_LABEL not in L or STATUS_LEN_LABEL not in L:
+        out["status_line_available"] = False
+        return out
+    out["status_line_available"] = True
+    cap = _status_buf_capacity(L)
+    try:
+        seen = bytes(tr.read_memory(L[STATUS_LEN_LABEL], 1))[0]
+        raw = bytes(tr.read_memory(L[STATUS_BUF_LABEL], cap))
+    except Exception as exc:                                  # noqa: BLE001
+        out["status_line_error"] = repr(exc)
+        return out
+    out["status_len_seen"] = seen
+    out["status_truncated_in_buf"] = seen > cap
+    n = min(seen, cap)
+    body = raw[:n]
+    out["status_line_hex"] = body.hex()
+    out["status_line"] = "".join(
+        chr(b) if 0x20 <= b < 0x7F else "\\x%02x" % b for b in body)
+    return out
+
+
 
 def describe_short_read_state(raw):
     """Render uci_short_read_state for a report line.
@@ -1025,6 +1083,22 @@ def _clear_recv_state(tr: Ultimate64Transport, L: dict,
         except Exception as exc:                              # noqa: BLE001
             detail[SHORT_READ_STATE_LABEL] = repr(exc)
         ok = ok and detail[SHORT_READ_STATE_LABEL] is True
+    if STATUS_LEN_LABEL in L:
+        # Sticky-first with no consumer: unless this is zeroed, the line read
+        # back after the query is the FIRST one since LOAD.
+        try:
+            tr.write_memory(L[STATUS_LEN_LABEL], b"\x00")
+            detail[STATUS_LEN_LABEL] = (
+                bytes(tr.read_memory(L[STATUS_LEN_LABEL], 1)) == b"\x00")
+        except Exception as exc:                              # noqa: BLE001
+            detail[STATUS_LEN_LABEL] = repr(exc)
+        # DELIBERATELY NOT folded into `ok`. net_poll runs continuously in
+        # the C64's main loop, and every idle poll re-arms this byte, so the
+        # read-back is non-zero microseconds later through no fault of the
+        # receive state. Measured 2026-09-04: 20 of 27 rungs. Counting it
+        # would make recv_state_fresh False on a run whose udp_recv_buf
+        # poison, udp_recv_len and net_last_error all verified clean — an
+        # instrument reporting on itself and calling it a finding.
     if DEVICE_CAUSE_LABEL in L:
         try:
             tr.write_memory(L[DEVICE_CAUSE_LABEL],
@@ -2042,6 +2116,7 @@ def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
             q["vic_probe_error"] = repr(exc)
 
         post = _read_session_state(tr, L)
+        q.update(_read_status_line(tr, L))
         q["wg_state_after"] = post.get("wg_state")
         q["wg_state_changed"] = (pre.get("wg_state") != post.get("wg_state"))
         q["rekey_pending_after"] = post.get("rekey_pending")
@@ -2511,12 +2586,31 @@ def main(argv: Optional[list[str]] = None) -> int:
                 # whoever goes next, and it presents as THEIR suite being
                 # broken rather than as our leftover state — the expensive
                 # shape, the same one as 1.1.1.1's silent >512 B request drop.
+            except Exception as exc:                              # noqa: BLE001
+                log.error("Stage D clock/REU restore failed: %s", exc)
+            # THE RESET GETS ITS OWN try. It used to be the last statement
+            # of the block above, which made it conditional on the clock and
+            # REU restore succeeding — and those are exactly what fail when
+            # a run is ABORTING against a flaky device. That is the one path
+            # where the reset matters most, because it is the only thing
+            # that recovers our UDP sockets: the network target closes them
+            # from the reset ISR (GideonZ/1541ultimate#814) and nothing else
+            # does. MEMP_NUM_UDP_PCB is 8 and the firmware holds several, so
+            # a client gets four or five; strand one per abort and OPEN_UDP
+            # starts returning "85,ERROR OPENING SOCKET", which reads as a
+            # regression in whatever changed most recently rather than as an
+            # inherited condition. That confusion cost two lanes a day on
+            # 2026-09-03. So: restore the clock if we can, and reset either
+            # way.
+            try:
                 client.reset()
                 time.sleep(1.0)
                 log.info("restore: C64 reset — command interface left idle "
-                         "for the next lane")
+                         "and UDP sockets closed for the next lane")
             except Exception as exc:                              # noqa: BLE001
-                log.error("Stage D restore failed: %s", exc)
+                log.error("Stage D reset FAILED: %s — UDP sockets may be "
+                          "stranded; the next lane's OPEN_UDP can fail with "
+                          "$85 and it will NOT look like our fault", exc)
         lock.release()
         log.info("lock released")
 
