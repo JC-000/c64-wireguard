@@ -439,9 +439,27 @@ class FakeDevice:
         head = (bytes([trial.type_byte, 0, 0, 0])
                 + bytes(self.rng.randrange(256) for _ in range(4))
                 + ctr.to_bytes(8, "little"))
-        body = head + bytes(self.rng.randrange(256)
-                            for _ in range(max(0, written - 16)))
-        self.mem[L["udp_recv_buf"]:L["udp_recv_buf"] + len(body)] = body
+        body = bytearray(head + bytes(self.rng.randrange(256)
+                                      for _ in range(max(0, written - 16))))
+        # Make the written bytes differ from the poison AT EVERY OFFSET.
+        #
+        # Without this the last written byte coincides with the poison with
+        # probability 1/251, the tool's backward scan extends the surviving
+        # run by one, and `poison_stop` reads one BELOW the true truncation
+        # offset — which made this suite fail at seed 49 (999 instead of
+        # 1000) roughly one run in sixteen. That was a defect in this fake,
+        # not in the tool: a real datagram is ciphertext, and a coincidence
+        # with the poison is a separate 1-in-251 event that case 7b tests
+        # deliberately rather than stumbling into here.
+        #
+        # The poison is read back off the buffer rather than recomputed, so
+        # this stays correct if the pattern changes.
+        base = L["udp_recv_buf"]
+        for i in range(len(body)):
+            while body[i] == self.mem[base + i]:
+                body[i] = (body[i] + 1) & 0xFF
+        body = bytes(body)
+        self.mem[base:base + len(body)] = body
         self.written_last = written
 
 
@@ -927,6 +945,21 @@ def case7_poison_stop(mod, labels, rng, seed, res: Result, ctx) -> None:
               "case7/independent-of-the-assumed-boundary",
               "the off-boundary truncation's measured stop must not depend "
               f"on UCI_FIRST_BLOCK_PAYLOAD={tool_block}")
+    # STATED PROPERTY, not an assertion about this draw. On hardware the
+    # last byte actually written coincides with the poison with probability
+    # 1/POISON_MOD, and the backward scan then reports one byte LOW; two
+    # coincident bytes, 1/POISON_MOD^2; and so on. So poison_stop is a lower
+    # bound on the true stop with a geometric overshoot: P(off by >= k) =
+    # POISON_MOD^-k, expected overshoot ~0.004 bytes. It cannot turn a
+    # truncation into a full write (that needs POISON_MIN_RUN coincident
+    # bytes, guarded separately) — it can only shift the reported offset by
+    # a byte or two. Printed on every run so a future 892 is read as "893,
+    # one coincidence" rather than chased as a new boundary.
+    m = getattr(mod, "POISON_MOD", 256)
+    print(f"        poison_stop is a lower bound: P(reported offset is low "
+          f"by >= k) = (1/{m})^k, so >= 1 is {1.0 / m:.4f} and >= 2 is "
+          f"{(1.0 / m) ** 2:.2e}. Eleven independent hardware reads all "
+          f"gave exactly 893.")
 
 
 def case7b_poison_collision(mod, labels, rng, seed, res: Result, ctx) -> None:
