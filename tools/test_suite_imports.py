@@ -67,17 +67,40 @@ sys.argv = ["import-probe"]
 sys.path.insert(0, {tools!r})
 spec = importlib.util.spec_from_file_location("_probe_" + {stem!r}, {path!r})
 mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
+# Register BEFORE exec_module, as the import system itself does. Without
+# this, a module defining a dataclass fails here and ONLY here: dataclasses
+# resolves a field's type via sys.modules.get(cls.__module__).__dict__, and
+# under the synthetic "_probe_*" name that lookup returns None ->
+# AttributeError. c64_caps.py imports perfectly everywhere else and was
+# reported as a broken suite by this guard alone. A guard that cries wolf
+# is worse than no guard: it trains people to disbelieve it, which is the
+# opposite of what this file is for.
+sys.modules[spec.name] = mod
+try:
+    spec.loader.exec_module(mod)
+finally:
+    sys.modules.pop(spec.name, None)
 """
 
 
+# Non-test tools that IMPORT FROM the live suites, and so carry the exact
+# one-sided-rename risk this guard exists to catch — but which the
+# `test_*` glob never watched. wg_chat.py and wg_demo.py both pull symbols
+# out of test_uci_handshake_live; a rename there would kill them silently,
+# the same way f021458 killed test_uci_udp_size_probe.py (#121). They are
+# operator-facing tools, so the death would surface in front of a human at
+# the worst moment rather than in the gate.
+EXTRA_TOOLS = ("wg_chat.py", "wg_demo.py", "u64_firmware.py",
+               "device_session.py", "c64_caps.py", "wg_c64_input.py")
+
+
 def suite_files() -> list[str]:
-    return sorted(
-        os.path.join(TOOLS_DIR, f)
-        for f in os.listdir(TOOLS_DIR)
-        if f.startswith("test_") and f.endswith(".py")
-        and f != os.path.basename(__file__)
-    )
+    here = os.path.basename(__file__)
+    names = [f for f in os.listdir(TOOLS_DIR)
+             if f.startswith("test_") and f.endswith(".py") and f != here]
+    names += [f for f in EXTRA_TOOLS
+              if os.path.exists(os.path.join(TOOLS_DIR, f))]
+    return sorted(os.path.join(TOOLS_DIR, f) for f in set(names))
 
 
 def probe(path: str, timeout: float = 60.0) -> tuple[str, str]:
