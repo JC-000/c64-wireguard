@@ -1,15 +1,26 @@
 #!/usr/bin/env python3
 """Unit tests for tools/u64_firmware.py — the /v1/info build-identity check.
 
-Host-side only: no device, no lock, no network (fetch_info is never called
-here). What is worth testing is the JUDGEMENT, not the HTTP:
+Host-side only: no device, no lock, and no traffic beyond a throwaway HTTP
+server on 127.0.0.1. What is worth testing is the JUDGEMENT and the
+BLAST RADIUS, not the happy path:
 
   * an unrecognised git_commit_hash must NOT be an error — the next
-    legitimate rebase produces one, and a host-side allowlist that refuses
+    legitimate rebase produces one, and a host-side allowlist that refused
     it would block a good build;
-  * firmware with no git_commit_hash at all must say so plainly rather
-    than silently reading as "not the spike";
-  * a measured image must be reported as measured.
+  * firmware with no git_commit_hash must say so rather than silently
+    reading as "not the spike";
+  * the recorded `kind` must actually route. Hardcoding the verdict made
+    every KNOWN_BUILDS entry read as a spike image no matter what it said;
+  * `describe_build` must never raise and `fetch_info` must never
+    propagate, because both run in a PREFLIGHT, before the device lock, in
+    tools whose runs must not die for a build check.
+
+Assertions here avoid substrings that also appear in KNOWN_BUILDS' prose:
+an earlier version asserted `"$03 $16" in text`, which stayed green under
+the worst false-green in the module because a KNOWN_BUILDS entry happens
+to contain that literal too. Checks assert the VERDICT (structural) and,
+where text matters, a marker unique to that branch.
 
 Run::
 
@@ -17,33 +28,88 @@ Run::
 """
 from __future__ import annotations
 
+import http.server
 import sys
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import u64_firmware as fw  # noqa: E402
 from u64_firmware import KNOWN_BUILDS, VERDICTS, describe_build  # noqa: E402
 
-# The image measured on 2026-09-03 (WARP interop, 4 handshakes ACTIVE).
+# Captured ONCE at import, so a test that sabotages fw.MAX_INFO_BYTES does
+# not also inflate the body the server sends: the oversize body must stay a
+# fixed size, or the check passes because the request got slower rather than
+# because the guard fired.
+HUGE_BODY_BYTES = fw.MAX_INFO_BYTES + 1024
+
 INFO_A474 = {
-    "product": "Ultimate 64 Elite",
-    "firmware_version": "3.15",
-    "git_commit_hash": "a474a7ed",
-    "fpga_version": "125",
-    "core_version": "1.4F",
-    "unique_id": "601A96",
-    "errors": [],
+    "product": "Ultimate 64 Elite", "firmware_version": "3.15",
+    "git_commit_hash": "a474a7ed", "fpga_version": "125",
+    "core_version": "1.4F", "unique_id": "601A96", "errors": [],
+}
+# The same device BEFORE upstream added the field (the fpga 124 image).
+INFO_NO_HASH = {
+    "product": "Ultimate 64 Elite", "firmware_version": "3.15",
+    "fpga_version": "124", "core_version": "1.4F",
+    "unique_id": "601A96", "errors": [],
 }
 
-# The same device BEFORE upstream added the field (fpga 124 image).
-INFO_NO_HASH = {
-    "product": "Ultimate 64 Elite",
-    "firmware_version": "3.15",
-    "fpga_version": "124",
-    "core_version": "1.4F",
-    "unique_id": "601A96",
-    "errors": [],
-}
+
+class _Log:
+    """Minimal logger double: records (level, formatted message)."""
+
+    def __init__(self):
+        self.calls = []
+
+    def info(self, fmt, *a):
+        self.calls.append(("info", fmt % a))
+
+    def warning(self, fmt, *a):
+        self.calls.append(("warning", fmt % a))
+
+
+class _Handler(http.server.BaseHTTPRequestHandler):
+    """Serves whatever the test asked for, including malformed replies."""
+
+    mode = "good"
+
+    def do_GET(self):                                    # noqa: N802
+        if self.mode == "short":
+            # 200 promising 500 bytes and delivering 7: urllib raises
+            # http.client.IncompleteRead, which is NOT an OSError.
+            self.send_response(200)
+            self.send_header("Content-Length", "500")
+            self.end_headers()
+            self.wfile.write(b"{\"a\":1}")
+        elif self.mode == "huge":
+            # VALID JSON, deliberately: a huge body of junk is refused by the
+            # JSON parse whether or not the size guard exists, so the
+            # "oversized body is refused" check would have passed for the
+            # wrong reason. Only a parseable oversize body tests the guard.
+            pad = "x" * HUGE_BODY_BYTES
+            body = ('{"firmware_version": "3.15", "pad": "'
+                    + pad + '"}').encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.mode == "notjson":
+            self._body(b"<html>not json</html>")
+        elif self.mode == "notobject":
+            self._body(b"[1, 2, 3]")
+        else:
+            self._body(b'{"firmware_version": "3.15"}')
+
+    def _body(self, b):
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+    def log_message(self, *a):                           # silence
+        pass
 
 
 def _check(name, cond, detail, fails, verbose, _n=[0]):
@@ -61,40 +127,121 @@ def main(argv) -> int:
     verbose = "--verbose" in argv
     fails: list = []
 
-    # 1. A measured image reports as measured, and names the evidence.
+    def chk(name, cond, detail=""):
+        _check(name, cond, detail, fails, verbose)
+
+    # --- verdict routing -------------------------------------------------
     v, text = describe_build(INFO_A474)
-    _check("measured image -> chunked", v == "chunked", f"got {v!r}", fails, verbose)
-    _check("measured image names the hash", "a474a7ed" in text,
-           f"hash absent from {text!r}", fails, verbose)
+    chk("measured image -> chunked", v == "chunked", f"got {v!r}")
+    chk("measured image names the hash", "a474a7ed" in text, repr(text))
 
-    # 2. An unknown hash is a WARNING, not a refusal. This is the one that
-    #    matters: the next rebase lands here, and refusing it would be worse
-    #    than running and letting the $16 send path decide.
     v, text = describe_build(dict(INFO_A474, git_commit_hash="deadbeef"))
-    _check("unknown hash -> unknown", v == "unknown", f"got {v!r}", fails, verbose)
-    _check("unknown hash is not an error", v != "unreachable" and v in VERDICTS,
-           f"got {v!r}", fails, verbose)
-    _check("unknown hash points at the behavioural check", "$8E" in text,
-           f"no $8E hint in {text!r}", fails, verbose)
+    chk("unknown hash -> unknown", v == "unknown", f"got {v!r}")
+    chk("unknown hash text is the unknown branch, not a KNOWN_BUILDS entry",
+        "not measured by this repo" in text
+        and all(d not in text for _, d in KNOWN_BUILDS.values()), repr(text))
 
-    # 3. Firmware predating the field must say so, NOT read as "not spike".
     v, text = describe_build(INFO_NO_HASH)
-    _check("missing field -> no-hash", v == "no-hash", f"got {v!r}", fails, verbose)
-    _check("missing field names the $16 probe as the only way",
-           "$03 $16" in text, f"no probe hint in {text!r}", fails, verbose)
+    chk("missing field -> no-hash", v == "no-hash", f"got {v!r}")
+    chk("no-hash text is the no-hash branch",
+        "predates the field" in text, repr(text))
 
-    # 4. An empty string is missing, not a hash.
-    v, _ = describe_build(dict(INFO_A474, git_commit_hash=""))
-    _check("empty hash -> no-hash", v == "no-hash", f"got {v!r}", fails, verbose)
+    chk("empty hash -> no-hash",
+        describe_build(dict(INFO_A474, git_commit_hash=""))[0] == "no-hash")
+    chk("no info -> unreachable", describe_build(None)[0] == "unreachable")
 
-    # 5. No answer at all is distinguishable from every image verdict.
-    v, _ = describe_build(None)
-    _check("no info -> unreachable", v == "unreachable", f"got {v!r}", fails, verbose)
+    # --- the recorded kind must ROUTE, not decorate ----------------------
+    # Regression: describe_build hardcoded "chunked", so an entry recording a
+    # stock image would have false-greened the preflight.
+    saved = dict(KNOWN_BUILDS)
+    try:
+        KNOWN_BUILDS["stocktest"] = ("no-hash", "a stock image, recorded " * 3)
+        v, _ = describe_build(dict(INFO_A474, git_commit_hash="stocktest"))
+        chk("recorded kind routes the verdict", v == "no-hash", f"got {v!r}")
+    finally:
+        KNOWN_BUILDS.clear()
+        KNOWN_BUILDS.update(saved)
 
-    # 6. Every recorded build carries a reason it is recorded.
+    # --- describe_build must never raise ---------------------------------
+    hostile = [[], "3.15", 42, 3.5, True, {"git_commit_hash": ["a"]},
+               {"git_commit_hash": {"a": 1}}, {"git_commit_hash": 7},
+               {"firmware_version": None}, {}, {"git_commit_hash": "x" * 5000}]
+    raised = []
+    for h in hostile:
+        try:
+            vv, tt = describe_build(h)
+            if vv not in VERDICTS or not isinstance(tt, str):
+                raised.append((h, f"bad return {vv!r}"))
+        except Exception as e:                            # noqa: BLE001
+            raised.append((h, repr(e)))
+    chk("describe_build never raises on hostile payloads", not raised,
+        f"{raised[:2]}")
+
+    # --- fetch_info must never propagate ---------------------------------
+    # A 200 with a short body raises http.client.IncompleteRead, which is not
+    # an OSError and once killed a run at preflight.
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    host = f"127.0.0.1:{srv.server_port}"
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        # The property that matters is NOT a particular return value, it is
+        # that nothing propagates and whatever comes back is judged safely.
+        # ("short" is a 200 promising 500 bytes and sending 7. Reading with
+        # an explicit size means urllib does not enforce Content-Length, so
+        # a truncated-but-parseable body arrives as data. That is a WRONG
+        # verdict at worst — warning level, never a gate — where the old
+        # unsized read raised IncompleteRead and killed the run.)
+        for mode in ("short", "huge", "notjson", "notobject", "good"):
+            _Handler.mode = mode
+            try:
+                got = fw.fetch_info(host, timeout=5.0)
+                v, txt = describe_build(got)
+                chk(f"fetch_info + describe_build survive a {mode} reply",
+                    v in VERDICTS and isinstance(txt, str), f"verdict {v!r}")
+            except Exception as e:                        # noqa: BLE001
+                chk(f"fetch_info + describe_build survive a {mode} reply",
+                    False, repr(e))
+        _Handler.mode = "huge"
+        chk("an oversized body is refused, not parsed",
+            fw.fetch_info(host, timeout=5.0) is None)
+        _Handler.mode = "notjson"
+        chk("a non-JSON body is refused", fw.fetch_info(host, timeout=5.0) is None)
+
+        # A non-object 200 must reach describe_build and be judged, not crash.
+        _Handler.mode = "notobject"
+        v, _ = describe_build(fw.fetch_info(host, timeout=5.0))
+        chk("non-object /v1/info -> unreachable", v == "unreachable", f"got {v!r}")
+
+        # log_build routes level by verdict and returns it.
+        _Handler.mode = "good"
+        lg = _Log()
+        v = fw.log_build(host, lg, timeout=5.0)
+        chk("log_build returns the verdict", v == "no-hash", f"got {v!r}")
+        chk("log_build WARNS on a non-chunked verdict",
+            lg.calls and lg.calls[-1][0] == "warning", f"{lg.calls}")
+
+        lg2 = _Log()
+        saved_fetch = fw.fetch_info
+        try:
+            fw.fetch_info = lambda *a, **k: INFO_A474
+            v = fw.log_build(host, lg2)
+            chk("log_build INFOs a measured image",
+                v == "chunked" and lg2.calls[-1][0] == "info", f"{lg2.calls}")
+            chk("main() exits 0 on a measured image", fw.main(["x", host]) == 0)
+        finally:
+            fw.fetch_info = saved_fetch
+        chk("main() exits 2 on wrong argument count", fw.main(["x"]) == 2)
+    finally:
+        srv.shutdown()
+
+    # --- every recorded build carries its evidence -----------------------
     for h, (kind, detail) in KNOWN_BUILDS.items():
-        _check(f"{h} records evidence", len(detail) > 40 and kind in VERDICTS,
-               f"thin entry {detail!r}", fails, verbose)
+        chk(f"{h} records evidence", len(detail) > 40 and kind in VERDICTS,
+            f"thin entry {detail!r}")
+        chk(f"{h} does not claim reassembly it did not measure",
+            "reassembl" not in detail.lower()
+            or "does NOT evidence" in detail or "rests on" in detail,
+            f"overclaim in {detail!r}")
 
     # Counted, not hardcoded: a check that stops running must not keep
     # inflating the total it is reported against.

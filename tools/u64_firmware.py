@@ -34,13 +34,16 @@ Run::
 """
 from __future__ import annotations
 
+import http.client
 import json
+import socket
 import sys
 import urllib.error
 import urllib.request
 from typing import Optional, Tuple
 
 INFO_TIMEOUT_S = 10.0
+MAX_INFO_BYTES = 64 * 1024     # /v1/info is ~300 B; anything vast is not it
 
 # git_commit_hash -> what this repo MEASURED on that image. Nothing here is
 # taken on report: each entry names the run that established it.
@@ -48,8 +51,12 @@ KNOWN_BUILDS = {
     "a474a7ed": (
         "chunked",
         "GideonZ#807 spike rebased onto upstream test-merge 883f608d "
-        "(fpga 125). $03 $16 present: proven by a full WARP interop run on "
-        "2026-09-03 (4 handshakes ACTIVE, chunked 1472 B send path).",
+        "(fpga 125). Opcode PRESENT — measured by the WARP interop run of "
+        "2026-09-03 (4 handshakes ACTIVE). That run only ever issued "
+        "SINGLE-PART writes (<= 888 B: a 148-byte handshake, ~40-byte DNS), "
+        "so it does NOT evidence firmware-side REASSEMBLY on this image; "
+        "multi-part parity rests on the firmware lane's uci-net-target, "
+        "which is a third-party report, not our measurement.",
     ),
 }
 
@@ -70,8 +77,17 @@ def fetch_info(host: str, timeout: float = INFO_TIMEOUT_S) -> Optional[dict]:
     url = f"http://{host}/v1/info"
     try:
         with urllib.request.urlopen(url, timeout=timeout) as r:
-            return json.loads(r.read().decode("utf-8", "replace"))
-    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+            body = r.read(MAX_INFO_BYTES + 1)
+        if len(body) > MAX_INFO_BYTES:
+            return None                      # not /v1/info; refuse to parse it
+        return json.loads(body.decode("utf-8", "replace"))
+    except (urllib.error.URLError, OSError, socket.timeout,
+            http.client.HTTPException, ValueError, TimeoutError):
+        # http.client.HTTPException is NOT an OSError: a 200 with a short
+        # body against its Content-Length raises IncompleteRead and, before
+        # this line existed, propagated out of a PREFLIGHT and killed a run
+        # that should have proceeded. A build check must never be the thing
+        # that stops a hardware run.
         return None
 
 
@@ -84,6 +100,12 @@ def describe_build(info: Optional[dict]) -> Tuple[str, str]:
     """
     if info is None:
         return "unreachable", "/v1/info did not answer — device unreachable?"
+    if not isinstance(info, dict):
+        # A 200 carrying `[]`, `"3.15"` or `42` is not this device's
+        # /v1/info. The docstring promise above is only true if this is here.
+        return "unreachable", (
+            f"/v1/info answered with {type(info).__name__}, not an object — "
+            f"not a U64 REST endpoint?")
 
     ident = " ".join(
         f"{k}={info.get(k)}"
@@ -92,6 +114,11 @@ def describe_build(info: Optional[dict]) -> Tuple[str, str]:
     )
 
     commit = info.get("git_commit_hash")
+    if commit is not None and not isinstance(commit, str):
+        return "unknown", (
+            f"{ident} git_commit_hash is {type(commit).__name__}, not a "
+            f"string — cannot identify the image; the $16 send path still "
+            f"decides (net_last_error $8E means the handler is absent).")
     if not commit:
         return "no-hash", (
             f"{ident} — no git_commit_hash: firmware predates the field, so "
@@ -107,8 +134,11 @@ def describe_build(info: Optional[dict]) -> Tuple[str, str]:
             f"error $8E means the handler is absent)."
         )
 
-    _, detail = known
-    return "chunked", f"{ident} git_commit_hash={commit} — {detail}"
+    kind, detail = known
+    # Use the recorded kind. Hardcoding "chunked" here made every entry read
+    # as a spike image no matter what it said, so a future entry recording a
+    # STOCK image would have false-greened the preflight.
+    return kind, f"{ident} git_commit_hash={commit} — {detail}"
 
 
 def log_build(host: str, log, timeout: float = INFO_TIMEOUT_S) -> str:
