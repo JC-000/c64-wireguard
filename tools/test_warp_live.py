@@ -390,6 +390,12 @@ CURSOR_LINE_PTR = 0x00D1        # KERNAL: pointer to the current screen line
 CURSOR_COL = 0x00D3             # KERNAL: cursor column within that line
 ANCHOR_LEN = 10
 DECRYPT_FAIL_TEXT = "DECRYPT FAILED"        # src/wg/strings.s:88
+# The two headers the firmware prints IMMEDIATELY BEFORE peer-supplied bytes:
+# msg_recv_hdr (src/wg/strings.s:102) from @t4_udp, and recv_data_msg (:90)
+# from display_payload. Everything after the first of them in a query's
+# window was written by the PEER, through the #129 printable filter, and is
+# therefore attacker-chosen text — including, if it likes, "DECRYPT FAILED".
+PEER_CONTENT_HEADERS = ("MSG: ", "RECV: ")
 SESSION_STATE_MSGS = ("SESSION EXPIRED", "REKEY NEEDED")  # strings.s:113-115
 KEEPALIVE_TEXT = "KEEPALIVE"                # src/wg/strings.s:117
 
@@ -432,8 +438,26 @@ RECV_STATE_CLEARED = (
 # The pattern makes them separable: a byte matching the poison by accident
 # is 1-in-256, and the stop test requires EVERY remaining byte to match, so
 # a false "stopped here" is ~2^-8 per byte of tail.
-POISON_STEP = 0x9D
-POISON_BIAS = 0x5A
+# The pattern is the 1541ultimate lane's, adopted verbatim from
+# tests/e2e/io/command_interface/net_target_test.py (`pattern()` /
+# `run_offset()`): P[i] = (i + seed) % 251. 251 is prime and below 256, so a
+# run of surviving bytes FIXES the offset it started at for any payload
+# shorter than 251*251 — "wrong data" becomes "wrong data starting at offset
+# N", which is the number this whole run hinges on. The old
+# (i * $9D + $5A) & $FF was equally uniform but not self-locating.
+POISON_MOD = 251
+POISON_SEED = 0x5A
+# A tail is only accepted as "the firmware stopped here" when at least this
+# many consecutive bytes survived. One coincidental byte at the very end
+# used to read a FULL write as `partial-write-stopped-at-(len-1)` with
+# probability 1/256 per rejected trial (~9% over a 24-rung run), and it
+# pointed in the worst possible direction: it manufactured "truncated".
+# Requiring a run makes a false stop (1/251)^16 ~ 1e-38.
+#
+# The trade-off, stated because it is real: a genuine truncation SHORTER
+# than this is now reported as a full write. A block-boundary truncation is
+# hundreds of bytes, so this costs nothing we are looking for.
+POISON_MIN_RUN = 16
 
 # OPTIONAL device-side cause byte. No build has it today and this tool does
 # not require one — reject_cause is derived host-side precisely so that no
@@ -824,19 +848,48 @@ def _recv_buf_capacity(L: dict) -> int:
     return RECV_BUF_CAP_FALLBACK
 
 
-def poison_pattern(n: int) -> bytes:
-    """``P[i] = (i * POISON_STEP + POISON_BIAS) & 0xFF`` — the fill whose
-    survival marks bytes the firmware did not write this cycle."""
-    return bytes((i * POISON_STEP + POISON_BIAS) & 0xFF for i in range(n))
+def poison_pattern(n: int, seed: int = POISON_SEED) -> bytes:
+    """``P[i] = (i + seed) % 251`` — the fill whose survival marks bytes the
+    firmware did not write this cycle, and which identifies its own offset.
+
+    From GideonZ/1541ultimate `tests/e2e/io/command_interface/net_target_test.py`
+    (`pattern()`), adopted so both lanes read the same bytes the same way.
+    """
+    return bytes((i + seed) % POISON_MOD for i in range(n))
+
+
+def poison_run_offset(chunk: bytes, seed: int = POISON_SEED) -> Optional[int]:
+    """Where *chunk* started inside :func:`poison_pattern`, or None.
+
+    The counterpart of the firmware lane's `run_offset()`. A surviving run
+    that reports an offset OTHER than where it was found means the buffer
+    holds poison from a different position — i.e. something moved bytes, not
+    merely failed to write them.
+    """
+    if not chunk:
+        return None
+    start = (chunk[0] - seed) % POISON_MOD
+    for index, byte in enumerate(chunk):
+        if byte != (start + seed + index) % POISON_MOD:
+            return None
+    return start
 
 
 def poison_stop(buf: bytes, pattern: bytes) -> int:
     """``min{ i : buf[i:] == pattern[i:] }`` — how far the firmware wrote.
 
     0 means nothing arrived; udp_recv_len means the whole announced
-    datagram was written this cycle, so a tag mismatch on it is GENUINE;
-    UCI_FIRST_BLOCK_PAYLOAD means the copy stopped at the first response
-    block's boundary, i.e. the second block never landed.
+    datagram was written this cycle, so a tag mismatch on it is GENUINE; a
+    value at a response-block boundary means the copy stopped there, i.e.
+    the next block never landed.
+
+    This is the raw scan and it has no tolerance of its own. The tolerance
+    lives in :func:`classify_recv_buffer`, because it can only be applied
+    where the ANNOUNCED length is known: udp_recv_buf is poisoned to its
+    full capacity, so the surviving tail of a perfectly full write already
+    runs from ``udp_len`` to the end of the buffer, and one coincidental
+    byte merely extends that run by one. A tail-length rule here cannot see
+    the difference; a rule on ``udp_len - stop`` can.
     """
     n = min(len(buf), len(pattern))
     i = n
@@ -985,7 +1038,9 @@ def classify_reject(head: bytes, udp_len: Optional[int], msg_recv_len: int,
                     rw_counter_max: Optional[int],
                     rw_bitmap: Optional[bytes],
                     keepalive_suspected: bool = False,
-                    poison_head: bytes = bytes(16)) -> tuple:
+                    poison_head: bytes = bytes(16),
+                    rw_counter_max_before: Optional[int] = None,
+                    rw_counter_max_after: Optional[int] = None) -> tuple:
     """Which reject cause fired, host-side, with NO device code change.
 
     Returns ``(cause, name, detail)`` with *cause* one of the REJECT_*
@@ -1039,6 +1094,30 @@ def classify_reject(head: bytes, udp_len: Optional[int], msg_recv_len: int,
         return None, "no-datagram-arrived", detail
     if msg_recv_len:
         return None, "accepted", detail
+
+    # ACCEPTED BUT NOT A TUNNEL REPLY, and therefore NOT a reject at all.
+    #
+    # transport_decrypt advances the replay window ONLY on its success path:
+    # @advance_done and @just_set_bit (transport.s) are reached after
+    # aead_decrypt returns 0, and NO reject path reaches either. So a window
+    # that moved across this query is proof the decrypt SUCCEEDED — even
+    # though msg_recv_len is zero, which happens whenever udp_tunnel_parse
+    # does not match and session.s falls through to display_payload
+    # (session.s:392-393, :439): a peer keepalive, an ICMP echo request, a
+    # reply on an unexpected port.
+    #
+    # Without this the datagram falls all the way through causes 1-4 and is
+    # reported as the cause-5 residual — i.e. as a Poly1305 tag mismatch.
+    # That is EXACTLY the inference #128 was retracted for, rebuilt in the
+    # structural derivation, and it would have fired on the very run meant
+    # to settle the question. The residual is only sound once everything
+    # that can produce "arrived, no message" without a reject is excluded,
+    # and this was the missing one.
+    if (rw_counter_max_before is not None and rw_counter_max_after is not None
+            and rw_counter_max_after > rw_counter_max_before):
+        detail["rw_counter_max_advanced"] = [rw_counter_max_before,
+                                             rw_counter_max_after]
+        return None, "accepted-not-a-tunnel-reply", detail
 
     # 6 — did the datagram even reach transport_decrypt? This TAKES
     # PRECEDENCE over all five firmware causes, deliberately: none of them
@@ -1123,7 +1202,8 @@ def classify_reject(head: bytes, udp_len: Optional[int], msg_recv_len: int,
 def classify_recv_buffer(buf: bytes, prev_buf: Optional[bytes],
                          udp_len: int,
                          block: int = UCI_FIRST_BLOCK_PAYLOAD,
-                         poison: Optional[bytes] = None) -> dict:
+                         poison: Optional[bytes] = None,
+                         host_tag_verifies: Optional[bool] = None) -> dict:
     """TRUNCATION vs CORRUPTION for one inbound datagram.
 
     A short multi-block SOCKET_READ and a genuine Poly1305 mismatch are
@@ -1162,6 +1242,24 @@ def classify_recv_buffer(buf: bytes, prev_buf: Optional[bytes],
     # --- PRIMARY rule: the poison stop. Single-shot and unambiguous. ----
     if poison is not None:
         stop = poison_stop(buf, poison)
+        out["poison_stop_raw"] = stop
+        # THE TOLERANCE. The scan walks backwards while bytes match, and
+        # udp_recv_buf is poisoned to capacity, so a full write's surviving
+        # tail already runs from udp_len to the end of the buffer. ONE
+        # coincidental byte at buf[udp_len-1] extends it by one and turns
+        # "fully received, so a tag mismatch is genuine" into "partial
+        # write" — under the old (i*$9D+$5A) pattern that was 1/256 per
+        # rejected trial, ~9% over a 24-rung run, and it pointed at the
+        # conclusion we are trying hardest not to reach by accident.
+        #
+        # So a shortfall INSIDE the announced datagram is only believed
+        # when at least POISON_MIN_RUN bytes of it survived. False positive
+        # rate: (1/251)^16 ~ 1e-38. Cost, stated because it is real: a
+        # genuine truncation of fewer than 16 bytes now reads as a full
+        # write. A response-block truncation is hundreds of bytes short.
+        if udp_len and 0 < udp_len - stop < POISON_MIN_RUN:
+            out["poison_short_tail_ignored"] = udp_len - stop
+            stop = udp_len
         out["poison_stop"] = stop
         if stop == 0:
             out["poison_verdict"] = "nothing-written"
@@ -1175,6 +1273,27 @@ def classify_recv_buffer(buf: bytes, prev_buf: Optional[bytes],
         else:
             out["poison_verdict"] = "partial-write-stopped-at-%d" % stop
         out["poison_stop_is_block_multiple"] = (stop % block == 0)
+        # Where the surviving tail SAYS it came from. Equal to `stop` means
+        # the poison at that offset was simply never overwritten. Anything
+        # else means bytes MOVED, which no short read can do.
+        if 0 < stop < len(buf):
+            off = poison_run_offset(buf[stop:stop + 64])
+            out["poison_tail_offset"] = off
+            out["poison_tail_self_consistent"] = (
+                off is None or off == stop % POISON_MOD)
+        # INDEPENDENT CHECK. If the host re-ran the peer's Poly1305 over
+        # this buffer and the tag VERIFIED, then every byte of the announced
+        # datagram was present and correct — whatever the poison scan said.
+        # A tag verifying over a truncated buffer is a 2^-128 event, so this
+        # outranks the poison rule rather than merely corroborating it.
+        if host_tag_verifies is True and stop != udp_len:
+            out["poison_verdict_before_aead"] = out["poison_verdict"]
+            out["poison_verdict"] = (
+                "fully-received (host Poly1305 VERIFIES over the announced "
+                "%d bytes, so every byte was present; the poison scan's "
+                "stop of %d is a coincidence, not a short write)"
+                % (udp_len, stop))
+            out["poison_aead_override"] = True
         out["verdict"] = out["poison_verdict"]
 
     def _baseline(verdict: str) -> None:
@@ -1944,7 +2063,9 @@ def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
                 rw_counter_max=pre.get("rw_counter_max"),
                 rw_bitmap=pre.get("rw_bitmap"),
                 keepalive_suspected=bool(q["keepalive_in_window"]),
-                poison_head=poison[:16])
+                poison_head=poison[:16],
+                rw_counter_max_before=pre.get("rw_counter_max"),
+                rw_counter_max_after=post.get("rw_counter_max"))
             q["reject_cause"] = cause
             q["reject_cause_name"] = cause_name
             q["reject_detail"] = cause_detail
@@ -1971,16 +2092,18 @@ def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
                                       "host derivation says %d — the host "
                                       "rule is wrong somewhere", rung, name,
                                       dev, cause)
-            # --- Item 8: truncation vs corruption ----------------------
-            q["block_forensics"] = classify_recv_buffer(
-                buf, prev_recv_buf, udp_len or 0, poison=poison)
-            prev_recv_buf = buf
             # The strongest single check, and it needs nothing from the
             # device beyond the buffer read just done: re-run the peer's
             # AEAD on the host over the bytes the C64 actually holds. The
             # session receive key is read fresh each query (a rekey changes
             # it), used in memory, and NEVER stored, logged or returned —
             # only the verdict is.
+            #
+            # It runs BEFORE the block forensics, not after, because its
+            # answer OUTRANKS the poison scan: a tag that verifies proves
+            # every announced byte was present, which no coincidence in the
+            # poison tail can contradict.
+            tag_verifies: Optional[bool] = None
             if cause is not None and udp_len:
                 try:
                     recv_key = bytes(tr.read_memory(L["hs_transport_recv"], 32))
@@ -1990,6 +2113,14 @@ def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
                 q["host_aead_check"] = verify_poly1305_host(
                     buf, udp_len, recv_key)
                 del recv_key
+                tag_verifies = q["host_aead_check"].get("tag_verifies")
+
+            # --- Item 8: truncation vs corruption ----------------------
+            q["block_forensics"] = classify_recv_buffer(
+                buf, prev_recv_buf, udp_len or 0, poison=poison,
+                host_tag_verifies=tag_verifies)
+            prev_recv_buf = buf
+            if q.get("host_aead_check"):
                 log.info("rung %d (%s): host-side AEAD says %s; poison stop "
                          "%s of %s", rung, name,
                          q["host_aead_check"].get("verdict"),
@@ -2006,8 +2137,43 @@ def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
             try:
                 after, _full = read_after_anchor(tr, anchor_token)
                 q["screen_anchor_ok"] = True
-                q["screen_decrypt_failed"] = DECRYPT_FAIL_TEXT in after
-                q["screen_decrypt_fail_count"] = after.count(DECRYPT_FAIL_TEXT)
+                # The anchor proves the window is THIS query's. It does not
+                # prove the firmware wrote what is in it. Peer bytes reach
+                # the screen through @t4_udp and display_payload, so a DNS
+                # TXT record containing the literal text "DECRYPT FAILED" —
+                # or the anchor token, or anything else — is printed
+                # verbatim after one of PEER_CONTENT_HEADERS. Searching the
+                # whole window lets the peer author this instrument's
+                # reading, which is the #128 defect with a new marker.
+                #
+                # So the window is cut at the first peer-content header and
+                # only the firmware's own half is searched. Nothing is lost:
+                # within one packet the peer-print paths and @decrypt_fail
+                # are mutually exclusive — a packet whose bytes were printed
+                # is a packet that decrypted.
+                cuts = [after.find(h) for h in PEER_CONTENT_HEADERS]
+                cuts = [c for c in cuts if c >= 0]
+                cut = min(cuts) if cuts else len(after)
+                firmware_half = after[:cut]
+                q["screen_peer_region_from"] = cut if cuts else None
+                q["screen_peer_region_len"] = len(after) - cut
+                q["screen_decrypt_failed"] = (
+                    DECRYPT_FAIL_TEXT in firmware_half)
+                q["screen_decrypt_fail_count"] = firmware_half.count(
+                    DECRYPT_FAIL_TEXT)
+                # Kept visible, and deliberately NOT part of any verdict: a
+                # peer echoing the failure string is worth seeing in the log
+                # exactly once, as evidence about the peer.
+                q["screen_decrypt_fail_in_peer_region"] = (
+                    DECRYPT_FAIL_TEXT in after[cut:])
+                if q["screen_decrypt_fail_in_peer_region"]:
+                    log.warning("rung %d (%s): the PEER's own bytes contain "
+                                "%r. It is excluded from the screen verdict "
+                                "(it sits after %r); reporting it because a "
+                                "peer that sends this string is either "
+                                "unlucky or probing the instrument.",
+                                rung, name, DECRYPT_FAIL_TEXT,
+                                PEER_CONTENT_HEADERS)
                 q["screen_after_anchor"] = " ".join(after.split())[:300]
                 q["session_msgs_this_query"] = sorted(
                     m for m in SESSION_STATE_MSGS if m in after)
@@ -2320,6 +2486,23 @@ def stage_errors(results: dict) -> list[str]:
         for k in ("error", "ping_error"):
             if stage.get(k):
                 out.append(f"{key}: {stage[k]}")
+        # A query whose screen could not be attributed is not a passing
+        # query, it is an ABSENT measurement — and `screen_decrypt_failed`
+        # is None rather than False precisely so the two cannot be
+        # confused. That care is wasted if the distinction reaches nothing:
+        # a reader counting "queries that did not report a failure" absorbs
+        # them as clean, which is the shape of the defect this whole
+        # instrument rewrite exists to prevent. Surfacing them here is what
+        # makes the None mean something to the process, not just to a log.
+        unscored = stage.get("unscored_queries")
+        if unscored:
+            rungs = ", ".join(
+                str(u.get("rung", "?")) if isinstance(u, dict) else str(u)
+                for u in unscored)
+            out.append(
+                f"{key}: {len(unscored)} quer(y/ies) could not be attributed "
+                f"to their own screen (rungs {rungs}); their screen verdict "
+                f"is UNKNOWN, not clean")
     return out
 
 
