@@ -442,8 +442,26 @@ session_handle_packet:
 
 @decrypt_fail:
         ; Deliberately NOT a teardown, unlike @hs_fail above. This is one
-        ; datagram that failed AEAD, not an abandoned session: the keys are
-        ; still good and the peer is still there. Tearing down here would be
+        ; REJECTED datagram, not an abandoned session: the keys are
+        ; still good and the peer is still there.
+        ;
+        ; THIS IS NOT AN AEAD FAILURE MESSAGE. transport_decrypt has a single
+        ; exit (lda #$ff, transport.s:403-786) shared by FIVE causes:
+        ;   1. type byte != 4
+        ;   2. counter byte 7 >= $10
+        ;   3. replay-window / duplicate-bit reject
+        ;   4. udp_recv_len < 32 (underflow)
+        ;   5. Poly1305 tag mismatch  <-- only THIS one is "failed AEAD"
+        ; and there is no counter, so decrypt_fail_msg is the ONLY signal any
+        ; of the five ever produces. Do not read this message as evidence of
+        ; a crypto fault. Issue #128's "inbound replies of 1049-1187 B always
+        ; fail AEAD 9/9" was retracted precisely because a host-side tool
+        ; scraped this string and reported cause 5; cause 3 was never
+        ; excluded, and a truncated multi-block SOCKET_READ (short
+        ; udp_recv_len copies the tag out of the ciphertext, transport.s:562-573)
+        ; is indistinguishable from cause 5 from here. Discriminate before
+        ; concluding — host-side from udp_recv_buf/udp_recv_len if you can,
+        ; distinct codes in A if you cannot. Tearing down here would be
         ; a remotely triggerable session kill — under ip65 anything on the
         ; LAN can put a type-4 byte into udp_recv_buf, and WireGuard's own
         ; answer to an undecryptable packet is to discard it.

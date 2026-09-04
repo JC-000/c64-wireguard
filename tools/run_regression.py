@@ -123,6 +123,18 @@ TESTS = [
     # of defect at all. No emulator, no hardware — a loopback UDP socket for
     # the server.py case; milliseconds.
     ("responder_ts",   ["tools/test_wg_responder_timestamp.py"]),
+    # Issue #129. @t4_udp printed a peer's chat payload through CHROUT with
+    # the printable filter OFF, so PETSCII control codes arriving from the
+    # wire were EXECUTED on the display ($93 clear, $13 home, $12 reverse,
+    # $0E/$8E charset, $90-$9F colour). The oracle is an identity, not a log
+    # line: the same message is delivered twice, once with the control bytes
+    # already replaced by '.', and the whole observable display state (screen
+    # RAM, colour RAM, cursor, $C7/$D4/$D8, the line-link table, $0286, and
+    # VIC $D011/$D016/$D018/$D020-$D024) must match. Ordinary VICE suite,
+    # honours C64_SKIP_BUILD, no build-tree mutation. Deliberately UNSEEDED
+    # here — the payload, the codes and their positions are random per run
+    # and the seed is on the first line of its output (reproduce with --seed).
+    ("petscii_ctrl",   ["tools/test_issue_129_petscii_control.py"]),
     # NOT listed, deliberately: tools/test_uci_*_live.py and
     # tools/test_wg_responder*.py need real hardware or a live responder.
 ]
