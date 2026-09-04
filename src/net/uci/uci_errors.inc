@@ -93,6 +93,78 @@ UCI_ERR_CMD_UNKNOWN    = $8E    ; the firmware does not know the command: the
                                 ; and never will — §13 was retired wholesale
                                 ; at contract v1.0.0 and the numbering came
                                 ; home with it.
+UCI_ERR_SHORT_READ     = $8F    ; SOCKET_READ's reply ENDED with bytes still
+                                ; outstanding: the 2-byte header announced a
+                                ; total, the response blocks stopped short of
+                                ; it, and — in ONE latched read of UCI_STATUS —
+                                ; DATA_AV was clear while STATE was Data Last
+                                ; ($20) or Idle ($00) rather than Data More
+                                ; ($30) or Command Busy ($10). The DATA_AV half
+                                ; of that test is load-bearing, not belt-and-
+                                ; braces: a continuation staged during the
+                                ; fence sets DATA_AV and the final STATE in the
+                                ; same byte, and rg-130 measured a COMPLETE
+                                ; 1216-byte reply being discarded as $8F when
+                                ; only bits 5..4 were consulted. A short read
+                                ; and a mid-fence continuation leave IDENTICAL
+                                ; evidence downstream (copy stops at 893, len
+                                ; reports the announced total), so DATA_AV is
+                                ; the only thing that separates them.
+                                ; The datagram is dropped —
+                                ; udp_recv_ready stays 0 — because a datagram
+                                ; socket has no "rest of it" to fetch on a
+                                ; later poll, and because udp_recv_len already
+                                ; holds the ANNOUNCED length: delivering the
+                                ; partial buffer under it hands the caller a
+                                ; full-length datagram made of stale bytes.
+                                ; DISTINCT from $8A LONG_READ (header claimed
+                                ; MORE than we requested — a framing violation
+                                ; before any copy) and from $89 WAIT_TIMEOUT
+                                ; (@block_wedged: the firmware was still
+                                ; producing the continuation and our bounded
+                                ; wait expired). Same unrecoverable datagram,
+                                ; three different reasons it is unrecoverable,
+                                ; three codes — the entire cost of #128 was
+                                ; one signal ("AEAD failed") carrying five.
+                                ;
+                                ; Measured 2026-09-04, U64E fw 3.15 + the #807
+                                ; spike, with udp_recv_buf pre-poisoned: 11
+                                ; inbound tunnel replies failed Poly1305 at 5
+                                ; announced lengths (1008/1109/1191/1247/1338)
+                                ; and EVERY one stopped copying at 893 bytes —
+                                ; one response block — never any other value;
+                                ; the bytes past 893 were untouched poison at
+                                ; their own offsets. Every success had
+                                ; poison_stop == udp_recv_len exactly. Three of
+                                ; the five lengths both failed and succeeded
+                                ; within a single run, so this is a timing
+                                ; window, not a size band. Issue #130 (from
+                                ; #128); 9fa1923 fixed the sibling $10 case and
+                                ; recorded the reasoning this code applies to
+                                ; the $20/$00 pair it deliberately left alone.
+                                ; OURS, minted in src/net_abi.inc: $8F was the
+                                ; next free UCI code after $8E.
+                                ; RECOVERY IS IMPOSSIBLE at this layer, from
+                                ; the FPGA RTL: in state "10" state(1) moves
+                                ; only on our NEXT_DATA or a VALIDATE write,
+                                ; and the one queue event we can cause sets
+                                ; handshake_in(1) <= state(0) = '0'. No wait
+                                ; can terminate, an ack just ends the
+                                ; transaction, and a re-read returns the NEXT
+                                ; datagram (lwip_recvmsg already consumed this
+                                ; one). The legitimate continuation is the $10
+                                ; Command Busy branch, already TOD-bounded and
+                                ; already reporting $89. So $8F converts silent
+                                ; corruption into a named drop — the datagram
+                                ; is still LOST, it is not recovered.
+                                ; net_poll also records (STATUS & $30) | $80 in
+                                ; uci_short_read_state (exported) so the next
+                                ; run can say whether it was $20 or $00; the
+                                ; two have different causes and NEITHER has
+                                ; ever been observed. Bit 7 makes $00 mean
+                                ; "never written" — UCI_BSS is zero-filled at
+                                ; LOAD, so a bare $30 mask would default to the
+                                ; Idle verdict's own value.
 
 ; TCP state values stored in net_tcp_state
 UCI_TCP_CLOSED         = $00    ; no active socket

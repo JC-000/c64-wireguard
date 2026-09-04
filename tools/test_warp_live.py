@@ -414,12 +414,47 @@ TP_SEND_PER_QUERY = 1
 
 # Receive-state fields ZEROED before EVERY send, with the width to zero.
 # udp_recv_buf is not among them: it is POISONED instead — see below.
+#
+# net_last_error joined this set on 2026-09-04 and it is NOT cosmetic.
+# net_poll never zeroes it on a success path — it is written only when
+# something fails — so it is a LATCH, not a per-poll reading. Leave it and
+# the failure mode is the one this whole branch exists to stamp out: trial N
+# short-reads and sets $8F, trial N+1 succeeds and touches nothing, the tool
+# reads $8F afterwards and attributes it to N+1. Every "which trial failed"
+# conclusion drawn from an uncleared latch is unattributable. Clearing it
+# also gives the read a real meaning: a non-zero value AFTER the query was
+# necessarily written BY the query.
 RECV_STATE_CLEARED = (
     ("msg_recv_len", 2),
     ("tp_payload_len", 2),
     ("tp_packet_len", 2),
     ("udp_recv_len", 2),
+    ("net_last_error", 1),
 )
+
+# UCI-only diagnostic (src/net/uci/net.s): (UCI_STATUS & $30) | $80 latched
+# at net_poll's $8F short-read exit — $A0 Data Last, $80 Idle, $00 never
+# written. Same latch problem as net_last_error, so it is cleared and
+# verified per query too; absent on ip65 builds, hence the label guard at
+# the clear site rather than membership in the tuple above.
+SHORT_READ_STATE_LABEL = "uci_short_read_state"
+SHORT_READ_STATE_NAMES = {0x80: "IDLE ($00)", 0xA0: "DATA_LAST ($20)"}
+
+
+def describe_short_read_state(raw):
+    """Render uci_short_read_state for a report line.
+
+    $00 is "never written", NOT Idle — the whole point of bit 7. Anything
+    else with bit 7 clear predates the self-describing encoding or is a
+    stale/garbled read, and is reported as such rather than guessed at.
+    """
+    if raw is None:
+        return None
+    if raw == 0x00:
+        return "not written"
+    if not raw & 0x80:
+        return f"UNEXPECTED ${raw:02X} (bit 7 clear)"
+    return SHORT_READ_STATE_NAMES.get(raw, f"UNKNOWN ${raw:02X}")
 
 # POISON FILL. udp_recv_buf is filled with a position-dependent pattern
 # before every query, so the offset at which the firmware STOPPED writing is
@@ -982,6 +1017,14 @@ def _clear_recv_state(tr: Ultimate64Transport, L: dict,
         except Exception as exc:                              # noqa: BLE001
             detail["udp_recv_buf_poison"] = repr(exc)
         ok = ok and detail["udp_recv_buf_poison"] is True
+    if SHORT_READ_STATE_LABEL in L:
+        try:
+            tr.write_memory(L[SHORT_READ_STATE_LABEL], b"\x00")
+            detail[SHORT_READ_STATE_LABEL] = (
+                bytes(tr.read_memory(L[SHORT_READ_STATE_LABEL], 1)) == b"\x00")
+        except Exception as exc:                              # noqa: BLE001
+            detail[SHORT_READ_STATE_LABEL] = repr(exc)
+        ok = ok and detail[SHORT_READ_STATE_LABEL] is True
     if DEVICE_CAUSE_LABEL in L:
         try:
             tr.write_memory(L[DEVICE_CAUSE_LABEL],
@@ -1010,9 +1053,14 @@ def _read_session_state(tr: Ultimate64Transport, L: dict) -> dict:
     measurement of it.
     """
     out: dict = {}
-    for name, width in (("wg_state", 1), ("rekey_pending", 1),
-                        ("udp_recv_ready", 1), ("tp_send_counter", 2),
-                        ("net_last_error", 1)):
+    fields = [("wg_state", 1), ("rekey_pending", 1), ("udp_recv_ready", 1),
+              ("tp_send_counter", 2), ("net_last_error", 1)]
+    # UCI-only: the STATE that produced a $8F. Appended rather than made
+    # unconditional so an ip65 run does not record a spurious read error for
+    # a label that backend never exports.
+    if SHORT_READ_STATE_LABEL in L:
+        fields.append((SHORT_READ_STATE_LABEL, 1))
+    for name, width in fields:
         try:
             out[name] = int.from_bytes(bytes(tr.read_memory(L[name], width)),
                                        "little")
@@ -2001,6 +2049,15 @@ def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
         q["tp_send_counter_after"] = post.get("tp_send_counter")
         q["rw_counter_max_after"] = post.get("rw_counter_max")
         q["net_last_error"] = post.get("net_last_error")
+        # $8F (UCI_ERR_SHORT_READ) says net_poll dropped a datagram that
+        # ended short of its announced length; this byte says WHICH terminal
+        # STATE produced it, which decides between a zero-length final block
+        # ($A0 Data Last) and a firmware abort/reset ($80 Idle). Meaningful
+        # only alongside the $8F, and only because both were cleared before
+        # the send — see RECV_STATE_CLEARED.
+        srs = post.get(SHORT_READ_STATE_LABEL)
+        q[SHORT_READ_STATE_LABEL] = srs
+        q[SHORT_READ_STATE_LABEL + "_name"] = describe_short_read_state(srs)
         # Keepalive contamination. This tool makes exactly ONE send per
         # query, so a larger delta means the device sent something of its
         # own inside the receive window — the 10 s keepalive — and every
