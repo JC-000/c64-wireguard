@@ -852,6 +852,21 @@ def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
             "outer_datagram_len": outer, "uci_parts": parts,
             "multipart": bool(pad_to), "staged_ok": staged}
 
+        # VIC snapshot BEFORE the exchange. src/wg/vic_boost.s touches ONLY
+        # $D011 bit 4 (DEN) and documents that screen contents survive
+        # blanking untouched; nothing in this program writes $D020/$D021 at
+        # all. So a change in the border or background colour is not a
+        # display artefact, it is a WRITE THAT SHOULD NOT EXIST — the same
+        # signature as #62, where net_poll trusted a returned length and
+        # copied ~18 KB through $D000, leaving packet bytes in the VIC
+        # registers. Reported by the user watching the screen during this
+        # investigation; worth capturing rather than taking on trust.
+        try:
+            vic_before = bytes(tr.read_memory(0xD011, 1)) + \
+                bytes(tr.read_memory(0xD020, 2))
+        except Exception:                                     # noqa: BLE001
+            vic_before = None
+
         # Recorded per query so a silent reply can be told apart from a send
         # that never left: "no reply" and "never sent" look identical in
         # msg_recv_len alone.
@@ -874,6 +889,18 @@ def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
         # is discarded (src/wg/session.s:442), leaving msg_recv_len at 0 —
         # indistinguishable from a reply that never came unless the screen is
         # read. There is no on-device counter, so the screen IS the instrument.
+        try:
+            vic_after = bytes(tr.read_memory(0xD011, 1)) + \
+                bytes(tr.read_memory(0xD020, 2))
+            if vic_before is not None:
+                q["vic_d011_d020_d021_before"] = vic_before.hex()
+                q["vic_d011_d020_d021_after"] = vic_after.hex()
+                # $D011 legitimately changes (vic_boost blanks); the COLOUR
+                # registers never should.
+                q["vic_colour_changed"] = vic_before[1:] != vic_after[1:]
+        except Exception as exc:                              # noqa: BLE001
+            q["vic_probe_error"] = repr(exc)
+
         if dig_size >= 400:
             # On a failure the packet ARRIVED and lost AEAD, so the question
             # is what landed. udp_recv_len is the OUTER datagram the adapter
