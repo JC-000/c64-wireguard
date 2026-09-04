@@ -73,6 +73,17 @@ is `IP65_BSS`, the ip65 blob's private BSS (issue #80), so growth past
       handler dispatches; only sending it does, and the chunked send
       path's `$8E` (`UCI_ERR_CMD_UNKNOWN`) remains that proof. Do not
       treat a green hash as a substitute for the probe.
+      **What the hash is:** `APP_VERSION_HASH`, from `git rev-parse
+      --short HEAD` at build time (`target/common/rules.mk`), with no
+      `--dirty` marker — the commit the *builder's HEAD* pointed at, an
+      assertion by the builder rather than a property of the binary. A
+      build from a dirty tree reports a hash whose source it was not
+      built from and `/v1/info` cannot tell, because it exposes only
+      that one of the six build identifiers (the rest reach the System
+      Information screen, not REST). The width follows the builder's
+      `core.abbrev`, so the same commit can present as 7 or 8 characters
+      — the tool matches by prefix with a 7-character floor and refuses
+      to guess when a prefix hits more than one recorded build.
       **A reflash resets device config to defaults** — Command Interface
       back to Disabled (`$DF1C` reads `$FF` until it is re-enabled *and*
       the C64 is reset) and any other bench settings gone. The live

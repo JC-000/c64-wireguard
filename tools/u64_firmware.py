@@ -10,9 +10,20 @@ answer. Upstream has since added **`git_commit_hash`** (alongside
 **This does not retire the `$16` probe, and nothing here should be read as
 retiring it.** The two answer different questions:
 
-    git_commit_hash   WHICH IMAGE is flashed.  Cheap, read-only, no device
-                      lock, answerable before a run starts — and only as
-                      good as the build actually matching its recorded hash.
+    git_commit_hash   WHICH COMMIT THE BUILDER'S HEAD POINTED AT. Cheap,
+                      read-only, no device lock, answerable before a run
+                      starts. Measured, not hedged: the firmware embeds
+                      APP_VERSION_HASH from `git rev-parse --short HEAD`
+                      at build time (target/common/rules.mk), with NO
+                      --dirty marker, and /v1/info exposes only that one
+                      of the six build identifiers (the other five reach
+                      the System Information screen, not REST). So a build
+                      made from a DIRTY tree reports a hash whose source
+                      it was not built from, and REST cannot tell. It is
+                      an assertion by the builder, not a property of the
+                      binary. (Clean, at least: the gitinfo:: rule is
+                      .PHONY and regenerates every build, so an image
+                      cannot report a hash OLDER than its own sources.)
     $03 $16 -> reply  WHETHER THE HANDLER DISPATCHES.  The behavioural fact
                       our chunked send path actually depends on. Costs a
                       device round trip and (for our tools) a real send.
@@ -52,7 +63,11 @@ KNOWN_BUILDS = {
     "a474a7ed": (
         "chunked",
         "GideonZ#807 spike rebased onto upstream test-merge 883f608d "
-        "(fpga 125). Opcode PRESENT — measured by the WARP interop run of "
+        "(fpga 125). NOTE: this commit object is unpublished (0 refs; "
+        "gc-eligible). Its published equivalent is 1653b0ac on "
+        "issue-807-write-socket-chunk, and the ONLY delta is "
+        "doc/uci_network_chunked_write.md — no source, so the image's code "
+        "is checkable there. Opcode PRESENT — measured by the WARP interop run of "
         "2026-09-03 (4 handshakes ACTIVE). That run only ever issued "
         "SINGLE-PART writes (<= 888 B: a 148-byte handshake, ~40-byte DNS), "
         "so it does NOT evidence firmware-side REASSEMBLY on this image; "
@@ -114,6 +129,32 @@ def fetch_info(host: str, timeout: float = INFO_TIMEOUT_S) -> Optional[dict]:
         return None
 
 
+MIN_HASH_PREFIX = 7
+
+
+def _match_known(commit: str):
+    """KNOWN_BUILDS lookup that tolerates abbreviation length.
+
+    The firmware embeds `git rev-parse --short HEAD`, whose width follows
+    the BUILDER'S core.abbrev — so the same commit can present as 7 chars
+    here and 8 there, and an exact dict lookup would report a recorded
+    image as [unknown] purely because someone's git config differs.
+    Matches in either direction with a 7-character floor, and returns
+    "ambiguous" rather than picking one when a prefix hits several.
+    """
+    hit = KNOWN_BUILDS.get(commit)
+    if hit is not None:
+        return hit
+    if len(commit) < MIN_HASH_PREFIX:
+        return None
+    hits = [v for k, v in KNOWN_BUILDS.items()
+            if len(k) >= MIN_HASH_PREFIX
+            and (k.startswith(commit) or commit.startswith(k))]
+    if len(hits) > 1:
+        return "ambiguous"
+    return hits[0] if hits else None
+
+
 def describe_build(info: Optional[dict]) -> Tuple[str, str]:
     """(verdict, one-line human description) for a `/v1/info` payload.
 
@@ -159,7 +200,13 @@ def describe_build(info: Optional[dict]) -> Tuple[str, str]:
             f"$03 $16 distinguishes a #807 spike from stock."
         )
 
-    known = KNOWN_BUILDS.get(commit)
+    known = _match_known(commit)
+    if known == "ambiguous":
+        return "unknown", (
+            f"{ident} git_commit_hash={commit} — matches more than one "
+            f"recorded build by prefix; refusing to guess which. The $16 "
+            f"send path still decides (net_last_error $8E means the handler "
+            f"is absent).")
     if known is None:
         return "unknown", (
             f"{ident} git_commit_hash={commit} — image not measured by this "

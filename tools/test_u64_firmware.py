@@ -188,6 +188,34 @@ def main(argv) -> int:
         KNOWN_BUILDS.clear()
         KNOWN_BUILDS.update(saved)
 
+    # --- abbreviation length must not decide the verdict ------------------
+    # The firmware embeds `git rev-parse --short HEAD`, whose width follows
+    # the BUILDER's core.abbrev, so the same commit can present as 7 chars
+    # here and 8 there. An exact dict lookup would report a recorded image
+    # as [unknown] purely because someone's git config differs.
+    chk("7-char prefix of a recorded hash still matches",
+        describe_build(dict(INFO_A474, git_commit_hash="a474a7e"))[0] == "chunked")
+    chk("a longer form of a recorded hash still matches",
+        describe_build(dict(INFO_A474, git_commit_hash="a474a7ed99"))[0] == "chunked")
+    chk("a prefix below the 7-char floor does NOT match",
+        describe_build(dict(INFO_A474, git_commit_hash="a474"))[0] == "unknown")
+    saved2 = dict(KNOWN_BUILDS)
+    try:
+        KNOWN_BUILDS["a474a7ee"] = ("chunked", "a different image, recorded " * 2)
+        v, txt = describe_build(dict(INFO_A474, git_commit_hash="a474a7e"))
+        chk("an ambiguous prefix refuses to guess",
+            v == "unknown" and "more than one" in txt, f"{v!r} {txt!r}")
+    finally:
+        KNOWN_BUILDS.clear()
+        KNOWN_BUILDS.update(saved2)
+
+    # --- the recorded entry must stay checkable after gc -------------------
+    # a474a7ed is a dangling object (0 refs, gc-eligible). The entry has to
+    # name its published equivalent or the evidence evaporates with it.
+    chk("the unpublished hash names its published equivalent",
+        "1653b0ac" in KNOWN_BUILDS["a474a7ed"][1],
+        "entry does not name the published commit")
+
     # --- describe_build must never raise ---------------------------------
     hostile = [[], "3.15", 42, 3.5, True, {"git_commit_hash": ["a"]},
                {"git_commit_hash": {"a": 1}}, {"git_commit_hash": 7},
