@@ -65,6 +65,7 @@ from c64_test_harness import (  # noqa: E402
     DeviceLock, DeviceLockTimeout, Labels, enable_uci, get_uci_enabled,
     probe_u64, write_bytes,
 )
+from u64_firmware import log_build  # noqa: E402
 from c64_test_harness.backends.u64_debug_capture import DebugCapture  # noqa: E402
 from c64_test_harness.backends.ultimate64 import Ultimate64Transport  # noqa: E402
 from c64_test_harness.backends.ultimate64_client import (  # noqa: E402
@@ -702,6 +703,7 @@ def main() -> int:
     if os.environ.get("U64_ALLOW_MUTATE") != "1":
         _skip("U64_ALLOW_MUTATE=1 required (test mutates Turbo + Debug Stream Mode)")
     password = os.environ.get("U64_PASSWORD")
+    log_build(host, log)   # which image? /v1/info; $8E below is the proof
     probe = probe_u64(host, password=password)
     if not probe.reachable:
         _skip(f"U64 at {host} not reachable: {probe.error}")

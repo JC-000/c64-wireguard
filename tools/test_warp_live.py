@@ -120,6 +120,7 @@ from c64_test_harness.backends.ultimate64_helpers import (  # noqa: E402
 )
 
 import wg_c64_input as ki  # noqa: E402
+from u64_firmware import log_build  # noqa: E402
 
 log = logging.getLogger("warp_live")
 logging.basicConfig(level=logging.INFO,
@@ -761,6 +762,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         log.error("device %s not reachable: %s", args.host, probe.error)
         return 1
     log.info("probe: %s", probe)
+    # Build IDENTITY from /v1/info (read-only, pre-lock). Not a gate: the
+    # chunked send path's $8E is the behavioural check — see u64_firmware.
+    log_build(args.host, log)
 
     lock = DeviceLock(args.host)
     try:

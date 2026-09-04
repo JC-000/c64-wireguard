@@ -29,6 +29,11 @@ TESTS = [
     # Build-tree independent (verified against a tree with no build/ at all),
     # so it is safe in the parallel pool alongside the mutators.
     ("suite_imports", ["tools/test_suite_imports.py"]),
+    # Host-side only (no device, no network): judgement about /v1/info's
+    # git_commit_hash, incl. that an UNKNOWN hash warns rather than
+    # refuses — a host-side allowlist that blocked the next legitimate
+    # firmware rebase would be worse than the thing it guards against.
+    ("u64_firmware", ["tools/test_u64_firmware.py", "--verbose"]),
     ("session",    ["tools/test_session.py", "--seed", "51820", "--verbose"]),
     ("transport",  ["tools/test_transport.py", "--seed", "7539"]),
     ("blake2s",    ["tools/test_blake2s.py", "--seed", "7539"]),
