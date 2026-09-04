@@ -212,6 +212,26 @@ MULTIPART_RESOLVER_IP = "208.67.222.222"
 # unreachable through the tunnel".
 SMALL_PROBE_LEN = 200
 
+# Inbound sizes to sweep, as (name, measured reply size). EDNS bufsize does
+# NOT work as a size knob: a resolver answers a query it cannot fit with a
+# 42-byte TC=1 stub, so sweeping bufsize sweeps nothing (measured — every
+# size from 400 to 1200 returned 42 bytes). Real names with known TXT reply
+# sizes do work. Sizes measured host-side against 1.1.1.1 on 2026-09-04 and
+# may drift as those records change; the tool logs what actually arrived, so
+# a drifted entry shows up as a mismatch rather than a wrong conclusion.
+#
+# The ladder deliberately brackets 893 — the first SOCKET_READ block payload,
+# hence where multi-block reassembly begins.
+REPLY_SWEEP_NAMES = (
+    ("github.com", 39),        # single block, known good
+    ("facebook.com", 476),     # single block
+    ("slack.com", 948),        # FIRST size above the 893-byte block boundary
+    ("bitbucket.org", 1049),
+    ("paypal.com", 1131),
+    ("google.com", 1187),
+    ("namecheap.com", 1278),   # the size that fails ~55% of the time
+)
+
 # Each rung is sent this many times. The inbound path is INTERMITTENT here
 # (a 1278 B reply failed to decrypt in 2 of 4 runs on 2026-09-03, and the
 # 800 B control answered in 1 of 2), so a single observation distinguishes
@@ -707,7 +727,8 @@ def run_stage_rekey(tr: Ultimate64Transport, L: dict, n: int,
 def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
                 c64_priv: bytes, c64_pub: bytes, resp_pub: bytes,
                 seed: int, backend: str = "uci", turbo_mhz: int = 48,
-                multipart: int = 0) -> dict:
+                multipart: int = 0, large_repeats: int = 1,
+                reply_sweep: int = 0) -> dict:
     result: dict = {"stage": "C"}
     prg_bytes = PRG_C.read_bytes()
     result["prg"] = _fingerprint("Stage C", prg_bytes, L, backend)
@@ -731,7 +752,13 @@ def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
         return result
 
     t0 = time.monotonic()
-    active = ki.wait_for_state(tr, L["wg_state"], SESSION_ACTIVE, HS_POLL_TIMEOUT, poll=1.0)
+    # Scale with the clock: the handshake is CPU-bound, so a fixed 120 s
+    # budget silently becomes a failure at any speed below 48 MHz. A 16 MHz
+    # run timed out at 120.9 s with the Type-2 response already received and
+    # wg_state = HS_SENT — a measurement artefact that reads exactly like a
+    # broken handshake.
+    hs_budget = HS_POLL_TIMEOUT * max(1.0, 48.0 / max(1, turbo_mhz))
+    active = ki.wait_for_state(tr, L["wg_state"], SESSION_ACTIVE, hs_budget, poll=1.0)
     elapsed = time.monotonic() - t0
     result["handshake_seconds"] = round(elapsed, 1)
     result["active"] = active
@@ -741,10 +768,25 @@ def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
     log.info("Stage C: ACTIVE in %.1fs", elapsed)
 
     random.seed(seed)
+    # The 1278 B reply is the INBOUND case under investigation: it failed to
+    # decrypt in 2 of 4 runs on 2026-09-03. Repeat it to get a RATE. The name
+    # is deliberately NOT randomised here — the variable under test is the
+    # reply SIZE, and a different name returns a different size.
     queries = [
-        ("namecheap.com", DNS_QTYPE_TXT, 1278, "900-1279 band", None, None),
-        ("github.com", DNS_QTYPE_TXT, 1928, "targets >1280 (Cloudflare WARP MTU)", None, None),
+        ("namecheap.com", DNS_QTYPE_TXT, 1278, "900-1279 band", None, None, 1400)
+    ] * max(1, large_repeats)
+    queries += [
+        ("github.com", DNS_QTYPE_TXT, 1928, "targets >1280 (Cloudflare WARP MTU)", None, None, 1400),
     ]
+    if reply_sweep:
+        # Sweep the INBOUND size with one knob: EDNS0 advertises how large a
+        # reply we will accept, so the resolver truncates to fit. Same query,
+        # same peer, same path — only the reply size moves. Finds the knee.
+        for nm, expect in REPLY_SWEEP_NAMES:
+            for _ in range(reply_sweep):
+                queries.append((nm, DNS_QTYPE_TXT, expect,
+                                f"SWEEP: {nm} ~{expect} B reply",
+                                None, None, 1400))
     if multipart:
         # Three rungs x MULTIPART_REPEATS, differing ONLY in size, so each
         # adjacent pair isolates exactly one variable:
@@ -765,9 +807,9 @@ def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
                 tk = "".join(random.choice(string.ascii_lowercase) for _ in range(10))
                 queries.append((f"{tk}.cloudflare.com", DNS_QTYPE_TXT, 0,
                                 f"{label}: {size} B inner -> {MULTIPART_RESOLVER_IP}",
-                                size, want))
+                                size, want, 1400))
     result["queries"] = []
-    for name, qtype, dig_size, band, pad_to, want_parts in queries:
+    for name, qtype, dig_size, band, pad_to, want_parts, bufsize in queries:
         txn_id = random.randint(0, 0xFFFF)
         target = MULTIPART_RESOLVER_IP if pad_to else PING_TARGET_IP
         if pad_to:
@@ -793,7 +835,7 @@ def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
                      "%d B = %d parts of <=%d (%s)", name, txn_id, len(wire),
                      outer, parts, UCI_CHUNK_PART_MAX, band)
         else:
-            question, wire = build_dns_query(name, qtype, txn_id, bufsize=1400)
+            question, wire = build_dns_query(name, qtype, txn_id, bufsize=bufsize)
             outer, parts = datagram_parts(len(wire))
             log.info("DNS query %s %s txn_id=%d wire_len=%d dig_measured=%d (%s)",
                      name, {16: "TXT"}.get(qtype, qtype), txn_id, len(wire),
@@ -828,6 +870,43 @@ def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
                 break
             time.sleep(0.25)
         q["reply_recv_len"] = recv_len
+        # A 1278 B reply that ARRIVES but fails AEAD prints DECRYPT FAILED and
+        # is discarded (src/wg/session.s:442), leaving msg_recv_len at 0 —
+        # indistinguishable from a reply that never came unless the screen is
+        # read. There is no on-device counter, so the screen IS the instrument.
+        if dig_size >= 400:
+            # On a failure the packet ARRIVED and lost AEAD, so the question
+            # is what landed. udp_recv_len is the OUTER datagram the adapter
+            # believes it read (expect 1278 + 28 IP/UDP + 32 WG overhead);
+            # short means the multi-block SOCKET_READ path truncated, exact
+            # means the bytes were corrupted instead. tp_payload_len is what
+            # the transport layer then saw.
+            try:
+                q["udp_recv_len"] = int.from_bytes(
+                    tr.read_memory(L["udp_recv_len"], 2), "little")
+                q["tp_payload_len"] = int.from_bytes(
+                    tr.read_memory(L["tp_payload_len"], 2), "little")
+                q["net_last_error"] = "$%02X" % tr.read_memory(
+                    L["net_last_error"], 1)[0]
+                # udp_recv_len can be an ANNOUNCED total rather than a
+                # count of bytes actually copied, so it is not evidence the
+                # copy was right. Capture the head and tail of the buffer
+                # too: the WireGuard Type-4 header (type=4, reserved 0,
+                # receiver index, 8-byte counter) is checkable without the
+                # plaintext, and tells us whether corruption is at the front
+                # or later in the datagram.
+                head = bytes(tr.read_memory(L["udp_recv_buf"], 16))
+                q["recv_head"] = head.hex()
+                q["type4_ok"] = head[0] == 4 and head[1:4] == b"\x00\x00\x00"
+            except Exception as exc:                          # noqa: BLE001
+                q["len_probe_error"] = repr(exc)
+            try:
+                screen = dump_screen(tr, label="")
+                q["decrypt_failed"] = "DECRYPT FAILED" in screen.split(
+                    "MSG>")[-1] if recv_len == 0 else False
+                q["screen_decrypt_fail_total"] = screen.count("DECRYPT FAILED")
+            except Exception as exc:                          # noqa: BLE001
+                q["screen_error"] = repr(exc)
 
         if recv_len:
             recv_ptr = int.from_bytes(tr.read_memory(L["msg_recv_ptr"], 2), "little")
@@ -876,6 +955,19 @@ def main(argv: Optional[list[str]] = None) -> int:
                         "increases and wg_state returns to ACTIVE each "
                         "time (issue #87). RED BY CONSTRUCTION (raises) "
                         "against Cloudflare WARP on unfixed firmware.")
+    p.add_argument("--reply-sweep", type=int, default=0, metavar="N",
+                   help="Sweep the INBOUND reply size via EDNS bufsize, N "
+                        "attempts per size, to find where decrypt failures "
+                        "begin. The raw read path is good to 1472 B, so a "
+                        "knee here is in the WireGuard layer, not the UCI "
+                        "adapter.")
+    p.add_argument("--large-repeats", type=int, default=1, metavar="N",
+                   help="Repeat the 1278-byte-reply DNS query N times in "
+                        "Stage C and report a per-attempt success/DECRYPT "
+                        "FAILED rate. The inbound decrypt intermittent "
+                        "(2 of 4 runs, 2026-09-03) needs a rate, not an "
+                        "anecdote; contention from an unserialised lane is "
+                        "the leading alternative explanation.")
     p.add_argument("--multipart", type=int, default=0, metavar="N",
                    help="Stage C also sends a DNS query padded (EDNS0 option "
                         "12) to N bytes of inner payload, so the outer "
@@ -1026,7 +1118,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         # --- Stage C ---
         c = run_stage_c(tr, client, L_C, c64_priv, c64_pub, resp_pub, seed,
                         backend=args.backend, turbo_mhz=args.turbo,
-                        multipart=args.multipart)
+                        multipart=args.multipart,
+                        large_repeats=args.large_repeats,
+                        reply_sweep=args.reply_sweep)
         results["stage_c"] = c
 
     finally:
