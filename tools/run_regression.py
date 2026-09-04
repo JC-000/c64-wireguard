@@ -227,6 +227,17 @@ SERIAL_TESTS = [
     # map. Serial: needs a BACKEND=ip65 tree and builds one. Retires the
     # FATAL path of tools/test_ip65_bss_corruption.py (rig-only, opt-in).
     ("ip65_bss_guard", ["tools/test_ip65_bss_guard.py"]),
+    # Issue #130. net_poll's @block_end block-drain decision: a reply that
+    # ends with uci_poll_rem non-zero must be DROPPED with a distinct error,
+    # and a continuation staged inside the fence must still be DRAINED.
+    # VICE cannot reach any of it — $DF1D reads $FF there, so the multi-block
+    # SOCKET_READ path does not exist — so this runs the real assembled
+    # net_poll on a host-side 6502 (tools/uci/mos6502.py) against a model of
+    # $DF1C-$DF1F. Serial: needs `make BACKEND=uci`, which it builds itself,
+    # so it mutates the shared tree exactly like uci_stub. Unseeded here; the
+    # announced lengths and payloads are random per run and the seed is on
+    # the first line of its output (reproduce with --seed).
+    ("uci_short_read", ["tools/test_uci_short_read_drop.py"]),
     # NOT listed, deliberately: tools/test_ip65_udp_echo_vice.py and
     # tools/test_ip65_handshake_vice.py need the ethernet VICE rig (feth
     # pair + dnsmasq + a pcap-capable x64sc); they exit 77 without it.
