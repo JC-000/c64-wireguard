@@ -379,12 +379,22 @@ def group_splitting(transport, L, put_byte_stub, rng, part_max):
         check(leftover == 0,
               f"{total} B: command stream is a whole number of $16 headers",
               f"{len(raw)} captured bytes, {leftover} left over")
+        # DIAGNOSTIC, not independent evidence: the offset-tiling check
+        # below encodes the part count, so this can only ever agree with it.
+        # Kept for failure-message quality ("got 1: off=0 total=889" reads
+        # better than a list mismatch) — do not count it when judging how
+        # much of the split is actually covered.
         check(len(parts) == want,
               f"{total} B: exactly {want} part(s) issued",
               f"got {len(parts)}: {describe(parts)}")
         check(all(p["cmd"] == UCI_CMD_SOCKET_WRITE_CHUNK for p in parts),
               f"{total} B: every part carries opcode $16",
               f"opcodes {[hex(p['cmd']) for p in parts]}")
+        # Weakly independent: this can only fail if `lda uci_socket_id`
+        # broke, which the single-part case would catch too. Its one real
+        # contribution is that EVERY part names the same socket — a part
+        # that lost the binding mid-datagram is invisible to the payload
+        # capture, which never sees the header stream.
         check(all(p["socket"] == socket_id for p in parts),
               f"{total} B: every part names socket {socket_id}",
               f"sockets {[p['socket'] for p in parts]}")
