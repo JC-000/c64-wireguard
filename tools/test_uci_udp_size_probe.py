@@ -277,9 +277,6 @@ def main() -> int:
     if not os.environ.get("U64_ALLOW_MUTATE"):
         print("SKIP: U64_ALLOW_MUTATE not set", file=sys.stderr); return 77
 
-    if not probe_u64(host).reachable:
-        print(f"SKIP: {host} unreachable"); return 77
-
     if not os.environ.get("C64_SKIP_BUILD"):
         import subprocess
         for cmd in (["make", "clean"], ["make", "BACKEND=uci"]):
@@ -302,28 +299,48 @@ def main() -> int:
                   e.lockfile_age_seconds, e.device_reachable_rest)
         print(f"SKIP: {e}"); return 77
 
-    client = Ultimate64Client(host=host, timeout=10.0)
-    tr = Ultimate64Transport(host=host, timeout=10.0, client=client)
-
-    # Detect wedged-runner state before doing destructive work.
+    # The lock is HELD from here, and until this change nothing between the
+    # acquire and the main try/finally below released it: a raise in the
+    # health check, in client.reboot() or in enable_uci leaked the lock, and
+    # the next lane would queue behind a holder that no longer existed until
+    # the heartbeat gave up on it.
+    setup_ok = False
     try:
-        runner_health_check(client)
-    except Ultimate64RunnerStuckError as exc:
-        log.warning("runner is wedged: %s — running recover()", exc)
-        step = recover(client)
-        log.info("recover() returned %r — re-checking runner", step)
-        runner_health_check(client)
+        # Reachability, INSIDE the lock. It is a REST read to the shared
+        # device and used to run before the lock was held. Standing rule:
+        # every access queues through the harness, reads included — an
+        # unserialised read can observe another lane's half-applied config
+        # rewrite and raise nothing.
+        if not probe_u64(host).reachable:
+            print(f"SKIP: {host} unreachable")
+            return 77
 
-    log.info("rebooting U64 to clear UCI state...")
-    client.reboot()
-    time.sleep(10.0)
-    if not get_uci_enabled(client):
-        log.info("re-enabling UCI via REST")
-        enable_uci(client); time.sleep(0.5)
+        client = Ultimate64Client(host=host, timeout=10.0)
+        tr = Ultimate64Transport(host=host, timeout=10.0, client=client)
 
-    orig_mhz = _safe(get_turbo_mhz, client)
-    orig_mode = _safe(get_debug_stream_mode, client) or ""
-    local_ip = _local_ip_for(host)
+        # Detect wedged-runner state before doing destructive work.
+        try:
+            runner_health_check(client)
+        except Ultimate64RunnerStuckError as exc:
+            log.warning("runner is wedged: %s — running recover()", exc)
+            step = recover(client)
+            log.info("recover() returned %r — re-checking runner", step)
+            runner_health_check(client)
+
+        log.info("rebooting U64 to clear UCI state...")
+        client.reboot()
+        time.sleep(10.0)
+        if not get_uci_enabled(client):
+            log.info("re-enabling UCI via REST")
+            enable_uci(client); time.sleep(0.5)
+
+        orig_mhz = _safe(get_turbo_mhz, client)
+        orig_mode = _safe(get_debug_stream_mode, client) or ""
+        local_ip = _local_ip_for(host)
+        setup_ok = True
+    finally:
+        if not setup_ok:
+            lock.release()
 
     cap = DebugCapture(port=DEBUG_PORT)
     responder = UDPSizeResponder(port=0)
