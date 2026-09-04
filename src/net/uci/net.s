@@ -82,6 +82,29 @@
 ; header on an oversized datagram as UNMEASURED — this makes it observable
 ; from the host so the $8A row's mechanism note can be written from data.
 .export uci_read_hdr
+; Exported for diagnostics: the STATE nibble that caused a $8F short read.
+; $20 (Data Last) and $00 (Idle) are DIFFERENT root causes and neither has
+; ever been observed — every "$20/$00" attribution in issues #128/#130 is
+; inferred from a code comment, because tools/test_warp_live.py captured
+; poison_stop but never UCI_STATUS. The RTL analysis narrows it hard: a
+; normal firmware block ends exactly on read_total, so bytes-outstanding
+; with $20 requires a FINAL BLOCK OF LENGTH ZERO (c_message_empty, returned
+; from the one place that can — get_more_data's `read_offset >= read_total`
+; guard — which fires only if discard_read_reply() ran between blocks),
+; whereas $00 Idle requires HANDSHAKE_RESET, which run_task reaches only on
+; the CMD_ABORT_DATA branch. One byte decides which world we are in.
+; ENCODING: (UCI_STATUS & $30) | $80 — $A0 Data Last, $80 Idle, and $00
+; ONLY for "never written". Bit 7 is set precisely so the never-written case
+; is distinguishable: UCI_BSS lands in MAIN_AREA_LO, which the cfg emits
+; zero-filled, so a raw $30-masked store would read $00 on a fresh LOAD and
+; be indistinguishable from the Idle verdict.
+; ONLY MEANINGFUL WHEN net_last_error == $8F: it is written at @block_short
+; and never cleared, so a stale value outlives the poll that wrote it.
+; tools/test_warp_live.py therefore clears BOTH this byte and net_last_error
+; before every query and verifies the clear took, exactly as it does for the
+; udp_recv_buf poison — without that, a $8F from trial N is read back and
+; attributed to trial N+1.
+.export uci_short_read_state
 
 ; --- primitives from uci_cmd.s ---
 .import uci_abort
@@ -1336,8 +1359,59 @@ net_poll:
         ;   $10 Command Busy the firmware is still producing the next block
         ;                    -> WAIT (bounded) for STATE to change, then back
         ;                    to @byte_loop; $89 on expiry
-        ;   $20 Data Last    reply ended with bytes outstanding: short reply,
-        ;   $00 Idle         take what we got rather than hang
+        ;   $20 Data Last    the reply ENDED with bytes still outstanding:
+        ;   $00 Idle         the datagram is short of its announced length,
+        ;                    so it is unrecoverable -> error exit ($8F), see
+        ;                    @block_short
+        ;
+        ; BUT READ DATA_AV FIRST, FROM THE SAME LATCHED BYTE. @byte_loop got
+        ; here because ITS read of UCI_STATUS showed DATA_AV clear; the read
+        ; below happens one uci_fence later — 5450 cycles, ~85 us at 64 MHz.
+        ; If the firmware stages the continuation inside that window it sets
+        ; DATA_AV *and* the final STATE in the SAME register byte, so a test
+        ; that looks only at bits 5..4 sees "Data Last with bytes
+        ; outstanding" while a full block sits unread in the FIFO. Measured
+        ; by rg-130 on an announced 1216 B reply delivered COMPLETE in two
+        ; blocks, varying only block 2's staging latency: 5450 cyc -> whole
+        ; datagram; 5500 cyc -> stop=893 with len=1216, i.e. the #130
+        ; signature produced by a reply that was never short; 20000 cyc ->
+        ; whole datagram again. So poison_stop == 893 has TWO causes, and
+        ; only DATA_AV tells them apart. `tax` latches ONE read for both
+        ; tests: two reads could straddle the staging edge and disagree, and
+        ; the $30 arm needs the distinction too — without it an already-
+        ; drained Data More block and a freshly staged one are identical at
+        ; the compare, and we would re-ack instead of draining.
+        ;
+        ; WHY THE RE-ENTRY TERMINATES, structurally — no new wait, bounded or
+        ; otherwise, is introduced here, and this project has enough history
+        ; of "bounded" waits that were not (the CIA1 TOD incident) to say how
+        ; rather than assert that. @byte_loop's FIRST act is to exit to
+        ; @done_data when uci_poll_rem is zero, and its second is to test
+        ; DATA_AV and, if set, consume one byte and decrement uci_poll_rem.
+        ; DATA_AV is FIFO-not-empty: the firmware only ever sets it, and only
+        ; our own read of UCI_RESP_DATA clears it, so it cannot go 1 -> 0
+        ; behind us and it cannot oscillate. Therefore every arrival back
+        ; here from the jmp below has strictly decremented uci_poll_rem at
+        ; least once, and uci_poll_rem is a monotonically decreasing 16-bit
+        ; counter that started at the header length — itself already clamped
+        ; to UCI_READ_CHUNK_MAX by the over-claim check at @len_ok. The loop
+        ; therefore runs at most 1472 times and then leaves through
+        ; @done_data.
+        ;
+        ; THAT BOUND COVERS THE RE-ENTRY ADDED HERE, and nothing wider. It is
+        ; not a claim that the whole state machine is bounded: the $30 arm's
+        ; cycle (@block_more -> uci_ack -> @byte_loop -> @block_end -> Data
+        ; More again) has NO outer bound, because a Data More block that
+        ; carried no bytes would leave uci_poll_rem unchanged and the
+        ; decrementing-counter argument above does not apply to it. A
+        ; firmware emitting endless zero-length Data More blocks would spin
+        ; there, and each individual uci_wait_reply_staged being TOD-bounded
+        ; does not bound the cycle that contains it. Pre-existing, not
+        ; introduced by the DATA_AV test, and believed unreachable — the
+        ; firmware's read_offset advances monotonically toward read_total —
+        ; but stated rather than glossed, because "the waits inside it are
+        ; bounded, therefore it terminates" is the exact reasoning that made
+        ; every bounded UCI wait unbounded before the CIA1 TOD was started.
         ;
         ; WHY $10 IS REACHABLE HERE: our DATA_ACC on a Data More block makes
         ; the FPGA drop STATE to 01 at once (vhdl: `state(1) <= '0'` with
@@ -1358,13 +1432,23 @@ net_poll:
         beq @done_data          ; nothing outstanding — reply complete
 
         lda UCI_STATUS
-        uci_fence               ; settle before testing STATE
+        uci_fence               ; settle before latching STATUS
+        tax                     ; ONE read decides both tests below
+        and #UCI_STAT_DATA_AV
+        beq @block_terminal     ; nothing staged — the STATE field decides
+        jmp @byte_loop          ; staged during the fence after all: drain it,
+                                ; do NOT mistake it for a short reply
+
+@block_terminal:
+        ; DATA_AV was clear in the latched byte, so the FIFO really is empty
+        ; and the STATE field is the last word on this reply.
+        txa
         and #UCI_STAT_STATE
         cmp #UCI_STATE_DATA_MORE
         beq @block_more
         cmp #UCI_STATE_BUSY
-        bne @done_data          ; Data Last / Idle with bytes outstanding:
-                                ; short reply, take what we got
+        bne @block_short        ; Data Last / Idle with bytes outstanding —
+                                ; the announced datagram never arrived in full
 
         ; Command Busy: the continuation is being staged. Bounded wait for
         ; STATE to leave 01, then resume draining into the SAME buffer
@@ -1384,6 +1468,79 @@ net_poll:
         ; $89 already in net_last_error. The datagram is unrecoverable (a
         ; datagram socket has no "rest of it" to fetch later), so this is an
         ; error exit, NOT a delivery of the partial buffer.
+        jmp @poll_fail
+
+@block_short:
+        ; STATE is Data Last ($20) or Idle ($00) with uci_poll_rem non-zero
+        ; AND DATA_AV clear in the same latched status byte: the firmware has
+        ; finished presenting the reply and it is SHORT of the total the
+        ; 2-byte header announced. Exactly the @block_wedged
+        ; situation reached by a different route, so it gets the same answer.
+        ; A datagram socket has no "rest of it" to fetch on a later poll, so
+        ; the datagram is unrecoverable — and DELIVERING it is worse than
+        ; dropping it, because udp_recv_len still holds the ANNOUNCED length
+        ; written at @len_ok and nothing here can correct it: the caller
+        ; would read a full-length datagram off a partially filled buffer.
+        ;
+        ; NOT hypothetical, and not the same defect as #70's truncation
+        ; (that one was the $10 Command Busy race, fixed in 9fa1923, which
+        ; deliberately left this pair alone as "short reply as before").
+        ; Measured 2026-09-04 on the U64E (fw 3.15 + #807 spike) with
+        ; udp_recv_buf pre-poisoned: ELEVEN inbound tunnel replies failed
+        ; Poly1305 across FIVE announced lengths (1008/1109/1191/1247/1338),
+        ; and every one of them stopped copying at exactly 893 bytes — one
+        ; response block — while udp_recv_len reported the announced total.
+        ; The bytes past 893 were untouched poison at their own offsets, so
+        ; nothing had been written past the stop. Every SUCCESSFUL reply had
+        ; poison_stop == udp_recv_len exactly. 1008, 1247 and 1338 each both
+        ; failed AND succeeded within one run, so it is timing-dependent,
+        ; not a size threshold. In the tunnel the consequence is that
+        ; wg_transport_recv reads the Poly1305 tag out of the middle of the
+        ; ciphertext and the AEAD compare fails (src/wg/transport.s). Issue
+        ; #128 / #130.
+        ;
+        ; RECOVERY IS IMPOSSIBLE HERE, not merely unwise — established from
+        ; the FPGA RTL, so nobody need re-open it. In state "10", state(1)
+        ; changes only via our NEXT_DATA or a VALIDATE write, and the only
+        ; queue event we can cause sets handshake_in(1) <= state(0), which is
+        ; '0' there: no bounded wait could ever terminate, an ack merely ends
+        ; the transaction, and a re-read returns the NEXT datagram because
+        ; lwip_recvmsg has already consumed this one. The one continuation
+        ; that IS legitimate is the $10 Command Busy branch above, which
+        ; waits through uci_wait_reply_staged on the TOD budget and reports
+        ; $89. So this exit DROPS the datagram: it turns silent corruption
+        ; into a named failure, it does not restore the packet.
+        ;
+        ; DO NOT "SIMPLIFY" THE DATA_AV TEST AWAY. Reaching this label means
+        ; DATA_AV was CLEAR in the byte the STATE field came from. Dropping
+        ; that test — or splitting the two tests across two reads of
+        ; UCI_STATUS — makes this exit swallow COMPLETE datagrams whose
+        ; continuation block happened to be staged during the fence, which
+        ; rg-130 measured at a 5500-cycle staging delay: ready=0, $8F, a good
+        ; 1216-byte reply thrown away. That failure is invisible from here,
+        ; because the evidence it leaves (stop == 893, len == the announced
+        ; total) is byte-for-byte the evidence a genuinely short reply leaves.
+        ; Leaving a state pair behind because "the other one is handled" is
+        ; exactly how 9fa1923 left $20/$00 behind and created #128.
+        ;
+        ; A still holds STATUS & $30 from the test above (uci_fence, tax and
+        ; cmp all preserve it), so recording WHICH state we hit costs 4 bytes.
+        ; Nothing has ever measured it — see the .export note. It is now MORE
+        ; valuable than when it was added: it is the only thing that will say
+        ; whether a $8F is a zero-length final block ($20) or an abort ($00).
+        ;
+        ; STORE IT WITH BIT 7 SET, so the byte is self-describing: $A0 for
+        ; Data Last, $80 for Idle, and $00 ONLY for "never written". UCI_BSS
+        ; loads inside MAIN_AREA_LO, which cfg/c64-wireguard-uci.cfg emits
+        ; `fill = yes, fillval = $00`, so a freshly LOADed PRG reads $00 —
+        ; the identical value to the Idle verdict. net_last_error == $8F does
+        ; disambiguate the pair, but a diagnostic whose default reading is
+        ; also one of its answers is a reader trap, and it costs one ORA to
+        ; not have one.
+        ora #$80
+        sta uci_short_read_state
+        lda #UCI_ERR_SHORT_READ
+        sta net_last_error
         jmp @poll_fail
 
 @done_data:
@@ -1585,3 +1742,8 @@ uci_chunk_off:      .res 2          ; offset of the NEXT $16 part (issue #70)
 ; --- receive state ---
 uci_read_hdr:       .res 2          ; actual_len_lo/hi from SOCKET_READ
 uci_poll_rem:       .res 2          ; bytes left to copy from response
+uci_short_read_state: .res 1        ; (STATUS & $30) | $80 at the $8F short-
+                                    ; read exit: $A0 Data Last, $80 Idle,
+                                    ; $00 never written. Diagnostic only,
+                                    ; valid only while net_last_error is
+                                    ; $8F — see the .export note above.
