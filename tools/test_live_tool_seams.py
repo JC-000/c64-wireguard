@@ -26,6 +26,10 @@ from __future__ import annotations
 
 import ast
 import inspect
+import math
+import os
+import random
+import struct
 import sys
 import textwrap
 from pathlib import Path
@@ -34,6 +38,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 passed = failed = 0
+SEED = 0
 
 def _handback_is_guarded(live) -> bool:
     """True iff every _hand_back_to_c64 call in main() is under a
@@ -109,6 +114,209 @@ def _restore_in_finally(mod, fn_name: str = "main",
     except (OSError, SyntaxError, AttributeError, TypeError):
         return False
     return _restore_in_finally_ast(tree, restore_call)
+
+
+# ---------------------------------------------------------------------------
+# The --multipart padded-query builder (#70). Decoded from the WIRE, with a
+# parser that shares no code with the builder — a builder checked against
+# itself proves only that it is self-consistent.
+# ---------------------------------------------------------------------------
+EDNS_OPT_PADDING = 12       # RFC 7830
+DNS_TYPE_OPT = 41           # RFC 6891
+UCI_CHUNK_PART_MAX = 888    # 895-byte $16 command buffer - 7-byte header
+WG_DATA_OVERHEAD = 32
+IP_UDP_HDR = 28
+
+
+def _decode_dns(wire: bytes) -> dict:
+    """Decode a one-question, one-OPT-RR DNS query. Raises on anything it
+    cannot account for, so trailing junk or a lying RDLEN is an error rather
+    than a silent pass."""
+    txn, flags, qd, an, ns, ar = struct.unpack(">HHHHHH", wire[:12])
+    i = 12
+    labels = []
+    while wire[i]:
+        n = wire[i]
+        labels.append(wire[i + 1:i + 1 + n].decode("ascii"))
+        i += 1 + n
+    i += 1
+    qtype, qclass = struct.unpack(">HH", wire[i:i + 4])
+    i += 4
+    question = wire[12:i]
+    if wire[i] != 0:
+        raise ValueError(f"OPT RR name is not root: {wire[i]:#04x}")
+    i += 1
+    rtype, rclass, ttl, rdlen = struct.unpack(">HHIH", wire[i:i + 10])
+    i += 10
+    rdata = wire[i:i + rdlen]
+    if len(rdata) != rdlen:
+        raise ValueError(f"RDLEN {rdlen} but only {len(rdata)} bytes left")
+    i += rdlen
+    if i != len(wire):
+        raise ValueError(f"{len(wire) - i} unaccounted trailing byte(s)")
+    opt_code = opt_len = None
+    pad = b""
+    if rdlen >= 4:
+        opt_code, opt_len = struct.unpack(">HH", rdata[:4])
+        pad = rdata[4:]
+    return {"txn": txn, "flags": flags, "qd": qd, "an": an, "ns": ns,
+            "ar": ar, "name": ".".join(labels), "qtype": qtype,
+            "qclass": qclass, "question": question, "rtype": rtype,
+            "rclass": rclass, "ttl": ttl, "rdlen": rdlen, "rdata": rdata,
+            "opt_code": opt_code, "opt_len": opt_len, "pad": pad}
+
+
+def _multipart_name_is_random(warp) -> bool:
+    """True iff run_stage_c builds the --multipart query name with a random
+    choice rather than a constant (standing directive: what crosses the wire
+    is randomised per run). Structural: an AST walk of the `if multipart:`
+    body, not a substring search that a comment could satisfy."""
+    try:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(warp.run_stage_c)))
+    except (OSError, SyntaxError, AttributeError, TypeError):
+        return False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        if getattr(node.test, "id", None) != "multipart":
+            continue
+        for sub in ast.walk(node):
+            if (isinstance(sub, ast.Call)
+                    and getattr(sub.func, "attr", None)
+                    in ("choice", "choices", "randint", "randrange")):
+                return True
+    return False
+
+
+def check_multipart_builder(seed: int) -> None:
+    """Section body: everything --multipart's padded query must satisfy."""
+    print("\n=== --multipart padded-query builder (#70) ===")
+    try:
+        import test_warp_live as warp
+    except Exception as exc:                                  # noqa: BLE001
+        check("test_warp_live imports (for the --multipart builder)",
+              False, repr(exc))
+        return
+
+    build_padded = getattr(warp, "build_padded_dns_query", None)
+    parts_of = getattr(warp, "datagram_parts", None)
+    ok_b, ok_p = callable(build_padded), callable(parts_of)
+    check("test_warp_live.build_padded_dns_query exists", ok_b,
+          f"got {build_padded!r} — --multipart cannot stage a query above "
+          f"the {UCI_CHUNK_PART_MAX}-byte part cap without it")
+    check("test_warp_live.datagram_parts exists", ok_p,
+          f"got {parts_of!r} — nothing derives the datagram size or the "
+          f"part count from the inner length")
+    if not (ok_b and ok_p):
+        return
+
+    rng = random.Random(seed)
+
+    # --- (a) exact length, well-formed OPT RR, question round-trips --------
+    # Pinned boundaries plus random lengths: the pins are where the arithmetic
+    # is most likely wrong, the random ones stop the pins being special-cased.
+    lengths = [70, 100, 828, 829, 888, 889, 1412]
+    lengths += sorted(rng.randrange(70, 1413) for _ in range(6))
+    for want in lengths:
+        tok = "".join(rng.choice("abcdefghijklmnopqrstuvwxyz")
+                      for _ in range(rng.randrange(3, 12)))
+        name = f"{tok}.cloudflare.com"
+        txn = rng.randrange(0x10000)
+        bufsize = rng.choice((512, 1232, 1400))
+        question, wire = build_padded(name, warp.DNS_QTYPE_TXT, txn, want,
+                                      bufsize=bufsize)
+        exact = len(wire) == want
+        check(f"padded query of {want} B is EXACTLY {want} B", exact,
+              f"got {len(wire)} (name={name!r} bufsize={bufsize})")
+        if not exact:
+            continue
+        try:
+            d = _decode_dns(wire)
+        except Exception as exc:                              # noqa: BLE001
+            check(f"{want} B: the padded query decodes as DNS", False,
+                  repr(exc))
+            continue
+        check(f"{want} B: header is 1 question, 0 answers, 1 additional, "
+              f"txn {txn}",
+              (d["qd"], d["an"], d["ns"], d["ar"], d["txn"])
+              == (1, 0, 0, 1, txn),
+              f"qd/an/ns/ar/txn = {d['qd']}/{d['an']}/{d['ns']}/{d['ar']}/"
+              f"{d['txn']}")
+        check(f"{want} B: the question section round-trips "
+              f"({name} TXT IN)",
+              d["name"] == name and d["qtype"] == warp.DNS_QTYPE_TXT
+              and d["qclass"] == 1 and d["question"] == question,
+              f"decoded {d['name']!r} type {d['qtype']} class {d['qclass']}; "
+              f"returned question {'matches' if d['question'] == question else 'DIFFERS'}")
+        check(f"{want} B: the additional RR is an OPT RR (type 41, class = "
+              f"bufsize {bufsize}, ttl 0)",
+              (d["rtype"], d["rclass"], d["ttl"]) == (DNS_TYPE_OPT, bufsize, 0),
+              f"type={d['rtype']} class={d['rclass']} ttl={d['ttl']}")
+        check(f"{want} B: RDATA is one EDNS0 option, code "
+              f"{EDNS_OPT_PADDING} (RFC 7830), length self-consistent",
+              d["opt_code"] == EDNS_OPT_PADDING
+              and d["opt_len"] == len(d["pad"])
+              and d["rdlen"] == 4 + len(d["pad"]),
+              f"code={d['opt_code']} optlen={d['opt_len']} "
+              f"rdlen={d['rdlen']} padbytes={len(d['pad'])}")
+        check(f"{want} B: every padding octet is zero, as RFC 7830 requires "
+              f"(so the per-run randomness must live in the QNAME and txn id)",
+              d["pad"] == bytes(len(d["pad"])),
+              f"{sum(1 for b in d['pad'] if b)} non-zero padding octet(s)")
+        # The padding is additive: header + question are untouched by it.
+        _, plain = warp.build_dns_query(name, warp.DNS_QTYPE_TXT, txn,
+                                        bufsize=bufsize)
+        check(f"{want} B: header and question are byte-identical to the "
+              f"unpadded query",
+              wire[:12 + len(question)] == plain[:12 + len(question)])
+
+    # --- refusal, not a quietly-shorter packet ----------------------------
+    short = 30
+    try:
+        _, w = build_padded("a.cloudflare.com", warp.DNS_QTYPE_TXT, 1, short)
+        raised = f"returned {len(w)} bytes"
+    except ValueError:
+        raised = None
+    except Exception as exc:                                  # noqa: BLE001
+        raised = repr(exc)
+    check(f"a total_len of {short} B (below the unpadded query) raises "
+          f"ValueError instead of emitting a shorter packet",
+          raised is None, raised or "")
+
+    # --- determinism / randomisation --------------------------------------
+    a = build_padded("x.cloudflare.com", warp.DNS_QTYPE_TXT, 0x1234, 900)[1]
+    b = build_padded("x.cloudflare.com", warp.DNS_QTYPE_TXT, 0x1234, 900)[1]
+    c = build_padded("x.cloudflare.com", warp.DNS_QTYPE_TXT, 0x4321, 900)[1]
+    e = build_padded("y.cloudflare.com", warp.DNS_QTYPE_TXT, 0x1234, 900)[1]
+    check("same name+txn -> identical wire bytes (reproducible from a seed)",
+          a == b)
+    check("a different transaction id changes the wire", a != c)
+    check("a different QNAME label changes the wire", a != e)
+    check("run_stage_c randomises the --multipart QNAME rather than using a "
+          "constant name",
+          _multipart_name_is_random(warp),
+          "no random.choice/randint call inside run_stage_c's `if multipart:` "
+          "branch — a fixed name is cacheable and gameable")
+
+    # --- (c) datagram_parts: the arithmetic the run logs -------------------
+    for inner, outer, want_parts in ((0, 60, 1), (828, 888, 1), (829, 889, 2),
+                                     (1412, 1472, 2)):
+        got = parts_of(inner)
+        check(f"datagram_parts({inner}) == ({outer}, {want_parts})",
+              got == (outer, want_parts), f"got {got}")
+    bad = [n for n in range(0, 1500)
+           if parts_of(n) != (n + IP_UDP_HDR + WG_DATA_OVERHEAD,
+                              math.ceil((n + IP_UDP_HDR + WG_DATA_OVERHEAD)
+                                        / UCI_CHUNK_PART_MAX))]
+    check(f"datagram_parts(n) == (n+{IP_UDP_HDR + WG_DATA_OVERHEAD}, "
+          f"ceil(outer/{UCI_CHUNK_PART_MAX})) for every n in 0..1499",
+          not bad, f"{len(bad)} disagreement(s), first at n={bad[0] if bad else None}")
+    thresh = next(n for n in range(0, 1500) if parts_of(n)[1] >= 2)
+    check(f"the split threshold is inner n={829}: the cap bites on the OUTER "
+          f"datagram, so it is NOT n=888/889",
+          thresh == 829, f"first multi-part inner length is {thresh}")
+    check("parts never decrease as the inner length grows",
+          all(parts_of(n)[1] <= parts_of(n + 1)[1] for n in range(0, 1499)))
 
 
 def check(label: str, cond: bool, detail: str = "") -> None:
@@ -579,6 +787,8 @@ def main() -> int:
               f"exit {rc}; argparse_error={argparse_err}; "
               f"names_both={names_both}\n{tail}")
 
+    check_multipart_builder(SEED)
+
     total = passed + failed
     print(f"\nResults: {passed}/{total} passed, {failed} failed")
     return 0 if failed == 0 else 1
@@ -675,4 +885,11 @@ def _run_warp_tool_preflight(requested: str, given: str) -> tuple[int, str]:
 
 
 if __name__ == "__main__":
+    # Seeded so the --multipart builder section is reproducible; the seed is
+    # on the first line of the output and overridable with --seed/TEST_SEED.
+    if "--seed" in sys.argv:
+        SEED = int(sys.argv[sys.argv.index("--seed") + 1])
+    else:
+        SEED = int(os.environ.get("TEST_SEED", random.randrange(2 ** 32)))
+    print(f"Random seed: {SEED} (reproduce with --seed {SEED})")
     sys.exit(main())
