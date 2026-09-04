@@ -65,6 +65,7 @@ from c64_test_harness import (  # noqa: E402
     DeviceLock, DeviceLockTimeout, Labels, enable_uci, get_uci_enabled,
     probe_u64, write_bytes,
 )
+from u64_firmware import log_build  # noqa: E402
 from c64_test_harness.backends.u64_debug_capture import DebugCapture  # noqa: E402
 from c64_test_harness.backends.ultimate64 import Ultimate64Transport  # noqa: E402
 from c64_test_harness.backends.ultimate64_client import (  # noqa: E402
@@ -736,6 +737,9 @@ def main() -> int:
                   e.lockfile_age_seconds, e.device_reachable_rest)
         _skip(str(e))
 
+    # Build identity, INSIDE the lock: an unserialised /v1/info read can
+    # observe another lane's half-applied config rewrite and raise nothing.
+    log_build(host, log)
     client = Ultimate64Client(host=host, password=password, timeout=10.0)
     tr = Ultimate64Transport(host=host, password=password, timeout=10.0,
                              client=client)

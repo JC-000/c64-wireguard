@@ -29,6 +29,11 @@ TESTS = [
     # Build-tree independent (verified against a tree with no build/ at all),
     # so it is safe in the parallel pool alongside the mutators.
     ("suite_imports", ["tools/test_suite_imports.py"]),
+    # Host-side only (no device, no network): judgement about /v1/info's
+    # git_commit_hash, incl. that an UNKNOWN hash warns rather than
+    # refuses — a host-side allowlist that blocked the next legitimate
+    # firmware rebase would be worse than the thing it guards against.
+    ("u64_firmware", ["tools/test_u64_firmware.py", "--verbose"]),
     ("session",    ["tools/test_session.py", "--seed", "51820", "--verbose"]),
     ("transport",  ["tools/test_transport.py", "--seed", "7539"]),
     ("blake2s",    ["tools/test_blake2s.py", "--seed", "7539"]),
@@ -152,6 +157,17 @@ SERIAL_TESTS = [
     # flag, with net_udp_send stubbed (VICE has no UCI). Serial for the same
     # reason as both_backends: it rebuilds the shared tree.
     ("chunked_send",   ["tools/test_chunked_send_boundary.py"]),
+    # Issue #70, the half chunked_send cannot reach: it stubs net_udp_send at
+    # its label, so the $16 PART LOOP has never run in any suite. This one
+    # stubs only the UCI primitives underneath uci_send_part, so the real
+    # clamp, the real offset advance and the real push loop execute, and reads
+    # the adapter's own command stream back out of RAM: part count, offsets,
+    # announced totals, and (with the push sink redirected) the bytes
+    # themselves. Same tree state as chunked_send —
+    # `make BACKEND=uci UCI_CHUNKED_WRITE=1` — hence serial, and it restores
+    # the default build on exit. Unseeded: the datagrams and the padded DNS
+    # queries are random per run and the seed is on its first line.
+    ("multipart_split", ["tools/test_multipart_chunk_split.py"]),
     # Issue #70, ip65 half: the WG_MTU1440=1 knob. Builds ip65 and uci with
     # and without it, reads WG_MTU / NET_UDP_*_MAX back through
     # tools/c64_caps.py's labels path, requires `BACKEND=uci WG_MTU1440=1`

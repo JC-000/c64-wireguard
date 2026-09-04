@@ -47,6 +47,19 @@ Stages:
       one sized to land under the single-block boundary, one aimed at
       Cloudflare's 1280-byte WARP MTU — asserting the decrypted inbound
       reply's IP/UDP header and DNS transaction ID/question section.
+      With --multipart N, Stage C sends a THIRD query, padded with an
+      EDNS0 padding option (RFC 7830 code 12) to N bytes of inner
+      payload, so the outer datagram is 28 + N + 32 bytes and crosses
+      the 888-byte $16 part cap: the firmware must reassemble two parts
+      into one datagram. This is the case the 2026-09-03 interop run did
+      NOT cover — everything it sent (148-byte handshake, ~40-byte DNS)
+      fitted in a single part, so it proved the opcode dispatches and
+      nothing about reassembly. A reply proves reassembly was BYTE-EXACT
+      without trusting any of our own assertions: WireGuard authenticates
+      the whole datagram with Poly1305, so a dropped, overlapped or
+      corrupted part fails the tag at the peer and nothing comes back.
+      The tool refuses a value that would not actually split.
+
   D — restore 1 MHz / REU off, assert by read-back, release the lock.
 
 Backends (`--backend {uci,ip65}`, default uci — issue #70):
@@ -120,6 +133,7 @@ from c64_test_harness.backends.ultimate64_helpers import (  # noqa: E402
 )
 
 import wg_c64_input as ki  # noqa: E402
+from u64_firmware import log_build  # noqa: E402
 
 log = logging.getLogger("warp_live")
 logging.basicConfig(level=logging.INFO,
@@ -153,6 +167,56 @@ NET_INIT_BUDGET_S = float(os.environ.get("WARP_NET_INIT_BUDGET_S", "120"))
 TURBO_SETTLE_S = 3.0
 
 DNS_QTYPE_TXT = 16
+
+# WRITE_SOCKET_CHUNK ($16) carries a 7-byte header, so ONE part holds at most
+# 888 payload bytes (not 892/890 — reusing the plain-SOCKET_WRITE constant
+# overflows silently; GideonZ/1541ultimate#807). A datagram above this is what
+# makes the send path SPLIT, which is the point of --multipart: the 2026-09-03
+# interop run sent nothing above the 148-byte handshake, so it exercised the
+# $16 opcode but never its reassembly.
+UCI_CHUNK_PART_MAX = 888
+WG_DATA_OVERHEAD = 32          # Type-4 header (16) + Poly1305 tag (16)
+IP_UDP_HDR = 28
+EDNS_OPT_PADDING = 12          # RFC 7830 option code
+
+# The control query's inner length: padded exactly like the multi-part one
+# but sized so the outer datagram stays inside a single part. Derived, not
+# picked: cap - IP/UDP header - WireGuard overhead, minus a small margin.
+CONTROL_INNER_LEN = UCI_CHUNK_PART_MAX - IP_UDP_HDR - WG_DATA_OVERHEAD - 28
+
+# The padded queries do NOT go to 1.1.1.1. Measured from this host on
+# 2026-09-03, sending EDNS0-filled queries straight to each resolver:
+#
+#   resolver          512 B   829 B   1000 B   padded 800/1000 (3 tries)
+#   1.1.1.1 (CF)      reply   DROP    DROP     -
+#   8.8.8.8 (Google)  reply   DROP    DROP     -
+#   9.9.9.9 (Quad9)   reply   reply   reply    1/3, 1/3  <- too flaky
+#   208.67.222.222    reply   reply   reply    3/3, 3/3  <- chosen
+#
+# Quad9 answers a large padded query only about a third of the time, which
+# is enough to make the CONTROL rung read as a failure of OUR stack when it
+# is the resolver's. OpenDNS is reliable at both sizes, so the control is a
+# comparison rather than noise.
+#
+# Cloudflare's resolver silently drops REQUESTS over ~512 bytes, so it can
+# never answer a query big enough to need two $16 parts (>= 829 B inner) —
+# which is why the first attempt at this test produced two silent queries
+# and proved nothing. The WireGuard peer is still Cloudflare WARP: the
+# datagram must pass ITS Poly1305 before anything is forwarded to Quad9, so
+# the oracle property is unchanged. Only the inner destination moves.
+MULTIPART_RESOLVER_IP = "208.67.222.222"
+
+# A SMALL query to the same resolver, same construction: proves the tunnel
+# reaches it at all. WARP is known to intercept DNS, and without this rung
+# silence from the padded pair cannot be told apart from "this resolver is
+# unreachable through the tunnel".
+SMALL_PROBE_LEN = 200
+
+# Each rung is sent this many times. The inbound path is INTERMITTENT here
+# (a 1278 B reply failed to decrypt in 2 of 4 runs on 2026-09-03, and the
+# 800 B control answered in 1 of 2), so a single observation distinguishes
+# nothing: what is wanted is a RATE per rung, not an anecdote.
+MULTIPART_REPEATS = 3
 
 BACKENDS = ("uci", "ip65")
 
@@ -295,6 +359,51 @@ def build_dns_query(name: str, qtype: int, txn_id: int,
     # read False on hardware even though the actual DNS exchange (txn_id
     # match, QR=1, correct ANCOUNT, correct IP/port) was fully correct.
     return question, header + question + opt
+
+
+def build_padded_dns_query(name: str, qtype: int, txn_id: int,
+                           total_len: int, bufsize: int = 1400):
+    """A DNS query padded to EXACTLY `total_len` bytes with an EDNS0 padding
+    option (RFC 7830, option code 12), to push one datagram over the 888-byte
+    chunk part cap and force a genuine multi-part $16 write.
+
+    Padding octets are zero, as RFC 7830 requires, so the per-run
+    randomisation this project demands of wire payloads lives in the QNAME
+    label and the transaction id — both chosen by the caller — not here.
+
+    Returns (question_section, wire_bytes), the same shape as
+    build_dns_query, so the reply checks are identical for a padded and an
+    unpadded query. Raises rather than silently emitting a SHORTER packet
+    than asked for: a quietly-too-small query would stop testing the split
+    while still passing every reply assertion.
+    """
+    question, base = build_dns_query(name, qtype, txn_id, bufsize=bufsize)
+    pad_total = total_len - len(base)
+    if pad_total < 4:
+        raise ValueError(
+            f"total_len={total_len} leaves {pad_total} bytes for the padding "
+            f"option; need >= 4 (2 code + 2 length) on top of the "
+            f"{len(base)}-byte unpadded query")
+    pad_len = pad_total - 4
+    opt_rdata = struct.pack(">HH", EDNS_OPT_PADDING, pad_len) + bytes(pad_len)
+    wire = base[:-11] + b"\x00" + struct.pack(
+        ">HHIH", 41, bufsize, 0, len(opt_rdata)) + opt_rdata
+    if len(wire) != total_len:
+        raise AssertionError(
+            f"padded query is {len(wire)} bytes, asked for {total_len}")
+    return question, wire
+
+
+def datagram_parts(inner_len: int) -> tuple:
+    """(outer datagram length, number of $16 parts) for an inner IP payload.
+
+    Derived, not assumed: outer = IP/UDP header + inner + WireGuard Type-4
+    overhead, split into ceil(outer / 888) parts. Logged with every
+    --multipart run so the claim "this was multi-part" is arithmetic the
+    reader can check, not an assertion about invisible behaviour.
+    """
+    outer = IP_UDP_HDR + inner_len + WG_DATA_OVERHEAD
+    return outer, -(-outer // UCI_CHUNK_PART_MAX)
 
 
 def stage_raw_dma(tr: Ultimate64Transport, payload: bytes, L: dict,
@@ -597,7 +706,8 @@ def run_stage_rekey(tr: Ultimate64Transport, L: dict, n: int,
 
 def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
                 c64_priv: bytes, c64_pub: bytes, resp_pub: bytes,
-                seed: int, backend: str = "uci", turbo_mhz: int = 48) -> dict:
+                seed: int, backend: str = "uci", turbo_mhz: int = 48,
+                multipart: int = 0) -> dict:
     result: dict = {"stage": "C"}
     prg_bytes = PRG_C.read_bytes()
     result["prg"] = _fingerprint("Stage C", prg_bytes, L, backend)
@@ -632,16 +742,62 @@ def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
 
     random.seed(seed)
     queries = [
-        ("namecheap.com", DNS_QTYPE_TXT, 1278, "900-1279 band"),
-        ("github.com", DNS_QTYPE_TXT, 1928, "targets >1280 (Cloudflare WARP MTU)"),
+        ("namecheap.com", DNS_QTYPE_TXT, 1278, "900-1279 band", None, None),
+        ("github.com", DNS_QTYPE_TXT, 1928, "targets >1280 (Cloudflare WARP MTU)", None, None),
     ]
+    if multipart:
+        # Three rungs x MULTIPART_REPEATS, differing ONLY in size, so each
+        # adjacent pair isolates exactly one variable:
+        #   REACHABILITY  small  -> does the tunnel reach this resolver?
+        #   CONTROL       large, ONE part  -> will it answer a big datagram?
+        #   MULTI-PART    large, TWO parts -> does reassembly survive?
+        # Silence first appearing at MULTI-PART is the only pattern that
+        # implicates reassembly; silence at rung 1 means the vehicle is
+        # dead and nothing was tested. Repeats because the path is
+        # intermittent: one observation distinguishes nothing.
+        # Names are randomised per query (seeded, logged) so no reply can
+        # come from a cache; the padding octets stay zero per RFC 7830.
+        for _ in range(MULTIPART_REPEATS):
+            for size, label, want in (
+                    (SMALL_PROBE_LEN, "REACHABILITY", 1),
+                    (CONTROL_INNER_LEN, "CONTROL single-part", 1),
+                    (multipart, "MULTI-PART", 2)):
+                tk = "".join(random.choice(string.ascii_lowercase) for _ in range(10))
+                queries.append((f"{tk}.cloudflare.com", DNS_QTYPE_TXT, 0,
+                                f"{label}: {size} B inner -> {MULTIPART_RESOLVER_IP}",
+                                size, want))
     result["queries"] = []
-    for name, qtype, dig_size, band in queries:
+    for name, qtype, dig_size, band, pad_to, want_parts in queries:
         txn_id = random.randint(0, 0xFFFF)
-        question, wire = build_dns_query(name, qtype, txn_id, bufsize=1400)
-        log.info("DNS query %s %s txn_id=%d wire_len=%d dig_measured=%d (%s)",
-                 name, {16: "TXT"}.get(qtype, qtype), txn_id, len(wire),
-                 dig_size, band)
+        target = MULTIPART_RESOLVER_IP if pad_to else PING_TARGET_IP
+        if pad_to:
+            # ping_target_ip is read when each packet is built, so a DMA
+            # write here retargets the NEXT query without a re-handshake.
+            tr.write_memory(L["ping_target_ip"],
+                            bytes(int(o) for o in target.split(".")))
+            question, wire = build_padded_dns_query(name, qtype, txn_id, pad_to)
+            outer, parts = datagram_parts(len(wire))
+            # The CONTROL must be exactly one part and the TEST at least
+            # two: the pair is the whole experiment, so a size that does not
+            # produce the intended split makes the comparison meaningless.
+            bad = (parts != 1 if want_parts == 1 else parts < 2)
+            if bad:
+                result["error"] = (
+                    f"padded query of {pad_to} B inner yields a {outer}-byte "
+                    f"datagram = {parts} part(s), wanted "
+                    f"{'exactly 1 (control)' if want_parts == 1 else '>= 2 (test)'}"
+                    f": the control/test pair would prove nothing")
+                log.error("%s", result["error"])
+                return result
+            log.info("DNS query %s TXT txn_id=%d wire_len=%d -> outer datagram "
+                     "%d B = %d parts of <=%d (%s)", name, txn_id, len(wire),
+                     outer, parts, UCI_CHUNK_PART_MAX, band)
+        else:
+            question, wire = build_dns_query(name, qtype, txn_id, bufsize=1400)
+            outer, parts = datagram_parts(len(wire))
+            log.info("DNS query %s %s txn_id=%d wire_len=%d dig_measured=%d (%s)",
+                     name, {16: "TXT"}.get(qtype, qtype), txn_id, len(wire),
+                     dig_size, band)
 
         # Clear the receive markers so we can tell a NEW reply apart.
         tr.write_memory(L["msg_recv_len"], bytes(2))
@@ -649,8 +805,20 @@ def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
 
         staged = stage_raw_dma(tr, wire, L, timeout=15.0)
         q = {"name": name, "qtype": qtype, "txn_id": txn_id,
+            "inner_target": target,
             "wire_len": len(wire), "dig_measured": dig_size, "band": band,
-            "staged_ok": staged}
+            "outer_datagram_len": outer, "uci_parts": parts,
+            "multipart": bool(pad_to), "staged_ok": staged}
+
+        # Recorded per query so a silent reply can be told apart from a send
+        # that never left: "no reply" and "never sent" look identical in
+        # msg_recv_len alone.
+        try:
+            q["net_last_error"] = "$%02X" % tr.read_memory(L["net_last_error"], 1)[0]
+            q["tp_send_counter"] = int.from_bytes(
+                tr.read_memory(L["tp_send_counter"], 2), "little")
+        except Exception as exc:                      # noqa: BLE001
+            q["telemetry_error"] = repr(exc)
 
         deadline = time.monotonic() + DNS_TIMEOUT
         recv_len = 0
@@ -681,13 +849,16 @@ def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
                 "txn_id_match": reply_txn == txn_id,
                 "qr_bit": qr_bit, "ancount": ancount,
                 "question_echo_ok": question_echo_ok,
-                "src_ip_ok": src_ip == PING_TARGET_IP,
+                "src_ip_ok": src_ip == target,
                 "dst_ip_ok": dst_ip == TUNNEL_IP,
                 "ports_ok": src_port == 53 and dst_port == 53,
             })
         else:
             dump_screen(tr, label=f"stageC-dns-timeout-{name}")
         result["queries"].append(q)
+        if pad_to:
+            tr.write_memory(L["ping_target_ip"],
+                            bytes(int(o) for o in PING_TARGET_IP.split(".")))
     return result
 
 
@@ -705,6 +876,15 @@ def main(argv: Optional[list[str]] = None) -> int:
                         "increases and wg_state returns to ACTIVE each "
                         "time (issue #87). RED BY CONSTRUCTION (raises) "
                         "against Cloudflare WARP on unfixed firmware.")
+    p.add_argument("--multipart", type=int, default=0, metavar="N",
+                   help="Stage C also sends a DNS query padded (EDNS0 option "
+                        "12) to N bytes of inner payload, so the outer "
+                        "datagram crosses the 888-byte $16 part cap and the "
+                        "firmware must REASSEMBLE it. A reply proves that "
+                        "reassembly was byte-exact: WireGuard authenticates "
+                        "the whole datagram, so a dropped, overlapped or "
+                        "corrupted part fails Poly1305 at the peer and "
+                        "nothing comes back. Try 1000. 0 (default) = off.")
     p.add_argument("--backend", choices=BACKENDS, default="uci",
                    help="Which backend the PRGs in build/ and "
                         "build_msgport53/ were built for (issue #70). "
@@ -761,6 +941,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         log.error("device %s not reachable: %s", args.host, probe.error)
         return 1
     log.info("probe: %s", probe)
+    # Build IDENTITY from /v1/info (read-only, pre-lock). Not a gate: the
+    # chunked send path's $8E is the behavioural check — see u64_firmware.
 
     lock = DeviceLock(args.host)
     try:
@@ -774,6 +956,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     reu_restored = False
     client = None
     try:
+        # Build identity, INSIDE the lock: a /v1/info read taken while
+        # another lane is mid-rewrite returns a coherent-looking value from
+        # a half-applied state, and nothing raises.
+        log_build(args.host, log)
         client = Ultimate64Client(host=args.host, timeout=30.0)
         tr = Ultimate64Transport(host=args.host, timeout=30.0, client=client)
 
@@ -839,7 +1025,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 
         # --- Stage C ---
         c = run_stage_c(tr, client, L_C, c64_priv, c64_pub, resp_pub, seed,
-                        backend=args.backend, turbo_mhz=args.turbo)
+                        backend=args.backend, turbo_mhz=args.turbo,
+                        multipart=args.multipart)
         results["stage_c"] = c
 
     finally:
@@ -858,6 +1045,24 @@ def main(argv: Optional[list[str]] = None) -> int:
                 reu_restored = True
                 log.info("restore: turbo=%d MHz (restored=%s) REU off",
                         actual1, turbo_restored)
+                # Reset the C64. Restoring the CLOCK and the REU is not
+                # restoring the MACHINE: our PRG is still running and still
+                # driving the command interface, so the next lane inherits
+                # an interface that holds a reply and goes straight back to
+                # Command Busy. Measured 2026-09-03 by the firmware lane,
+                # who lost two runs to it: `release()` and `abort_to_idle()`
+                # both returned True and the status snapped back, because
+                # nothing was stuck — something was actively driving it. A
+                # reset cleared it to $00 Idle first try.
+                #
+                # This never bites US: run_prg resets on the way IN. It bites
+                # whoever goes next, and it presents as THEIR suite being
+                # broken rather than as our leftover state — the expensive
+                # shape, the same one as 1.1.1.1's silent >512 B request drop.
+                client.reset()
+                time.sleep(1.0)
+                log.info("restore: C64 reset — command interface left idle "
+                         "for the next lane")
             except Exception as exc:                              # noqa: BLE001
                 log.error("Stage D restore failed: %s", exc)
         lock.release()

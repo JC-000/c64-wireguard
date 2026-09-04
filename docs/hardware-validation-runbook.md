@@ -47,6 +47,35 @@ of `$A000` BASIC ROM shadow with ~700 bytes headroom. That headroom is
 is `IP65_BSS`, the ip65 blob's private BSS (issue #80), so growth past
 `$9FFF` is not free there.
 
+## 1b. The device is SHARED — queue for it, always
+
+Three lanes drive `10.43.23.81`: this repo, the `1541ultimate` firmware lane,
+and `sid-analogmult-rng`. **Every access goes through the harness
+`DeviceLock`** — reads, one-line restores and build probes included, not just
+the long test bodies. `tools/device_session.py` provides `locked_client()` and
+`restore_idle()` for the short cases; live suites take the lock themselves.
+
+Two things measured on 2026-09-03/04 are why:
+
+- The lock serialises only the lanes that **opt in**. The firmware lane's
+  runner takes none, so another lane's `run_prg` — a genuine load-and-run that
+  *replaces* the program a suite is talking to — landed mid-scenario in an
+  18-minute run. Three runs died in different scenarios each time. It
+  presented as device degradation and a power cycle was nearly performed,
+  which would have "fixed" it and destroyed the evidence.
+- An unserialised **read** is not safe either. A config read taken during
+  another lane's transactional rewrite returns a coherent-looking value from a
+  half-applied state, and nothing raises.
+
+`locked_client()` yields `None` rather than an unlocked client when the lock is
+busy, so a caller cannot fall through to touching the device anyway: the
+failure mode is a warning and no action.
+
+Before blaming the device (or [#58](https://github.com/JC-000/c64-wireguard/issues/58)),
+check **who else is on the host** and correlate their window against your
+failure timestamps. Lockfile state proves nothing here — the lanes that hurt
+you are the ones not using it.
+
 ## 2. Preflight checklist (do this before the first run)
 
 - [ ] **Physical power-cycle the U64E.** Not `client.reboot()` — it does
@@ -61,6 +90,38 @@ is `IP65_BSS`, the ip65 blob's private BSS (issue #80), so growth past
       a dead device rather than a wrong flag. The newer tools
       (`wg_chat.py`, `wg_demo.py`, `test_wire_encryption_live.py`) have no
       default for exactly this reason.
+- [ ] **Identify the IMAGE, not just the device.** `python3
+      tools/u64_firmware.py <host>` reads `/v1/info`'s `git_commit_hash`
+      (added upstream 2026-09-03, alongside `ethernet_mac` / `wifi_mac`).
+      It queues for the device through the harness `DeviceLock`, like
+      **every** access here — reads included. The box is shared by three
+      lanes and only the ones that lock are serialised; a read taken
+      during another lane's transactional config rewrite returns a
+      coherent-looking value from a half-applied state and raises
+      nothing. It answers *which image
+      is flashed* — `[chunked]` for an image this repo has measured,
+      `[unknown]` for one it has not (a warning, never a refusal: the
+      next legitimate rebase lands there), `[no-hash]` for firmware
+      predating the field. It does **not** answer whether the `$16`
+      handler dispatches; only sending it does, and the chunked send
+      path's `$8E` (`UCI_ERR_CMD_UNKNOWN`) remains that proof. Do not
+      treat a green hash as a substitute for the probe.
+      **What the hash is:** `APP_VERSION_HASH`, from `git rev-parse
+      --short HEAD` at build time (`target/common/rules.mk`), with no
+      `--dirty` marker — the commit the *builder's HEAD* pointed at, an
+      assertion by the builder rather than a property of the binary. A
+      build from a dirty tree reports a hash whose source it was not
+      built from and `/v1/info` cannot tell, because it exposes only
+      that one of the six build identifiers (the rest reach the System
+      Information screen, not REST). The width follows the builder's
+      `core.abbrev`, so the same commit can present as 7 or 8 characters
+      — the tool matches by prefix with a 7-character floor and refuses
+      to guess when a prefix hits more than one recorded build.
+      **A reflash resets device config to defaults** — Command Interface
+      back to Disabled (`$DF1C` reads `$FF` until it is re-enabled *and*
+      the C64 is reset) and any other bench settings gone. The live
+      tools re-enable it themselves; a hand-driven session must not
+      assume it survived.
 - [ ] **Check the CPU speed.** `GET /v1/configs/U64%20Specific%20Settings`
       → `CPU Speed`. The device is shared and has been found left at a
       stale 16/48 MHz. Restore 1 MHz when you are done; the newer tools do
@@ -426,6 +487,38 @@ Expected stage output (2026-09-03, U64E, upstream test-merge `d33b7802` + the [#
 
 - Stage A/B: `Stage A: ACTIVE in 48.5s` (log line), then `PING REPLY OK` on screen.
 - Stage C: a fresh `ACTIVE in ~48s` on the `MSG_PORT=53` PRG, then `reply_recv_len=1278` for the `namecheap.com` TXT query (the second query, above ~1280 B, is truncated by `1.1.1.1` inside WARP itself — expected, not a failure of this tool).
+
+**Re-measured 2026-09-03 on the rebased spike** (`git_commit_hash a474a7ed` =
+upstream test-merge `883f608d` + the #807 commits, fpga **125** — upstream rebuilt
+the bitstream to decode `FENCE` as a NOP), with `--rekey 2`, seed `775774406`:
+Stage A ACTIVE in 47.9 s, rekey 1/2 at 48.3 s / 48.1 s with `hs_timestamp`
+strictly increasing (`…fadd/01` → `…fadf/02` → `…fae1/03`), Stage C 47.8 s,
+`reply_recv_len=1278` ancount 15. The >1280 B query returns `len=39` ancount 0 —
+Cloudflare resolver policy inside WARP, not our MTU and not the firmware.
+
+Read that result together with the firmware lane's own: `uci-net-target` scored
+197 checks / 40-of-40 / 0 failures on this image, identical to its score on the
+previous one. Neither half stands alone — our interop run cannot separate a
+firmware fault from a WireGuard one, and their suite says nothing about a real
+peer. Together they are a claim of **parity with the previous image**, not a
+general clearance of `883f608d`, and not a statement about ip65. Their gate's
+default QUICK profile does **not** select `uci-net-target` (it is registered in
+DEEP), and their runner takes **no device lock at all** — so lockfile state says
+nothing about whether that lane is on the device. Coordinate by message.
+
+**Handing the device to another lane:** restoring the clock and the REU is
+**not** restoring the machine. Your PRG keeps running after the tool exits and
+keeps driving the command interface, so the next lane reads `$E0 Data Last`
+followed immediately by `$11 Command Busy` — an interface holding a reply and
+going straight back to busy. `release()` and `abort_to_idle()` both return True
+and the status snaps back, which is the tell: nothing is stuck, something is
+actively driving it. A C64 reset clears it to `$00 Idle`. This never bites the
+tool that caused it, because `run_prg` resets on the way *in*; it bites whoever
+goes next, and it presents as *their* suite being broken. `test_warp_live.py`
+resets in its Stage D teardown for this reason (measured by the firmware lane
+on 2026-09-03, at the cost of two runs). Other live tools do **not** — and some,
+like `test_config_reload_live.py`, abandon state deliberately as part of what
+they test, so do not "fix" them by adding a reset. Reset by hand after those.
 
 **Restore:** on a clean run, the tool's own Stage D sets 1 MHz / REU off and asserts both by read-back, so no manual restore step is needed. Only the `DeviceLock` release is in a `finally` — an exception during Stage A/B/C skips Stage D and leaves the device at 48 MHz. Check `GET /v1/configs/U64%20Specific%20Settings` after any run that errored and restore turbo by hand if it is still fast.
 
