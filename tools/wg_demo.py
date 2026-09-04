@@ -158,19 +158,11 @@ def build_demo_loop():
 
 def _restore_speed(host: str) -> None:
     """Put the shared device back to 1 MHz. Never raises."""
-    try:
-        from c64_test_harness.backends.ultimate64_client import Ultimate64Client
-        from c64_test_harness.backends.ultimate64_helpers import (
-            get_turbo_mhz, set_turbo_mhz,
-        )
-        client = Ultimate64Client(host)
-        if get_turbo_mhz(client) != IDLE_TURBO_MHZ:
-            set_turbo_mhz(client, IDLE_TURBO_MHZ)
-            print(f"-- device restored to {IDLE_TURBO_MHZ} MHz --",
-                  file=sys.stderr, flush=True)
-    except Exception as exc:                                  # noqa: BLE001
-        print(f"!! could not restore {IDLE_TURBO_MHZ} MHz on {host}: "
-              f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+    # Through the harness lock: this is a WRITE to a shared device, and it
+    # runs after the locked body has released. An unserialised restore can
+    # land inside another lane's run — see tools/device_session.py.
+    from device_session import restore_idle
+    restore_idle(host, IDLE_TURBO_MHZ)
 
 
 def main() -> int:

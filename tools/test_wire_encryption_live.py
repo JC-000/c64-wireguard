@@ -532,12 +532,10 @@ def main() -> int:
         return live.main(["--chat", "--host", args.host,
                           "--turbo", str(args.turbo)])
     finally:
-        try:
-            from c64_test_harness.backends.ultimate64_client import Ultimate64Client
-            from c64_test_harness.backends.ultimate64_helpers import set_turbo_mhz
-            set_turbo_mhz(Ultimate64Client(args.host), 1)
-        except Exception:                                     # noqa: BLE001
-            pass
+        # live.main() has released the lock by now, so this restore must
+        # take its own — it is a write to a shared device.
+        from device_session import restore_idle
+        restore_idle(args.host, 1)
 
 
 if __name__ == "__main__":

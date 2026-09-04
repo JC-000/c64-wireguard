@@ -11,8 +11,8 @@ answer. Upstream has since added **`git_commit_hash`** (alongside
 retiring it.** The two answer different questions:
 
     git_commit_hash   WHICH COMMIT THE BUILDER'S HEAD POINTED AT. Cheap,
-                      read-only, no device lock, answerable before a run
-                      starts. Measured, not hedged: the firmware embeds
+                      read-only — but taken UNDER THE HARNESS LOCK like
+                      every other access to this shared device. Measured, not hedged: the firmware embeds
                       APP_VERSION_HASH from `git rev-parse --short HEAD`
                       at build time (target/common/rules.mk), with NO
                       --dirty marker, and /v1/info exposes only that one
@@ -87,8 +87,13 @@ VERDICTS = ("chunked", "unknown", "no-hash", "unreachable")
 def fetch_info(host: str, timeout: float = INFO_TIMEOUT_S) -> Optional[dict]:
     """GET /v1/info. Returns the parsed dict, or None if it did not answer.
 
-    Read-only and lock-free: safe to call before acquiring the device lock,
-    and safe while another lane holds it.
+    The CALLER must hold the harness DeviceLock. This function does not
+    acquire one — its live callers run inside their own locked region, and
+    standalone use goes through main(), which locks. Do NOT call it
+    unserialised: a read taken during another lane's transactional config
+    rewrite returns a coherent-looking value from a half-applied state and
+    raises nothing. (The earlier version of this docstring advertised the
+    opposite; it was wrong.)
     """
     url = f"http://{host}/v1/info"
     try:

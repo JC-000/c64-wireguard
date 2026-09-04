@@ -943,7 +943,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     log.info("probe: %s", probe)
     # Build IDENTITY from /v1/info (read-only, pre-lock). Not a gate: the
     # chunked send path's $8E is the behavioural check — see u64_firmware.
-    log_build(args.host, log)
 
     lock = DeviceLock(args.host)
     try:
@@ -957,6 +956,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     reu_restored = False
     client = None
     try:
+        # Build identity, INSIDE the lock: a /v1/info read taken while
+        # another lane is mid-rewrite returns a coherent-looking value from
+        # a half-applied state, and nothing raises.
+        log_build(args.host, log)
         client = Ultimate64Client(host=args.host, timeout=30.0)
         tr = Ultimate64Transport(host=args.host, timeout=30.0, client=client)
 

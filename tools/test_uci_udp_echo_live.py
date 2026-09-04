@@ -703,7 +703,6 @@ def main() -> int:
     if os.environ.get("U64_ALLOW_MUTATE") != "1":
         _skip("U64_ALLOW_MUTATE=1 required (test mutates Turbo + Debug Stream Mode)")
     password = os.environ.get("U64_PASSWORD")
-    log_build(host, log)   # which image? /v1/info; $8E below is the proof
     probe = probe_u64(host, password=password)
     if not probe.reachable:
         _skip(f"U64 at {host} not reachable: {probe.error}")
@@ -738,6 +737,9 @@ def main() -> int:
                   e.lockfile_age_seconds, e.device_reachable_rest)
         _skip(str(e))
 
+    # Build identity, INSIDE the lock: an unserialised /v1/info read can
+    # observe another lane's half-applied config rewrite and raise nothing.
+    log_build(host, log)
     client = Ultimate64Client(host=host, password=password, timeout=10.0)
     tr = Ultimate64Transport(host=host, password=password, timeout=10.0,
                              client=client)

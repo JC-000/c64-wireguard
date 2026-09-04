@@ -47,6 +47,35 @@ of `$A000` BASIC ROM shadow with ~700 bytes headroom. That headroom is
 is `IP65_BSS`, the ip65 blob's private BSS (issue #80), so growth past
 `$9FFF` is not free there.
 
+## 1b. The device is SHARED — queue for it, always
+
+Three lanes drive `10.43.23.81`: this repo, the `1541ultimate` firmware lane,
+and `sid-analogmult-rng`. **Every access goes through the harness
+`DeviceLock`** — reads, one-line restores and build probes included, not just
+the long test bodies. `tools/device_session.py` provides `locked_client()` and
+`restore_idle()` for the short cases; live suites take the lock themselves.
+
+Two things measured on 2026-09-03/04 are why:
+
+- The lock serialises only the lanes that **opt in**. The firmware lane's
+  runner takes none, so another lane's `run_prg` — a genuine load-and-run that
+  *replaces* the program a suite is talking to — landed mid-scenario in an
+  18-minute run. Three runs died in different scenarios each time. It
+  presented as device degradation and a power cycle was nearly performed,
+  which would have "fixed" it and destroyed the evidence.
+- An unserialised **read** is not safe either. A config read taken during
+  another lane's transactional rewrite returns a coherent-looking value from a
+  half-applied state, and nothing raises.
+
+`locked_client()` yields `None` rather than an unlocked client when the lock is
+busy, so a caller cannot fall through to touching the device anyway: the
+failure mode is a warning and no action.
+
+Before blaming the device (or [#58](https://github.com/JC-000/c64-wireguard/issues/58)),
+check **who else is on the host** and correlate their window against your
+failure timestamps. Lockfile state proves nothing here — the lanes that hurt
+you are the ones not using it.
+
 ## 2. Preflight checklist (do this before the first run)
 
 - [ ] **Physical power-cycle the U64E.** Not `client.reboot()` — it does
@@ -64,8 +93,12 @@ is `IP65_BSS`, the ip65 blob's private BSS (issue #80), so growth past
 - [ ] **Identify the IMAGE, not just the device.** `python3
       tools/u64_firmware.py <host>` reads `/v1/info`'s `git_commit_hash`
       (added upstream 2026-09-03, alongside `ethernet_mac` / `wifi_mac`).
-      Read-only and lock-free, so it is safe before anything else and
-      safe while another lane holds the device. It answers *which image
+      It queues for the device through the harness `DeviceLock`, like
+      **every** access here — reads included. The box is shared by three
+      lanes and only the ones that lock are serialised; a read taken
+      during another lane's transactional config rewrite returns a
+      coherent-looking value from a half-applied state and raises
+      nothing. It answers *which image
       is flashed* — `[chunked]` for an image this repo has measured,
       `[unknown]` for one it has not (a warning, never a refusal: the
       next legitimate rebase lands there), `[no-hash]` for firmware
