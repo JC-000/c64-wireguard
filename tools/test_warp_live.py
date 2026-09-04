@@ -1042,6 +1042,24 @@ def main(argv: Optional[list[str]] = None) -> int:
                 reu_restored = True
                 log.info("restore: turbo=%d MHz (restored=%s) REU off",
                         actual1, turbo_restored)
+                # Reset the C64. Restoring the CLOCK and the REU is not
+                # restoring the MACHINE: our PRG is still running and still
+                # driving the command interface, so the next lane inherits
+                # an interface that holds a reply and goes straight back to
+                # Command Busy. Measured 2026-09-03 by the firmware lane,
+                # who lost two runs to it: `release()` and `abort_to_idle()`
+                # both returned True and the status snapped back, because
+                # nothing was stuck — something was actively driving it. A
+                # reset cleared it to $00 Idle first try.
+                #
+                # This never bites US: run_prg resets on the way IN. It bites
+                # whoever goes next, and it presents as THEIR suite being
+                # broken rather than as our leftover state — the expensive
+                # shape, the same one as 1.1.1.1's silent >512 B request drop.
+                client.reset()
+                time.sleep(1.0)
+                log.info("restore: C64 reset — command interface left idle "
+                         "for the next lane")
             except Exception as exc:                              # noqa: BLE001
                 log.error("Stage D restore failed: %s", exc)
         lock.release()

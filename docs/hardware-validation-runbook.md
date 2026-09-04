@@ -473,6 +473,20 @@ default QUICK profile does **not** select `uci-net-target` (it is registered in
 DEEP), and their runner takes **no device lock at all** — so lockfile state says
 nothing about whether that lane is on the device. Coordinate by message.
 
+**Handing the device to another lane:** restoring the clock and the REU is
+**not** restoring the machine. Your PRG keeps running after the tool exits and
+keeps driving the command interface, so the next lane reads `$E0 Data Last`
+followed immediately by `$11 Command Busy` — an interface holding a reply and
+going straight back to busy. `release()` and `abort_to_idle()` both return True
+and the status snaps back, which is the tell: nothing is stuck, something is
+actively driving it. A C64 reset clears it to `$00 Idle`. This never bites the
+tool that caused it, because `run_prg` resets on the way *in*; it bites whoever
+goes next, and it presents as *their* suite being broken. `test_warp_live.py`
+resets in its Stage D teardown for this reason (measured by the firmware lane
+on 2026-09-03, at the cost of two runs). Other live tools do **not** — and some,
+like `test_config_reload_live.py`, abandon state deliberately as part of what
+they test, so do not "fix" them by adding a reset. Reset by hand after those.
+
 **Restore:** on a clean run, the tool's own Stage D sets 1 MHz / REU off and asserts both by read-back, so no manual restore step is needed. Only the `DeviceLock` release is in a `finally` — an exception during Stage A/B/C skips Stage D and leaves the device at 48 MHz. Check `GET /v1/configs/U64%20Specific%20Settings` after any run that errored and restore turbo by hand if it is still fast.
 
 Only one handshake per staged TAI64N base time is accepted by a real peer (#87); this tool stages a fresh base time and a fresh `run_prg` before each of its two handshakes rather than rekeying in place.
