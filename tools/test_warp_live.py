@@ -179,6 +179,45 @@ WG_DATA_OVERHEAD = 32          # Type-4 header (16) + Poly1305 tag (16)
 IP_UDP_HDR = 28
 EDNS_OPT_PADDING = 12          # RFC 7830 option code
 
+# The control query's inner length: padded exactly like the multi-part one
+# but sized so the outer datagram stays inside a single part. Derived, not
+# picked: cap - IP/UDP header - WireGuard overhead, minus a small margin.
+CONTROL_INNER_LEN = UCI_CHUNK_PART_MAX - IP_UDP_HDR - WG_DATA_OVERHEAD - 28
+
+# The padded queries do NOT go to 1.1.1.1. Measured from this host on
+# 2026-09-03, sending EDNS0-filled queries straight to each resolver:
+#
+#   resolver          512 B   829 B   1000 B   padded 800/1000 (3 tries)
+#   1.1.1.1 (CF)      reply   DROP    DROP     -
+#   8.8.8.8 (Google)  reply   DROP    DROP     -
+#   9.9.9.9 (Quad9)   reply   reply   reply    1/3, 1/3  <- too flaky
+#   208.67.222.222    reply   reply   reply    3/3, 3/3  <- chosen
+#
+# Quad9 answers a large padded query only about a third of the time, which
+# is enough to make the CONTROL rung read as a failure of OUR stack when it
+# is the resolver's. OpenDNS is reliable at both sizes, so the control is a
+# comparison rather than noise.
+#
+# Cloudflare's resolver silently drops REQUESTS over ~512 bytes, so it can
+# never answer a query big enough to need two $16 parts (>= 829 B inner) —
+# which is why the first attempt at this test produced two silent queries
+# and proved nothing. The WireGuard peer is still Cloudflare WARP: the
+# datagram must pass ITS Poly1305 before anything is forwarded to Quad9, so
+# the oracle property is unchanged. Only the inner destination moves.
+MULTIPART_RESOLVER_IP = "208.67.222.222"
+
+# A SMALL query to the same resolver, same construction: proves the tunnel
+# reaches it at all. WARP is known to intercept DNS, and without this rung
+# silence from the padded pair cannot be told apart from "this resolver is
+# unreachable through the tunnel".
+SMALL_PROBE_LEN = 200
+
+# Each rung is sent this many times. The inbound path is INTERMITTENT here
+# (a 1278 B reply failed to decrypt in 2 of 4 runs on 2026-09-03, and the
+# 800 B control answered in 1 of 2), so a single observation distinguishes
+# nothing: what is wanted is a RATE per rung, not an anecdote.
+MULTIPART_REPEATS = 3
+
 BACKENDS = ("uci", "ip65")
 
 
@@ -703,27 +742,51 @@ def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
 
     random.seed(seed)
     queries = [
-        ("namecheap.com", DNS_QTYPE_TXT, 1278, "900-1279 band", None),
-        ("github.com", DNS_QTYPE_TXT, 1928, "targets >1280 (Cloudflare WARP MTU)", None),
+        ("namecheap.com", DNS_QTYPE_TXT, 1278, "900-1279 band", None, None),
+        ("github.com", DNS_QTYPE_TXT, 1928, "targets >1280 (Cloudflare WARP MTU)", None, None),
     ]
     if multipart:
-        # Randomised label (seeded above, logged below): a fixed name could be
-        # answered from a cache and would make the run gameable. The padding
-        # octets themselves must stay zero (RFC 7830), so the randomness lives
-        # here and in the transaction id.
-        tok = "".join(random.choice(string.ascii_lowercase) for _ in range(10))
-        queries.append((f"{tok}.cloudflare.com", DNS_QTYPE_TXT, 0,
-                        f"MULTI-PART: padded to {multipart} B inner", multipart))
+        # Three rungs x MULTIPART_REPEATS, differing ONLY in size, so each
+        # adjacent pair isolates exactly one variable:
+        #   REACHABILITY  small  -> does the tunnel reach this resolver?
+        #   CONTROL       large, ONE part  -> will it answer a big datagram?
+        #   MULTI-PART    large, TWO parts -> does reassembly survive?
+        # Silence first appearing at MULTI-PART is the only pattern that
+        # implicates reassembly; silence at rung 1 means the vehicle is
+        # dead and nothing was tested. Repeats because the path is
+        # intermittent: one observation distinguishes nothing.
+        # Names are randomised per query (seeded, logged) so no reply can
+        # come from a cache; the padding octets stay zero per RFC 7830.
+        for _ in range(MULTIPART_REPEATS):
+            for size, label, want in (
+                    (SMALL_PROBE_LEN, "REACHABILITY", 1),
+                    (CONTROL_INNER_LEN, "CONTROL single-part", 1),
+                    (multipart, "MULTI-PART", 2)):
+                tk = "".join(random.choice(string.ascii_lowercase) for _ in range(10))
+                queries.append((f"{tk}.cloudflare.com", DNS_QTYPE_TXT, 0,
+                                f"{label}: {size} B inner -> {MULTIPART_RESOLVER_IP}",
+                                size, want))
     result["queries"] = []
-    for name, qtype, dig_size, band, pad_to in queries:
+    for name, qtype, dig_size, band, pad_to, want_parts in queries:
         txn_id = random.randint(0, 0xFFFF)
+        target = MULTIPART_RESOLVER_IP if pad_to else PING_TARGET_IP
         if pad_to:
+            # ping_target_ip is read when each packet is built, so a DMA
+            # write here retargets the NEXT query without a re-handshake.
+            tr.write_memory(L["ping_target_ip"],
+                            bytes(int(o) for o in target.split(".")))
             question, wire = build_padded_dns_query(name, qtype, txn_id, pad_to)
             outer, parts = datagram_parts(len(wire))
-            if parts < 2:
-                result["error"] = (f"--multipart {pad_to} yields a {outer}-byte "
-                                   f"datagram = {parts} part(s): NOT multi-part, "
-                                   f"nothing would be proven")
+            # The CONTROL must be exactly one part and the TEST at least
+            # two: the pair is the whole experiment, so a size that does not
+            # produce the intended split makes the comparison meaningless.
+            bad = (parts != 1 if want_parts == 1 else parts < 2)
+            if bad:
+                result["error"] = (
+                    f"padded query of {pad_to} B inner yields a {outer}-byte "
+                    f"datagram = {parts} part(s), wanted "
+                    f"{'exactly 1 (control)' if want_parts == 1 else '>= 2 (test)'}"
+                    f": the control/test pair would prove nothing")
                 log.error("%s", result["error"])
                 return result
             log.info("DNS query %s TXT txn_id=%d wire_len=%d -> outer datagram "
@@ -742,9 +805,20 @@ def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
 
         staged = stage_raw_dma(tr, wire, L, timeout=15.0)
         q = {"name": name, "qtype": qtype, "txn_id": txn_id,
+            "inner_target": target,
             "wire_len": len(wire), "dig_measured": dig_size, "band": band,
             "outer_datagram_len": outer, "uci_parts": parts,
             "multipart": bool(pad_to), "staged_ok": staged}
+
+        # Recorded per query so a silent reply can be told apart from a send
+        # that never left: "no reply" and "never sent" look identical in
+        # msg_recv_len alone.
+        try:
+            q["net_last_error"] = "$%02X" % tr.read_memory(L["net_last_error"], 1)[0]
+            q["tp_send_counter"] = int.from_bytes(
+                tr.read_memory(L["tp_send_counter"], 2), "little")
+        except Exception as exc:                      # noqa: BLE001
+            q["telemetry_error"] = repr(exc)
 
         deadline = time.monotonic() + DNS_TIMEOUT
         recv_len = 0
@@ -775,13 +849,16 @@ def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
                 "txn_id_match": reply_txn == txn_id,
                 "qr_bit": qr_bit, "ancount": ancount,
                 "question_echo_ok": question_echo_ok,
-                "src_ip_ok": src_ip == PING_TARGET_IP,
+                "src_ip_ok": src_ip == target,
                 "dst_ip_ok": dst_ip == TUNNEL_IP,
                 "ports_ok": src_port == 53 and dst_port == 53,
             })
         else:
             dump_screen(tr, label=f"stageC-dns-timeout-{name}")
         result["queries"].append(q)
+        if pad_to:
+            tr.write_memory(L["ping_target_ip"],
+                            bytes(int(o) for o in PING_TARGET_IP.split(".")))
     return result
 
 
