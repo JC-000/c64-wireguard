@@ -181,12 +181,40 @@ def main(argv) -> int:
     # stock image would have false-greened the preflight.
     saved = dict(KNOWN_BUILDS)
     try:
-        KNOWN_BUILDS["stocktest"] = ("no-hash", "a stock image, recorded " * 3)
-        v, _ = describe_build(dict(INFO_A474, git_commit_hash="stocktest"))
+        KNOWN_BUILDS["beef1234"] = ("no-hash", "a stock image, recorded " * 3)
+        v, _ = describe_build(dict(INFO_A474, git_commit_hash="beef1234"))
         chk("recorded kind routes the verdict", v == "no-hash", f"got {v!r}")
     finally:
         KNOWN_BUILDS.clear()
         KNOWN_BUILDS.update(saved)
+
+    # --- markers must DISCRIMINATE, not merely appear ---------------------
+    # The original bug was not "a substring assertion", it was a substring
+    # that is not unique to the branch: `"$03 $16" in text` matched a
+    # KNOWN_BUILDS entry's prose instead of the branch under test. So each
+    # marker is asserted present in its OWN branch and ABSENT from every
+    # other — which also holds if someone later edits KNOWN_BUILDS' wording.
+    branches = {
+        "chunked": describe_build(INFO_A474)[1],
+        "unknown": describe_build(dict(INFO_A474, git_commit_hash="deadbeef"))[1],
+        "absent": describe_build(INFO_NO_HASH)[1],
+        "empty": describe_build(dict(INFO_A474, git_commit_hash=""))[1],
+        "http": describe_build({"__http_status__": 404})[1],
+    }
+    markers = {"chunked": "1653b0ac", "unknown": "not measured by this repo",
+               "absent": "ABSENT", "empty": "EMPTY", "http": "REPLIED"}
+    for name, marker in markers.items():
+        chk(f"{name} marker is in its own branch", marker in branches[name],
+            repr(branches[name][:60]))
+        strays = [o for o, txt in branches.items() if o != name and marker in txt]
+        chk(f"{name} marker appears in NO other branch", not strays, f"also in {strays}")
+
+    # ABSENT and EMPTY are different device states with different remedies:
+    # absent = firmware predates the field; empty = current firmware built
+    # outside a git repo (rules.mk backticks, no failure handling, routes.cc
+    # emits the key regardless). Same verdict, but they must not read alike.
+    chk("absent and empty do not produce identical text",
+        branches["absent"] != branches["empty"])
 
     # --- abbreviation length must not decide the verdict ------------------
     # The firmware embeds `git rev-parse --short HEAD`, whose width follows
@@ -199,6 +227,13 @@ def main(argv) -> int:
         describe_build(dict(INFO_A474, git_commit_hash="a474a7ed99"))[0] == "chunked")
     chk("a prefix below the 7-char floor does NOT match",
         describe_build(dict(INFO_A474, git_commit_hash="a474"))[0] == "unknown")
+    chk("an uppercase hash still matches",
+        describe_build(dict(INFO_A474, git_commit_hash="A474A7ED"))[0] == "chunked")
+    chk("a whitespace-padded hash still matches",
+        describe_build(dict(INFO_A474, git_commit_hash=" a474a7ed "))[0] == "chunked")
+    chk("a non-hex value is not prefix-matched",
+        describe_build(dict(INFO_A474, git_commit_hash="not-a-hash"))[0] == "unknown")
+
     saved2 = dict(KNOWN_BUILDS)
     try:
         KNOWN_BUILDS["a474a7ee"] = ("chunked", "a different image, recorded " * 2)

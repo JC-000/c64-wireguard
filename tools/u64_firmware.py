@@ -132,6 +132,19 @@ def fetch_info(host: str, timeout: float = INFO_TIMEOUT_S) -> Optional[dict]:
 MIN_HASH_PREFIX = 7
 
 
+def _normalise_hash(commit: str) -> Optional[str]:
+    """Lowercased, stripped hash — or None if it is not a hex object name.
+
+    A non-hex value must NOT be prefix-matched: the empty string is a real
+    device state (see describe_build) and arbitrary text is not an object
+    name. Rejecting here keeps _match_known comparing like with like.
+    """
+    c = commit.strip().lower()
+    if not c or any(ch not in "0123456789abcdef" for ch in c):
+        return None
+    return c
+
+
 def _match_known(commit: str):
     """KNOWN_BUILDS lookup that tolerates abbreviation length.
 
@@ -142,14 +155,17 @@ def _match_known(commit: str):
     Matches in either direction with a 7-character floor, and returns
     "ambiguous" rather than picking one when a prefix hits several.
     """
-    hit = KNOWN_BUILDS.get(commit)
+    c = _normalise_hash(commit)
+    if c is None:
+        return None
+    hit = KNOWN_BUILDS.get(c)
     if hit is not None:
         return hit
-    if len(commit) < MIN_HASH_PREFIX:
+    if len(c) < MIN_HASH_PREFIX:
         return None
     hits = [v for k, v in KNOWN_BUILDS.items()
             if len(k) >= MIN_HASH_PREFIX
-            and (k.startswith(commit) or commit.startswith(k))]
+            and (k.lower().startswith(c) or c.startswith(k.lower()))]
     if len(hits) > 1:
         return "ambiguous"
     return hits[0] if hits else None
@@ -193,11 +209,21 @@ def describe_build(info: Optional[dict]) -> Tuple[str, str]:
             f"{ident} git_commit_hash is {type(commit).__name__}, not a "
             f"string — cannot identify the image; the $16 send path still "
             f"decides (net_last_error $8E means the handler is absent).")
-    if not commit:
+    if commit is None:
         return "no-hash", (
-            f"{ident} — no git_commit_hash: firmware predates the field, so "
-            f"the image cannot be identified from /v1/info. Only sending "
-            f"$03 $16 distinguishes a #807 spike from stock."
+            f"{ident} — git_commit_hash ABSENT: firmware predates the field "
+            f"(upstream added it 2026-09-03), so the image cannot be named "
+            f"from /v1/info at all. Remedy: newer firmware, or identify the "
+            f"image by probing."
+        )
+    if not commit.strip():
+        return "no-hash", (
+            f"{ident} — git_commit_hash present but EMPTY: the field exists, "
+            f"so this firmware is current; it was BUILT OUTSIDE A GIT REPO "
+            f"(a tarball, or a container without .git). rules.mk runs "
+            f"`git rev-parse` in backticks with no failure handling, so the "
+            f"hash compiles in as \"\" and routes.cc emits the key anyway. "
+            f"Remedy is the builder's, not the device's."
         )
 
     known = _match_known(commit)
