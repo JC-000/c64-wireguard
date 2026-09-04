@@ -103,7 +103,7 @@ from uci.mos6502 import Mos6502, CpuBudgetExceeded  # noqa: E402
 # Every run emits exactly this many named checks. A case that silently
 # stops running is then a hard error rather than a smaller denominator
 # nobody notices. Update deliberately when adding one.
-EXPECTED_CHECKS = 72
+EXPECTED_CHECKS = 87
 
 # --- UCI register map (src/net/uci/uci_regs.inc) -----------------------------
 UCI_DEVICE, UCI_STATUS, UCI_CMD_DATA = 0xDF1B, 0xDF1C, 0xDF1D
@@ -143,6 +143,31 @@ KNOWN_ERROR_CODES = {
 }
 ERR_WAIT_TIMEOUT = 0x89
 ERR_LONG_READ = 0x8A
+
+# How many UCI_STATUS reads a correct short-read exit may take AFTER the
+# device can no longer produce a byte. A drop takes three — @block_end's
+# deciding read, then one each inside uci_drain_resp and uci_drain_status —
+# so this leaves headroom for a drain that legitimately loops without
+# permitting a wait. Measured, not guessed: see case 5's /no-retry check.
+DEAD_POLL_BUDGET = 6
+
+# uci_short_read_state's SHIPPING encoding (8c0db2b, merged 211e935):
+# @block_short stores (STATUS & $30) | $80, so bit 7 means "this byte was
+# written by a short-read exit" and $00 means "never written" and ONLY that.
+# The distinction is load-bearing twice over: the byte is never cleared, and
+# cfg/c64-wireguard-uci.cfg fills MAIN_AREA_LO with $00, so a freshly LOADed
+# PRG reads $00 — which under a bare $30 mask was indistinguishable from the
+# Idle verdict. Asserting bit 7 is what stops a future change that drops the
+# `ora #$80` from passing this suite silently.
+SHORT_READ_STATE_WRITTEN = 0x80
+STATE_NEVER_WRITTEN = 0x00
+
+# Seeded into uci_short_read_state before every poll. NOT zero on purpose:
+# the byte's own "no short read here" value is $00, which is also a
+# legitimate recorded state ($00 Idle), so a harness that zeroed it could
+# not tell "untouched" from "Idle was recorded". With a witness it can, and
+# a build that wrote the byte on a healthy poll fails a named check.
+STATE_WITNESS = 0xA5
 
 # The five announced lengths at which hardware saw the failure (issue #130).
 HARDWARE_BAND = (1008, 1109, 1191, 1247, 1338)
@@ -287,6 +312,14 @@ class UciDevice:
         self.log = []                       # structural trace, for diagnosis
         self.bytes_served = 0
         self.commands_seen = []
+        # Set once the device has nothing left to give AND has given less
+        # than it announced — i.e. the moment from which no amount of
+        # further polling can produce another byte. Counting UCI_STATUS
+        # reads from there is how "drop, do not retry" is measured: at the
+        # wire tap, not by wall-clock, so it does not depend on how fast
+        # the interpreter runs or on any budget constant.
+        self.short_terminal = False
+        self.dead_status_polls = 0
 
     # -- time -------------------------------------------------------------
     def sync(self, cycles):
@@ -328,6 +361,7 @@ class UciDevice:
             self.resp, self.resp_pos = b"", 0
             self.stat, self.stat_pos = self.status_line, 0
             self.log.append(("exhausted", f"state=${self.state:02X}"))
+            self._note_terminal()
             return
         self.block_index = index
         self.resp = self.blocks[index]
@@ -339,6 +373,11 @@ class UciDevice:
             self.stat, self.stat_pos = self.status_line, 0
         self.log.append(("stage", f"block={index} len={len(self.resp)} "
                                   f"state=${self.state:02X}"))
+
+    def _note_terminal(self):
+        if self.announced != NO_DATA_SENTINEL and \
+                self.bytes_served < self.announced:
+            self.short_terminal = True
 
     def _data_acc(self):
         # Register API v1.1 §2.4.1: DATA_ACC also aborts and resets both
@@ -376,6 +415,8 @@ class UciDevice:
     def read(self, addr):
         if addr == UCI_STATUS:
             s = self.status()
+            if self.short_terminal:
+                self.dead_status_polls += 1
             if self._stage_countdown is not None:
                 self._stage_countdown -= 1
                 if self._stage_countdown <= 0:
@@ -390,6 +431,12 @@ class UciDevice:
                 b = self.resp[self.resp_pos]
                 self.resp_pos += 1
                 self.bytes_served += 1
+                if self.resp_pos == len(self.resp) and \
+                        self.block_index == len(self.blocks) - 1 and \
+                        not self.more_after_last:
+                    # Last block fully drained and it was announced as Data
+                    # Last: nothing further will ever be staged.
+                    self._note_terminal()
                 return b
             return 0xFF                     # empty FIFO: open bus
         if addr == UCI_STATUS_DATA:
@@ -480,7 +527,7 @@ class Machine:
         self.buf_cap = self.sym["udp_recv_len"] - self.sym["udp_recv_buf"]
 
     def poll(self, device, *, socket_id, seed_error=0x00, poison=None,
-             max_cycles=400_000_000):
+             state_witness=STATE_WITNESS, max_cycles=400_000_000):
         s = self.sym
         mem = bytearray(0x10000)
         mem[self.load_addr:self.load_addr + len(self.image)] = self.image
@@ -512,6 +559,12 @@ class Machine:
         mem[s["net_last_error"]] = seed_error
         mem[s["udp_recv_len"]] = 0
         mem[s["udp_recv_len"] + 1] = 0
+        if "uci_short_read_state" in s:
+            # Written only at @block_short and never cleared, so it is
+            # sticky-first in exactly the way uci_status_len is. Seed it or
+            # a later poll reads an earlier poll's verdict — the stale-state
+            # defect, one layer down.
+            mem[s["uci_short_read_state"]] = state_witness
         if poison is not None:
             mem[s["udp_recv_buf"]:s["udp_recv_buf"] + len(poison)] = poison
 
@@ -528,6 +581,8 @@ class Machine:
             error=mem[s["net_last_error"]],
             poll_rem=mem[s["uci_poll_rem"]] | (mem[s["uci_poll_rem"] + 1] << 8),
             hdr=mem[s["uci_read_hdr"]] | (mem[s["uci_read_hdr"] + 1] << 8),
+            short_read_state=(mem[s["uci_short_read_state"]]
+                              if "uci_short_read_state" in s else None),
             buf=buf,
             stop=self.mod.poison_stop(buf, poison) if poison else None,
             cycles=cpu.cycles,
@@ -664,6 +719,24 @@ def case0_interpreter_fidelity(ctx, res):
               "the equality above is not actually observing the computation")
 
 
+def _check_state_byte_untouched(res, r, name):
+    """uci_short_read_state must not be written by a poll that succeeded.
+
+    It is the only thing that will ever say whether a $8F was a zero-length
+    final block ($20) or an abort ($00), and it is never cleared, so a build
+    that scribbled on it during healthy polls would leave an operator
+    reading last week's verdict.
+    """
+    if r.short_read_state is None:
+        res.skip(name, "no uci_short_read_state in this build; case 5 "
+                       "reports the absence")
+        return
+    res.check(r.short_read_state == STATE_WITNESS, name,
+              f"uci_short_read_state=${r.short_read_state:02X} after a poll "
+              f"that delivered a complete datagram; it was seeded "
+              f"${STATE_WITNESS:02X} and only @block_short may write it")
+
+
 def _blake2s_on_6502(m, scratch, msg):
     mem = bytearray(0x10000)
     mem[m.load_addr:m.load_addr + len(m.image)] = m.image
@@ -731,6 +804,7 @@ def case1_full_read(ctx, res):
                   "datagram")
         res.check(r.buf[n:] == poison[n:], f"{pre}/tail-untouched",
                   "bytes past the datagram were written")
+        _check_state_byte_untouched(res, r, f"{pre}/state-byte-untouched")
 
     # Detector proof for the byte-exact and stop checks: one corrupted byte
     # in what the device serves must move the verdict.
@@ -888,7 +962,9 @@ def case5_short_read(ctx, res):
         print(f"        [{tag}] announced={announced} served={delivered_n} "
               f"final_state=${final_state:02X} -> carry={r.carry} "
               f"ready={r.ready} recv_len={r.recv_len} stop={r.stop} "
-              f"err=${r.error:02X} rem={r.poll_rem}")
+              f"err=${r.error:02X} rem={r.poll_rem} "
+              f"state_byte={'--' if r.short_read_state is None else f'${r.short_read_state:02X}'} "
+              f"dead_polls={r.device.dead_status_polls}")
         res.check(r.hung is None, f"{pre}/returns", r.hung or "")
         res.check(r.ready == 0, f"{pre}/dropped",
                   f"udp_recv_ready={r.ready}: the device offered "
@@ -928,6 +1004,58 @@ def case5_short_read(ctx, res):
         res.check(r.stop <= delivered_n, f"{pre}/no-over-copy",
                   f"poison_stop={r.stop} exceeds the {delivered_n} bytes the "
                   "device served")
+        # DROP, DO NOT RETRY. Once the firmware has presented the terminal
+        # state with bytes outstanding, the RTL says no sequence of C64
+        # actions can produce another VALIDATE_*: the payload is already
+        # gone from lwip, a wait hangs forever and an ack merely ends the
+        # transaction. So "wait a bit longer and resume" is not merely
+        # unwise, it is unreachable — and it is exactly what the next
+        # reader will reach for, because it looks like the kind fix.
+        #
+        # Measured at the wire tap rather than by wall-clock: the device
+        # counts UCI_STATUS reads taken from the moment it can no longer
+        # produce a byte. A drop spends a handful (the deciding read, plus
+        # one each in uci_drain_resp and uci_drain_status). A retry of any
+        # shape — bounded or not — spends many, because polling STATUS is
+        # the only way to ask. This bound does not depend on the
+        # interpreter's speed or on any budget constant.
+        res.check(r.device.dead_status_polls <= DEAD_POLL_BUDGET,
+                  f"{pre}/no-retry",
+                  f"{r.device.dead_status_polls} UCI_STATUS reads were taken "
+                  f"after the device could no longer produce a byte (budget "
+                  f"{DEAD_POLL_BUDGET}). The adapter is waiting for a "
+                  "continuation that the FPGA cannot ever stage.")
+        # WHICH terminal state. $20 Data Last and $00 Idle are different
+        # root causes -- a zero-length final block from get_more_data
+        # versus a HANDSHAKE_RESET from the CMD_ABORT_DATA branch -- and
+        # every attribution in #128/#130 so far is inferred from a code
+        # comment rather than measured. The adapter has to record which one
+        # it saw or the hardware run cannot tell them apart either.
+        if r.short_read_state is None:
+            res.check(False, f"{pre}/state-byte",
+                      "no uci_short_read_state label in this build: the $8F "
+                      "exit does not record WHICH terminal state it saw, so "
+                      "$20 Data Last and $00 Idle stay indistinguishable on "
+                      "hardware")
+        else:
+            want = final_state | SHORT_READ_STATE_WRITTEN
+            got = r.short_read_state
+            if got == STATE_WITNESS:
+                why = (" — it is still the harness witness, so the exit "
+                       "recorded nothing at all")
+            elif got == STATE_NEVER_WRITTEN:
+                why = (" — $00 is reserved for NEVER WRITTEN and must not be "
+                       "a verdict")
+            elif not got & SHORT_READ_STATE_WRITTEN:
+                why = (f" — bit 7 is clear, so this is the pre-8c0db2b bare "
+                       f"$30 mask. ${STATE_NEVER_WRITTEN:02X} then means both "
+                       "'Idle' and 'never written', and the byte is never "
+                       "cleared while MAIN_AREA_LO loads as $00")
+            else:
+                why = ""
+            res.check(got == want, f"{pre}/state-byte",
+                      f"uci_short_read_state=${got:02X}, expected ${want:02X} "
+                      f"= (${final_state:02X} presented) | $80{why}")
 
 
 def case6_no_stale_delivery(ctx, res):
@@ -1036,6 +1164,55 @@ def case9_command_is_wellformed(ctx, res):
               f"net_poll pushed {got.hex()!r}, expected {want.hex()!r}")
 
 
+def case11_state_byte_renderer(ctx, res):
+    """The REPORTING side of the diagnostic byte, in test_warp_live.py.
+
+    A correctly recorded $A0 is worth nothing if the tool that prints it
+    guesses. `describe_short_read_state()` is the contract: $A0 and $80 are
+    named, $00 is "not written" and never "Idle", and anything with bit 7
+    clear is reported as UNEXPECTED rather than decoded — because a build
+    that dropped the `ora #$80` would otherwise be rendered as a confident
+    verdict. This is checked against the real function, not a copy of it.
+    """
+    print("\n[case 11] the short-read state renderer does not guess")
+    mod, rng = ctx["mod"], ctx["rng"]
+    describe = getattr(mod, "describe_short_read_state", None)
+    if describe is None:
+        for nm in ("named", "never-written", "bit7-clear-is-unexpected",
+                   "unknown-bit7-set"):
+            res.skip("case11/" + nm,
+                     "tools/test_warp_live.py has no "
+                     "describe_short_read_state()")
+        return
+    named = {0xA0: "DATA_LAST", 0x80: "IDLE"}
+    ok = all(named[v] in (describe(v) or "") for v in named)
+    res.check(ok, "case11/named",
+              f"$A0 -> {describe(0xA0)!r}, $80 -> {describe(0x80)!r}; the "
+              "two recorded verdicts must be named")
+    zero = describe(0x00) or ""
+    res.check("not written" in zero.lower() and "idle" not in zero.lower(),
+              "case11/never-written",
+              f"$00 -> {zero!r}; $00 is NEVER WRITTEN and must not render as "
+              "Idle — MAIN_AREA_LO loads as $00, so every fresh PRG would "
+              "otherwise report an Idle verdict it never reached")
+    # Every bit-7-clear value, including the bare pre-8c0db2b encodings.
+    bad = []
+    for v in [0x20, 0x10, 0x30] + [rng.randrange(1, 0x80) for _ in range(6)]:
+        rendered = describe(v) or ""
+        if "UNEXPECTED" not in rendered:
+            bad.append((v, rendered))
+    res.check(not bad, "case11/bit7-clear-is-unexpected",
+              f"these bit-7-clear values were decoded rather than flagged: "
+              f"{[(hex(v), r) for v, r in bad]}. A build that dropped the "
+              "`ora #$80` must surface as UNEXPECTED, not as a verdict.")
+    # Bit 7 set but not a known state: unknown, still not guessed.
+    unknown = [v for v in (0x90, 0xB0, 0xF0)
+               if "UNKNOWN" not in (describe(v) or "")]
+    res.check(not unknown, "case11/unknown-bit7-set",
+              f"{[hex(v) for v in unknown]} have bit 7 set but are not $80 "
+              "or $A0; they must render as UNKNOWN")
+
+
 def case10_staged_inside_the_fence(ctx, res):
     """A continuation that lands INSIDE the fence must be drained, not dropped.
 
@@ -1085,6 +1262,152 @@ def case10_staged_inside_the_fence(ctx, res):
               "the delivered bytes are not the bytes the device served")
     res.check(r.error == 0x00, "case10/no-error",
               f"net_last_error=${r.error:02X} on a complete reply")
+    _check_state_byte_untouched(res, r, "case10/state-byte-untouched")
+
+
+# =============================================================================
+# Sweeps — measurement, not pass/fail
+#
+# The working model of #128's "size band" is that the variable was never
+# LENGTH, it was the STAGING LATENCY of the continuation block, and that
+# there is ONE fatal window in it, safe on both sides:
+#
+#   d < E_lo    @byte_loop's own read of UCI_STATUS already sees DATA_AV;
+#               the block is drained normally.
+#   E_lo<d<E_hi @byte_loop misses it, but @block_end's read one uci_fence
+#               later has DATA_AV=1 AND the terminal STATE in the same
+#               byte. Code that masks bit 7 off before testing bits 5..4
+#               reads a complete reply as a short one.
+#   d > E_hi    @block_end still sees $10 Command Busy, so
+#               uci_wait_reply_staged handles it.
+#
+# Sweep 1 varies LENGTH at a FIXED delay and predicts NO band: length is
+# not the variable. Sweep 2 varies DELAY at a fixed length and measures
+# E_lo and E_hi to the cycle. Run both against an unfixed build (to
+# characterise the window) and a fixed one (to show it is closed).
+# =============================================================================
+def _complete_reply(machine, mod, rng, announced, delay, first_delay=20_000):
+    """One poll of a COMPLETE `announced`-byte reply, continuation staged
+    `delay` cycles after the DATA_ACC. Returns (result, payload, poison)."""
+    poison = mod.poison_pattern(machine.buf_cap)
+    payload = _payload_for(rng, announced, poison)
+    dev = make_device(rng, announced=announced, delivered_payload=payload,
+                      final_state=STATE_IDLE)
+    dev.stage_cycles = [first_delay, delay]
+    dev.accept_cycles = 20_000
+    r = machine.poll(dev, socket_id=17, poison=poison)
+    return r, payload, poison
+
+
+def _is_broken(r, announced):
+    """The reply was complete; anything other than delivering all of it is
+    a failure of the adapter, whichever way it fails."""
+    return not (r.ready == 1 and r.stop == announced and r.recv_len == announced
+                and r.error == 0x00 and r.carry == 0)
+
+
+def sweep_length(machine, mod, seed, delay):
+    print(f"\n=== SWEEP 1: announced LENGTH at a FIXED staging delay of "
+          f"{delay} cycles ===")
+    print("Every reply below is COMPLETE. The model predicts the outcome is "
+          "the same at\nevery two-block length — a band here would refute "
+          "it.\n")
+    lengths = sorted({476, 894, 900, 910, 950, 1000, 1008, 1049, 1109, 1150,
+                      1187, 1191, 1216, 1247, 1278, 1300, 1338, 1400, 1420,
+                      1472})
+    print(f"{'announced':>9} {'blocks':>6} {'cont':>5} {'ready':>5} "
+          f"{'len':>5} {'stop':>5} {'err':>4}  verdict")
+    broken, ok = [], []
+    for n in lengths:
+        rng = random.Random(seed ^ n)
+        r, _payload, _poison = _complete_reply(machine, mod, rng, n, delay)
+        blocks = 1 if n <= FIRST_BLOCK_PAYLOAD else \
+            1 + -(-(n - FIRST_BLOCK_PAYLOAD) // BLOCK_BYTES)
+        cont = max(0, n - FIRST_BLOCK_PAYLOAD)
+        bad = _is_broken(r, n)
+        (broken if bad else ok).append(n)
+        print(f"{n:>9} {blocks:>6} {cont:>5} {r.ready:>5} {r.recv_len:>5} "
+              f"{r.stop:>5} ${r.error:02X}  {'BROKEN' if bad else 'ok'}")
+    multi = [n for n in lengths if n > FIRST_BLOCK_PAYLOAD]
+    multi_broken = [n for n in broken if n > FIRST_BLOCK_PAYLOAD]
+    print(f"\nbroken at {len(broken)} of {len(lengths)} lengths "
+          f"({len(multi_broken)} of {len(multi)} two-block lengths)")
+    if multi_broken and len(multi_broken) == len(multi):
+        print("VERDICT: no band in LENGTH — every two-block reply fails at "
+              "this delay, and\n         the one-block control does not. "
+              "Length is not the variable.")
+    elif not broken:
+        print("VERDICT: nothing fails at this delay on this build.")
+    else:
+        print("VERDICT: a SUBSET of two-block lengths fails at a fixed "
+              "delay. That contradicts\n         the model — length would "
+              "have to matter independently of staging latency.")
+    return broken, ok
+
+
+def _edge(machine, mod, seed, announced, lower, upper, upper_is_broken):
+    """Bisect the delay at which the verdict flips, to one cycle.
+
+    `lower` < `upper`, and they disagree. Always returns
+    ``(last_delay_at_lower_verdict, first_delay_at_upper_verdict)`` in
+    DELAY order, so the caller labels them and there is no way to print
+    a "last failure" above a "first success".
+    """
+    a, b = lower, upper
+    while b - a > 1:
+        mid = (a + b) // 2
+        rng = random.Random(seed ^ announced ^ mid)
+        r, _p, _q = _complete_reply(machine, mod, rng, announced, mid)
+        if _is_broken(r, announced) == upper_is_broken:
+            b = mid
+        else:
+            a = mid
+    return a, b
+
+
+def sweep_delay(machine, mod, seed, announced):
+    print(f"\n=== SWEEP 2: continuation staging DELAY at a fixed announced "
+          f"length of {announced} B ===")
+    print("Coarse scan first, then each edge bisected to one cycle.\n")
+    coarse = list(range(2_000, 16_001, 500))
+    verdicts = []
+    for d in coarse:
+        rng = random.Random(seed ^ announced ^ d)
+        r, _p, _q = _complete_reply(machine, mod, rng, announced, d)
+        bad = _is_broken(r, announced)
+        verdicts.append((d, bad, r))
+        print(f"  delay {d:>6}  ready={r.ready} len={r.recv_len:>5} "
+              f"stop={r.stop:>5} err=${r.error:02X}  "
+              f"{'BROKEN' if bad else 'ok'}")
+    bad_ds = [d for d, bad, _ in verdicts if bad]
+    if not bad_ds:
+        print(f"\nNo delay in [{coarse[0]}, {coarse[-1]}] produces a wrong "
+              "result: the window is CLOSED on this build.")
+        return None
+    first_bad, last_bad = bad_ds[0], bad_ds[-1]
+    prev_good = max([d for d, bad, _ in verdicts if not bad and d < first_bad],
+                    default=None)
+    next_good = min([d for d, bad, _ in verdicts if not bad and d > last_bad],
+                    default=None)
+    if prev_good is None or next_good is None:
+        print(f"\nBroken region reaches the end of the scanned range "
+              f"[{coarse[0]}, {coarse[-1]}]; widen it before quoting edges.")
+        return (first_bad, last_bad)
+    lo_ok, lo_bad = _edge(machine, mod, seed, announced, prev_good, first_bad,
+                          upper_is_broken=True)
+    hi_bad, hi_ok = _edge(machine, mod, seed, announced, last_bad, next_good,
+                          upper_is_broken=False)
+    print(f"\nFATAL INTERVAL, bisected to one cycle:")
+    print(f"  last delay that WORKS below it : {lo_ok}")
+    print(f"  first delay that FAILS         : {lo_bad}")
+    print(f"  last delay that FAILS          : {hi_bad}")
+    print(f"  first delay that WORKS above it: {hi_ok}")
+    assert lo_ok < lo_bad <= hi_bad < hi_ok
+    print(f"  width                          : {hi_bad - lo_bad + 1} cycles")
+    print(f"  at 1 MHz {(hi_bad - lo_bad + 1) / 1e6 * 1e3:.2f} ms, "
+          f"at 48 MHz {(hi_bad - lo_bad + 1) / 48e6 * 1e6:.1f} us, "
+          f"at 64 MHz {(hi_bad - lo_bad + 1) / 64e6 * 1e6:.1f} us")
+    return (lo_bad, hi_bad)
 
 
 # =============================================================================
@@ -1105,6 +1428,13 @@ def main(argv=None):
     p.add_argument("--tree", default=None,
                    help="source tree whose uci_errors.inc defines the codes")
     p.add_argument("--only", default=None)
+    p.add_argument("--sweep", choices=("length", "delay", "both"), default=None,
+                   help="measurement mode: characterise the staging-latency "
+                        "window instead of running the check suite")
+    p.add_argument("--sweep-delay", type=int, default=5500,
+                   help="fixed staging delay for --sweep length")
+    p.add_argument("--sweep-length", type=int, default=1216,
+                   help="fixed announced length for --sweep delay")
     args = p.parse_args(argv)
 
     seed = args.seed
@@ -1145,6 +1475,13 @@ def main(argv=None):
           f"net_poll=${machine.sym['net_poll']:04X} "
           f"uci_poll_rem=${machine.sym['uci_poll_rem']:04X}")
 
+    if args.sweep:
+        if args.sweep in ("length", "both"):
+            sweep_length(machine, mod, seed, args.sweep_delay)
+        if args.sweep in ("delay", "both"):
+            sweep_delay(machine, mod, seed, args.sweep_length)
+        return 0
+
     ctx = {"machine": machine, "rng": rng, "mod": mod, "new_code": new_code}
     res = Result()
     cases = {
@@ -1159,6 +1496,7 @@ def main(argv=None):
         "7": case7_idle_polls_never_error,
         "8": case8_zero_length_read,
         "10": case10_staged_inside_the_fence,
+        "11": case11_state_byte_renderer,
     }
     for key, fn in cases.items():
         if args.only and args.only != key:
