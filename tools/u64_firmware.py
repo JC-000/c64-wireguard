@@ -38,6 +38,7 @@ import http.client
 import json
 import socket
 import sys
+import time
 import urllib.error
 import urllib.request
 from typing import Optional, Tuple
@@ -76,11 +77,33 @@ def fetch_info(host: str, timeout: float = INFO_TIMEOUT_S) -> Optional[dict]:
     """
     url = f"http://{host}/v1/info"
     try:
+        deadline = time.monotonic() + timeout
         with urllib.request.urlopen(url, timeout=timeout) as r:
-            body = r.read(MAX_INFO_BYTES + 1)
+            body = b""
+            while len(body) <= MAX_INFO_BYTES:
+                if time.monotonic() > deadline:
+                    return None          # total budget, not a per-recv one
+                # read1(), NOT read(): read(n) blocks until n bytes or EOF,
+                # so the deadline below is never reached mid-body and the
+                # first version of this loop was still unbounded (measured
+                # 26 s against a 3 s budget). read1() returns after ONE
+                # underlying recv, which is what makes the check effective.
+                want = min(8192, MAX_INFO_BYTES + 1 - len(body))
+                reader = getattr(r, "read1", r.read)
+                chunk = reader(want)
+                if not chunk:
+                    break
+                body += chunk
         if len(body) > MAX_INFO_BYTES:
             return None                      # not /v1/info; refuse to parse it
         return json.loads(body.decode("utf-8", "replace"))
+    except urllib.error.HTTPError as e:
+        # A status IS an answer: 403 (network password set — enforced
+        # device-wide, /v1/info is not exempt) and 404 (firmware with no
+        # /v1/info at all, i.e. the very "old image" case this file names)
+        # both mean the device replied. Reporting "unreachable" there would
+        # diagnose a state we did not establish.
+        return {"__http_status__": e.code}
     except (urllib.error.URLError, OSError, socket.timeout,
             http.client.HTTPException, ValueError, TimeoutError):
         # http.client.HTTPException is NOT an OSError: a 200 with a short
@@ -106,6 +129,16 @@ def describe_build(info: Optional[dict]) -> Tuple[str, str]:
         return "unreachable", (
             f"/v1/info answered with {type(info).__name__}, not an object — "
             f"not a U64 REST endpoint?")
+
+    status = info.get("__http_status__")
+    if status is not None:
+        hint = {403: " — network password set? fetch_info sends no X-Password",
+                404: " — no /v1/info on this firmware: predates the endpoint"}.get(status, "")
+        return "no-hash", (
+            f"/v1/info answered HTTP {status}{hint}. The device REPLIED, so "
+            f"this is not an unreachable device; the image is simply not "
+            f"identifiable this way. Only sending $03 $16 distinguishes a "
+            f"#807 spike from stock.")
 
     ident = " ".join(
         f"{k}={info.get(k)}"

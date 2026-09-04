@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import http.server
 import sys
+import time
 import threading
 from pathlib import Path
 
@@ -95,6 +96,25 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif self.mode in ("403", "404"):
+            code = int(self.mode)
+            self.send_response(code)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        elif self.mode == "drip":
+            # Promises 27 bytes, sends one per second. urllib's timeout=
+            # resets on every successful recv, so this is UNBOUNDED without
+            # a deadline: measured at 108 s against a 10 s timeout.
+            self.send_response(200)
+            self.send_header("Content-Length", "27")
+            self.end_headers()
+            for _ in range(27):
+                try:
+                    self.wfile.write(b"x")
+                    self.wfile.flush()
+                    time.sleep(1.0)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
         elif self.mode == "notjson":
             self._body(b"<html>not json</html>")
         elif self.mode == "notobject":
@@ -126,6 +146,12 @@ def _check(name, cond, detail, fails, verbose, _n=[0]):
 def main(argv) -> int:
     verbose = "--verbose" in argv
     fails: list = []
+    # Reset the counter: _n lives on the function object, so three calls in
+    # ONE process printed 10/10, then 20/20, then 30/30. Safe only while the
+    # gate spawns a subprocess — and test_suite_imports.py already imports
+    # this module in a foreign process. Same bug this suite was written to
+    # fix, one level up.
+    _check.__defaults__[0][0] = 0
 
     def chk(name, cond, detail=""):
         _check(name, cond, detail, fails, verbose)
@@ -206,6 +232,24 @@ def main(argv) -> int:
             fw.fetch_info(host, timeout=5.0) is None)
         _Handler.mode = "notjson"
         chk("a non-JSON body is refused", fw.fetch_info(host, timeout=5.0) is None)
+
+        # An HTTP status is an ANSWER: a device that replies 403 (network
+        # password) or 404 (firmware with no /v1/info) is reachable, and
+        # calling it "unreachable" diagnoses a state we did not establish.
+        for code in ("403", "404"):
+            _Handler.mode = code
+            v, txt = describe_build(fw.fetch_info(host, timeout=5.0))
+            chk(f"HTTP {code} is not reported as unreachable",
+                v == "no-hash" and "REPLIED" in txt, f"{v!r} {txt!r}")
+            chk(f"HTTP {code} names the status", code in txt, repr(txt))
+
+        # The wait must be bounded in TOTAL, not per-recv.
+        _Handler.mode = "drip"
+        t0 = time.monotonic()
+        fw.fetch_info(host, timeout=3.0)
+        drip = time.monotonic() - t0
+        chk("a slow drip is bounded by the total deadline", drip < 8.0,
+            f"took {drip:.1f}s for a 3s budget")
 
         # A non-object 200 must reach describe_build and be judged, not crash.
         _Handler.mode = "notobject"
