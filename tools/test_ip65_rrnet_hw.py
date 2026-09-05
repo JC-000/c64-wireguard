@@ -376,6 +376,7 @@ WIRE_CHECKS = (
     "no plaintext appears anywhere in the capture",
     "identical plaintext produced different ciphertext",
     "the two stations resolved each other by ARP",
+    "type-4 nonce counters are distinct and strictly increasing",
 )
 results: list[tuple[str, str, str]] = []       # (status, label, detail)
 VERBOSE = False
@@ -2173,10 +2174,11 @@ def stage_wire(cap, run: dict, transport: dict) -> None:
                 f"no two datagrams carrying the SAME plaintext, distinct "
                 f"ciphertext is expected for free and proves nothing")
     else:
-        bodies = [d.udp_payload[16:] for d in hw.reassemble(frames)
-                  if d.dport == WG_PORT and len(d.udp_payload) > 16
-                  and d.udp_payload[0] == MSG_TYPE_TRANSPORT
-                  and c64_mac in [bytes(m) for m in d.eth_srcs]]
+        t4 = [d.udp_payload for d in hw.reassemble(frames)
+              if d.dport == WG_PORT and len(d.udp_payload) > 16
+              and d.udp_payload[0] == MSG_TYPE_TRANSPORT
+              and c64_mac in [bytes(m) for m in d.eth_srcs]]
+        bodies = [p[16:] for p in t4]
         dupes = len(bodies) - len(set(bodies))
         check(bool(bodies) and dupes == 0, label_cv,
               f"{len(bodies)} type-4 ciphertext bodies from the C64, "
@@ -2185,6 +2187,45 @@ def stage_wire(cap, run: dict, transport: dict) -> None:
               f"plaintext was sent twice this run, so two of these decrypt "
               f"to identical bytes — equal ciphertext would mean the nonce "
               f"or the key stream repeated.")
+
+    # --- THE NONCE ITSELF ---
+    # Body variance alone does NOT catch what it is here for: two datagrams
+    # that reuse a nonce but carry different plaintext have different
+    # bodies, so the body check passes straight through the failure it
+    # exists to detect. Demonstrated: two frames with counter 7 and
+    # payloads AA.. / BB.. are body-distinct and counter-identical.
+    #
+    # The field that decides it is the 8-byte counter at offset 8 of the
+    # type-4 header — the nonce. Distinct AND strictly increasing, in
+    # capture order, across everything the C64 sent. Both properties
+    # matter: distinctness catches reuse, monotonicity catches a counter
+    # that was reset mid-session (which reuse would follow from).
+    label_nonce = "type-4 nonce counters are distinct and strictly increasing"
+    if not c64_mac:
+        skipped(label_nonce, "the C64's MAC was never read")
+    else:
+        t4 = [d.udp_payload for d in hw.reassemble(frames)
+              if d.dport == WG_PORT and len(d.udp_payload) > 16
+              and d.udp_payload[0] == MSG_TYPE_TRANSPORT
+              and c64_mac in [bytes(m) for m in d.eth_srcs]]
+        ctrs = [struct.unpack_from("<Q", p, 8)[0] for p in t4]
+        rcvs = {struct.unpack_from("<I", p, 4)[0] for p in t4}
+        if len(ctrs) < 2:
+            skipped(label_nonce,
+                    f"only {len(ctrs)} type-4 datagram(s) from the C64; "
+                    f"with fewer than two there is no pair to compare and "
+                    f"the claim has no premise")
+        else:
+            check(len(set(ctrs)) == len(ctrs)
+                  and all(b > a for a, b in zip(ctrs, ctrs[1:])),
+                  label_nonce,
+                  f"counters {ctrs}; {len(set(ctrs))} distinct of "
+                  f"{len(ctrs)}; receiver index {sorted(rcvs)} "
+                  f"({'one session' if len(rcvs) == 1 else 'MULTIPLE — '
+                     'these are not all from one session'}). A repeated "
+                  f"counter is nonce reuse and a decrease is a reset "
+                  f"mid-session; either voids the confidentiality of every "
+                  f"datagram sharing the value.")
 
     if not needles:
         skipped("no plaintext appears anywhere in the capture",
