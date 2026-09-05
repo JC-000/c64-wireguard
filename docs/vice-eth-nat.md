@@ -131,7 +131,33 @@ NATs in the kernel and still egresses via the host routing table, so internet
 traffic lands back on `utun1` at MTU 1300 — the exact cap §0 describes. Only
 vmnet *bridged* mode would escape WARP, and that is what Wi-Fi rules out.
 
-### Verdict: use §0's split-tunnel
+### Verdict — SUPERSEDED 2026-09-03: bridging works, and is now the default
+
+**Do not follow this verdict.** It was written when both USB Ethernet adapters
+were unplugged, and it concluded that bridging was unavailable on this Mac. An
+adapter has been attached since, `en4` is permanently in use, and the project's
+own tooling says so by name:
+
+* `tools/vice_eth_rig.py:196-197` — `# docs/rig said there was no bridged mode
+  on this Mac.` / `BRIDGED_IFACE = os.environ.get("VICE_BRIDGED_IFACE", "en4")`,
+  with `bridged_problems()`, `describe_bridged()` and
+  `skip_if_bridged_rig_down()` built on it.
+* Commits `21be001` and `11eed28` landed **Cloudflare WARP end-to-end on the
+  ip65 backend over bridged VICE**.
+* `tools/ip65_hw_checks.py:69-71` pins `en4` as the Mac side of the physical
+  RR-Net segment (`10.0.66.1`, `c0:56:27:b1:16:38`).
+
+**Why this matters more than a stale sentence:** the advice below tells you to
+change a *managed, Zero-Trust* VPN's split-tunnel policy, or to disconnect it,
+in order to route around a blocker that bridging avoids entirely. That is a
+real, user-visible change to a host others may depend on, taken for no gain.
+Use the bridged path (`tools/vice_eth_rig.py`, `tools/rig-up-rrnet-macos.sh`).
+
+The §0 **measurements** above are fine and still worth reading — it is this
+verdict, not the data, that time overtook.
+
+<details>
+<summary>Original verdict, kept for the record</summary>
 
 Nothing found beats the known-working path. Keep the NAT rig and exclude the
 peer prefix from WARP — no `sudo`, VPN stays up:
@@ -144,6 +170,8 @@ route -n get 162.159.192.1 | grep -E 'interface|mtu'   # want: en0, 1500
 `warp-cli tunnel ip list` and `warp-cli settings` both run unprivileged (this
 is a managed/Zero-Trust client, so a policy push may still override a local
 add — re-check the route, do not assume).
+
+</details>
 
 ### If a wired adapter is attached
 
@@ -191,10 +219,12 @@ Two things to check on this host:
   literal IP, and the rig's dnsmasq runs `--no-resolv` so it resolves nothing
   upstream anyway.
 - **Idempotence is not perfect.** The script's "already running" test is
-  `[[ -f /tmp/c64-rig-dnsmasq.pid ]]`. On this Mac dnsmasq is running (pid
-  11847) but that pidfile has been reaped from `/tmp`, so a re-run will try to
-  start a *second* dnsmasq and fail on the bind. Check `pgrep -f dnsmasq`
-  first. Separately, `bridge10` currently carries a duplicate `10.0.65.1`
+  `[[ -f /tmp/c64-rig-dnsmasq.pid ]]`. That pidfile can be reaped from `/tmp`
+  while dnsmasq is still running, and a re-run then tries to start a *second*
+  dnsmasq and fails on the bind. **Check `pgrep -f dnsmasq` first** — do not
+  trust the pidfile. (A specific PID was recorded here once; it is omitted
+  deliberately, because a live PID in a document is false the moment the
+  process restarts, and it read as present tense.) Separately, `bridge10` currently carries a duplicate `10.0.65.1`
   alias that the script is supposed to remove — re-running it clears that.
 
 ## 2. NAT up

@@ -13,6 +13,44 @@ Builds verified 2026-07-16; VICE regression smoke of the
 
 ## 1. Binaries under test
 
+> ## ⚠️ THE FOUR-VARIANT PROTOCOL BELOW IS OBSOLETE — DO NOT RUN IT
+>
+> **Measured 2026-09-05 (`make -n` + md5, all four commands):**
+>
+> ```
+> row1 baseline       0d92b4e3d2af16ef204bed88982e63dc
+> row2 x25519-sibling 0d92b4e3d2af16ef204bed88982e63dc
+> row3 chacha-sibling 0d92b4e3d2af16ef204bed88982e63dc
+> row4 both siblings  0d92b4e3d2af16ef204bed88982e63dc
+> ```
+>
+> **Four commands, one binary, three published hashes that cannot occur.**
+> Both sibling toggles now default to `1` (`Makefile:32-33`), so rows 2 and 3
+> set a variable to the value it already holds. The `$(error)` at
+> `Makefile:36` fires only on a genuine mismatch — which is the configuration
+> rows 2 and 3 *name*, so **those two variants are unbuildable by any
+> invocation**. Row 1's "baseline" now needs
+> `USE_X25519_SIBLING=0 USE_CHACHA_SIBLING=0`, which the table never states,
+> and `Makefile:51-52` refuses that pairing at `REU=0` outright — so on the
+> turbo path anyone actually uses, the baseline is gone entirely.
+>
+> **Why this is worse than a build that fails.** Following §4 as written, all
+> four builds succeed, `shasum -a 256` is compared against this table as
+> instructed, and three of four mismatch with no explanation — *after*
+> `make clean` has wiped the tree. A parse error names the Makefile; three
+> hash mismatches point the operator at their toolchain, their submodules or
+> the device. The document manufactures a false alarm about the build
+> rather than reporting that the protocol is obsolete.
+>
+> Only two configurations are reachable today: **both siblings on** (the
+> default, `make BACKEND=uci`) and **both off** (`USE_X25519_SIBLING=0
+> USE_CHACHA_SIBLING=0`, `REU=1` only). If the sibling-vs-in-tree comparison
+> is worth redoing, it is a two-arm experiment, not a four-arm one — and it
+> needs fresh hashes measured on the day.
+
+<details>
+<summary>Original four-variant table, kept for the record</summary>
+
 All four UCI-backend variants build clean from `65b0498`. Every PRG is
 37,889 bytes (the linker layout pads to the same top address), so **file
 size cannot distinguish variants — verify by SHA-256 before flashing**:
@@ -24,27 +62,45 @@ size cannot distinguish variants — verify by SHA-256 before flashing**:
 | chacha-sibling | `make BACKEND=uci USE_CHACHA_SIBLING=1` | `44651e787c3ddf1ef9ad157737b1b2123f0f28de1afe85c9e81056d05b6caef7` |
 | both siblings | `make BACKEND=uci USE_X25519_SIBLING=1 USE_CHACHA_SIBLING=1` | `669f20de37e6c43f542feafc59d5b19809c4b5f37b2b938da4a2d416df853b2b` |
 
-Prebuilt copies (PRG + map) are in `artifacts/wireguard-uci-<variant>.{prg,map}`.
+Prebuilt copies (PRG + map) are in `artifacts/wireguard-uci-<variant>.{prg,map}`
+— these files do still exist, and are the only way to obtain rows 2 and 3.
 Always `make clean` between variants — the build system does not
 track toggle flags in object files.
 
-Map-file deltas vs baseline (measured, decimal bytes):
+</details>
 
-| Segment | baseline | x25519-sib | chacha-sib | both |
-|---|---|---|---|---|
-| CRYPTO_CODE | 6,420 | 7,673 | 4,175 | 5,428 |
-| CRYPTO_RODATA | 1,371 | 795 | 1,323 | 747 |
-| CRYPTO_BSS | 2,688 | 1,247 | 2,176 | 810 |
-| X25519_RODATA (page-aligned) | — | 2,304 @ `$0D40` | — | 2,304 @ `$0D20` |
-| X25519_BSS | — | 1,536 @ `$9600` | — | 1,536 @ `$9600` |
-| CHACHA_CODE | — | — | 8,022 @ `$5FA5` | 8,022 @ `$5F4F` |
-| CHACHA_RODATA | — | — | 512 @ `$1000` | 512 @ `$1700` |
-| CHACHA_BSS | — | — | 295 @ `$9544` | 295 @ `$9C00` |
+### Space — DO NOT BUDGET FROM THIS SECTION
 
-Highest used address is `$9D26` (both-siblings CHACHA_BSS end) — clear
-of `$A000` BASIC ROM shadow with ~700 bytes headroom. That headroom is
-`BACKEND=uci` slack only: under `BACKEND=ip65` the same span from `$A000`
-is `IP65_BSS`, the ip65 blob's private BSS (issue #80), so growth past
+**The segment table that stood here has been deleted rather than
+refreshed.** It described the four-variant layout of `65b0498` (2026-07-16),
+three of whose columns are configurations the build system now refuses, and
+it is the only space table in `docs/` — so it is where someone budgets from
+before adding code. That is the failure mode this project has already
+recorded once as *"MAIN_AREA_LO's 176 free bytes are a lie"*.
+
+Its headline was "highest used address `$9D26`, ~700 bytes headroom under
+the `$A000` ROM shadow". The tree has since taken `UCI_CHUNKED_WRITE`,
+`WG_MTU1440`, the #112 receive fix, the #120 ip65 send fix, #103's
+`LIB_X25519_INIT_CODE` reclaim and `8c0db2b`; `8c0db2b`'s own commit message
+reports `UCI_BSS` ending `$7C51` (REU=0) / `$7D51` (REU=1) and an `$87D0`
+cliff for `APP_CODE`/`APP_EXTRA`/`APP_DATA` — addresses that appear nowhere
+in the old story. Refreshing the digits would just restart the clock on the
+same problem.
+
+**Measure it, from the build you are about to flash:**
+
+```bash
+make clean && make BACKEND=<uci|ip65> REU=<0|1>   # plus WG_MTU1440=0 to opt out on ip65
+grep -E 'BSS|APP_|MAIN_AREA' build/wireguard.map | tail -20
+python3 tools/c64_caps.py                          # reads build/labels.txt, never the .inc
+```
+
+Free space is **per-MTU, not per-backend** — as of 2026-09-05 an MTU-1440
+build leaves 371 B under `$9FFF` and an MTU-860 build 951 B, on either
+backend. The one structural fact worth keeping from the old text: that
+headroom is `BACKEND=uci` slack **only**. Under `BACKEND=ip65` the span
+from `$A000` is `IP65_BSS`, the blob's private BSS (issue #80, closed by
+PR #83 and now held by `tools/test_ip65_bss_guard.py`), so growth past
 `$9FFF` is not free there.
 
 ## 1b. The device is SHARED — queue for it, always
@@ -83,8 +139,10 @@ you are the ones not using it.
       counting from power-on.
 - [ ] **Confirm the host address by probing, not by recall.** The older
       tools default to `U64_HOST=10.43.23.81`; that is a home-LAN address
-      and the device moves (it has since been seen at `192.168.2.80` and
-      `.81`). Identify the machine by `GET /v1/info` — `unique_id`,
+      and the device moves (recorded away-LAN address: `192.168.2.81`).
+      A second, DIFFERENT device is also in play — a C64 Ultimate at
+      `10.53.21.158`, which is not the U64E. Identify the machine by
+      `GET /v1/info` — `unique_id`,
       `hostname`, `firmware_version` — and pass `U64_HOST` / `--host`
       explicitly. A stale address fails as "unreachable", which reads like
       a dead device rather than a wrong flag. The newer tools
@@ -131,10 +189,13 @@ you are the ones not using it.
       and will drop the session long before the C64's ~9 min handshake
       completes. The responder has those timeouts disabled; the C64 sets
       the pace.
-- [ ] Check [c64-test-harness#112](https://github.com/JC-000/c64-test-harness/issues/112)
-      — **still OPEN as of 2026-07-16.** If a UCI-state-reset primitive
-      has landed since, use it before each run and the session budget
-      relaxes considerably.
+- [ ] ~~Check [c64-test-harness#112](https://github.com/JC-000/c64-test-harness/issues/112)~~
+      — **CLOSED. Nothing to watch for here.** It was "still OPEN as of
+      2026-07-16" and the runbook asked the operator to keep checking; it
+      has since been resolved, and the session budget it gated is itself
+      retracted (see §2). Left visible rather than deleted because a
+      standing "check whether X has landed" instruction is exactly the kind
+      nobody re-checks.
 - [ ] Preserve `artifacts/aead_diag*.log` from 2026-05-17 (the one good
       post-fix-1 dump). Do not overwrite or delete.
 
@@ -238,6 +299,28 @@ our side. The 3.14d notes are kept because the other quirks still apply.
   48 MHz (60/60 at 1 and 8 MHz) — the two failures were the silent
   truncation above, not flakiness.
 
+  > **⚠️ THIS SWEEP IS NOT SUFFICIENT, AND PASSING IT PROVES LESS THAN IT
+  > LOOKS.** A *second* cause of the same byte-identical symptom survived
+  > PR #112 and was not found until 2026-09-04 (`8c0db2b`, issue #130):
+  > `net_poll` sampled `UCI_STATUS` twice at `@block_end` and masked
+  > `DATA_AV` off the second read. **These exact four sizes passed while
+  > that bug was live** — so an operator running this sweep and getting
+  > green would have certified a build whose receive path was silently
+  > truncating.
+  >
+  > It is a coincidence-pass because the window is **latency-dependent, not
+  > size-dependent**: measured at ~5450-10900 cycles, i.e. 113-229 µs at
+  > 48 MHz against 5.4-11 ms at 1 MHz — turbo-only, and unrelated to how
+  > large the reply is. Sweeping sizes cannot find it at all.
+  >
+  > **What actually discriminates it:** poison the receive buffer before the
+  > read and check the tail. `poison_stop == 893` on every failure at five
+  > different announced lengths, with the bytes past 893 left untouched, is
+  > the signature; a success has `poison_stop == udp_recv_len` exactly. See
+  > `tools/test_uci_short_read_drop.py` (87 checks, in the gate) and the
+  > `$8F UCI_ERR_SHORT_READ` code plus `uci_short_read_state`, both added by
+  > `8c0db2b` and both absent from the error list in §3 below.
+
 - **Chunked build, bidirectional, at turbo (issue #70, PR #112,
   2026-09-03, GideonZ/1541ultimate#807 spike firmware ONLY).** With the
   receive-side fix in place:
@@ -299,19 +382,32 @@ our side. The 3.14d notes are kept because the other quirks still apply.
   on 2026-08-24 so `$88`/`$89` can carry c64-https's `UCI_ERR_NO_SOCKET` /
   `UCI_ERR_WAIT_TIMEOUT` unchanged — logs before that date show this
   condition as `$88`, and logs before the sentinel fix show it constantly.
-- **SOCKET_WRITE status arrives in the STATUS register, not
-  RESP_DATA**, and the written-count is garbage for UDP —
-  `src/net/uci/net.s` already handles both (`uci_chunk_len` override);
-  don't "fix" it back.
+- **SOCKET_WRITE: the status STRING is on STATUS, the written COUNT is on
+  RESP_DATA.** Not either/or — this bullet used to say the count "is
+  garbage for UDP" and told the reader not to "fix" it back. **That was
+  wrong, and the tree says so in as many words** (`src/net/uci/net.s:772-779`
+  states the claim "is FALSE"): the adapter reads the real count off
+  RESP_DATA and returns `$87 UCI_ERR_SHORT_WRITE` on a mismatch
+  (`net.s:334-336`, `:353-355`). Verified on fw 3.15, 2026-08-27.
+  The old wording is called out rather than silently deleted because a
+  retracted fact carrying its own "don't change this" is the hardest kind
+  to dislodge — it disarms the next person who notices.
 - **`writemem` 404s for payloads >64 bytes** — use `run_prg` for
   anything bigger.
 - **`udp_recv_ready` fires ~4× per Type-2** — known firmware buffer
   behaviour, not a bug; don't burn a run investigating it.
 
-## 3. Session plan (wedge-budget-aware)
+## 3. Session plan
 
-Each stage-2 live run is ~25 min wall-clock. With ≤3 runs per
-power-cycle, the priority order is:
+> **The "≤3 runs per power-cycle" budget this section was built around is
+> RETRACTED — see §2.** 7 clean bring-ups in a row have been observed
+> repeatedly, and #58's symptom was confirmed gone on 2026-08-30 across 22
+> consecutive loads. §2 carries its date; this section did not, so the
+> retracted number was the one that read as current. The priority order
+> below is still a reasonable order to work in — it is no longer a
+> rationing plan, and the two-power-cycle structure it implies is obsolete.
+
+Each stage-2 live run is ~25 min wall-clock. Priority order:
 
 **Power-cycle #1**
 1. **Run E first** — x25519-sibling `--dump-aead` (§5). Highest value:
@@ -360,6 +456,30 @@ sibling shifts AEAD timing). Stage-2 *failure* with identical AEAD
 symptoms as baseline is **not** a D failure — that's Bug #2 (§5).
 
 ## 5. Workstream E — Bug #2 AEAD divergence re-test
+
+> ## ⚠️ OBSOLETE — BUG #2 WAS SOLVED ON 2026-07-21. DO NOT RUN THIS.
+>
+> This stage is scheduled first in §4 and costs ~25 minutes, so it is the
+> single most expensive dead instruction in the document.
+>
+> **The cause was not fe25519 arithmetic**, which is the hypothesis the
+> section below is built to test. It was a **stale `b2s_key_len` after
+> `hs_compute_mac1`** — a keyed-BLAKE2s state bug, a sibling of Bug #1's
+> `out_len` defect, and firmware-independent. Fixed in `c97122e` (PR #43).
+> So the decision tree here does not merely waste the run: its first branch
+> points at the wrong component, and a sibling build "fixing" stage 2 would
+> have been a coincidence, not a diagnosis.
+>
+> Two further reasons it cannot be run as written: the x25519-sibling build
+> it demands is **unbuildable** (see the §1 warning), and §6 asks for a
+> screenshot of "the first end-to-end handshake from a C64", which happened
+> on **2026-05-16** (`docs/phase-9-handshake-milestone.md`).
+>
+> Kept below as the record of how the bug was hunted, which is still worth
+> reading — the AEAD dump tooling it describes is real and still works.
+
+<details>
+<summary>Original workstream E plan, kept for the record</summary>
 
 Background: after the Bug #1 fix (PR #32), stage 2 still fails — the
 C64's `hs_h`/`aead_key` at AEAD-verify totally diverge from the
@@ -413,6 +533,8 @@ post-Type-1 hs_h match: OK|MISMATCH | hs_c match: OK|MISMATCH
   `handle_initiation` — it's deleted; the test already takes
   `e_pub_resp` from `type2_packet[12:44]`.
 - Save the new `--dump-aead` log to `artifacts/` immediately.
+
+</details>
 
 ## 5a. Chat, rekey and encryption verification (added 2026-08-17)
 
@@ -523,6 +645,92 @@ they test, so do not "fix" them by adding a reset. Reset by hand after those.
 **Restore:** on a clean run, the tool's own Stage D sets 1 MHz / REU off and asserts both by read-back, so no manual restore step is needed. Only the `DeviceLock` release is in a `finally` — an exception during Stage A/B/C skips Stage D and leaves the device at 48 MHz. Check `GET /v1/configs/U64%20Specific%20Settings` after any run that errored and restore turbo by hand if it is still fast.
 
 Only one handshake per staged TAI64N base time is accepted by a real peer (#87); this tool stages a fresh base time and a fresh `run_prg` before each of its two handshakes rather than rekeying in place.
+
+## 5c. ip65 / RR-Net on physical hardware (added 2026-09-05)
+
+**This section is deliberately short.** `tools/test_ip65_rrnet_hw.py` asserts
+everything about the run itself, from a mutation-tested library
+(`tools/ip65_hw_checks.py`, 210 checks / 57 mutants, both in the gate). What
+follows is only what the tool **cannot** do for itself. Do not restate its
+checks here — a second copy of an assertion, in prose, is exactly how the rest
+of this document became untrustworthy.
+
+First validated 2026-09-05: three runs, handshake to ACTIVE in 18.0-19.8 s at
+48 MHz, content-verified transport both ways, no plaintext in a full
+two-station capture. Every ip65 result before that date was emulation.
+
+### Preconditions the tool cannot check
+
+- **A real RR-Net (CS8900a) in the U64E cartridge port.** There is no
+  host-side test for this — see the hazards below — so the tool can only
+  confirm it *during* the run, on the 6510.
+- **`Cartridge Preference` = `External`.** It is **volatile**: it reverts to
+  `Auto` on reboot, so it is set per run, not once. `snapshot_state` does not
+  cover it (that covers `Cartridge`, a different item), so restoring it is the
+  caller's job — the tool does this, but a run you abort by hand may not.
+- **The segment must be up**, which needs a password you have and the tool
+  does not:
+
+  ```bash
+  sudo bash tools/rig-up-rrnet-macos.sh en4     # down: ... en4 down
+  ```
+
+  A direct cable, no switch. The Mac is `10.0.66.1` and serves DHCP; the C64
+  is pinned to `10.0.66.200` by its MAC. **A lease is not a route** — this
+  segment has no path off itself, so the WireGuard peer runs on the Mac.
+
+### Run it
+
+```bash
+python3 tools/test_ip65_rrnet_hw.py            # --iface en4, --host $U64_HOST
+```
+
+It takes the DeviceLock like everything else here. Useful flags: `--speeds`
+(default `1,48`), `--capture auto|external|off`, `--seed N` to reproduce a
+run's randomised payloads, `--skip-build`. The machine-readable artifact is the
+`run` JSON it dumps — that, not the log, is what a later audit reads.
+
+### Exit codes — 78 is the one that matters
+
+| code | meaning |
+|---|---|
+| `0` | the claims were made and they held |
+| `1` | something was evaluated and did not hold |
+| `77` | **nothing ran** — rig down or device lock busy. Ignore the run. |
+| `78` | **INCONCLUSIVE** — the run happened, everything evaluated passed, and at least one **wire** assertion was never made |
+
+`78` exists because a run with no capture used to exit `0` with its headline
+claim — *"the plaintext we sent is absent from every captured frame"* —
+unevaluated. Reachable by the most ordinary path there is: `sudo` asks for a
+password, the capture never starts, six checks skip, and the tool reports
+success. **Treat 78 as a failed run**, not a soft pass.
+
+### Three hazards that will waste a run
+
+- **`$DE00`/`$DF00` host-side reads are OPEN BUS.** They do not round-trip
+  writes and vary between consecutive reads on an unchanged machine. They are
+  **not** a cartridge-presence test in either direction, and a check built on
+  them is non-deterministic rather than merely wrong. The only valid test is
+  `PPPtr = $0000` then `PPData == $630E` **executed on the 6510** — which is
+  what ip65's own driver does before it will initialise.
+- **`READY.` on screen is not the machine being ready.** A post-reset event
+  zeroes `$0801/$0802` once, 2-5 s after the banner, **independent of any
+  write** — proven with a no-write control. A program written into that window
+  silently loses its first two bytes. Filed as `c64-test-harness#216` and fixed
+  there; `run_prg_via_sys` now handles it.
+- **Stock ip65 transmits too soon after `ip65_init`.** `$82 TRANSMIT_FAILED`
+  on roughly 80% of attempts at 48 MHz, never at 1 MHz, and 40/40 clean once
+  ~0.2 s separates the two calls. A 2x2 across init-clock and ping-clock
+  established that **CPU speed is not the variable**. This is upstream ip65
+  behaviour, not ours — if a bench control fails this way, that is the
+  explanation, not a defect in this project.
+
+### What is NOT covered here
+
+The `--prove-red mtu` arm of `tools/test_warp_ip65_vice.py` and the MTU-860 arm
+of `tools/test_ip65_udp_echo_vice.py` were corrected on 2026-09-05 **by
+inspection, not by execution** — no Ethernet VICE rig was available in that
+lane. Run them on the rig before leaning on either.
 
 ## 6. After the session
 

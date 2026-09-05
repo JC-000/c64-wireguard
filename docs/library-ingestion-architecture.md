@@ -7,8 +7,20 @@ zero source staging: each sibling builds itself via its own `make lib`
 target, and WG links the resulting `.a` unmodified.
 
 The companion piece is the [c64-lib-contract](https://github.com/JC-000/c64-lib-contract)
-repo (SPEC v0.7.5), which pins the cross-project ZP / REU / segment /
-shared-primitive conventions.
+repo, which pins the cross-project ZP / REU / segment / shared-primitive
+conventions.
+
+**No SPEC version is named here on purpose.** This line used to say "SPEC
+v0.7.5", and the tree disagreed with it in three different places at once —
+`src/net/{uci,ip65}/net_caps.inc` cite v0.12.0 §13.3, `src/net/uci/uci_cmd.s:125`
+cites v0.13.0 §13.4, and `src/contract_asserts.s:8` calls v0.10.3 "the latest
+tagged contract release". A single version asserted in prose here would just
+become a fourth answer. **Take the governing version from the file you are
+actually working in**, which cites its own clause next to the code it
+constrains. Note also that contract §13 (the net ABI and its error registry)
+was RETIRED at contract v1.0.0 — the published values remain valid but this
+project owns its registry now (`src/net_abi.inc`), so check `SPEC.md` before
+citing any §13 clause.
 
 ## Scope
 
