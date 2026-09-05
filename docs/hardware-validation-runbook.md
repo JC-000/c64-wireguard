@@ -83,8 +83,10 @@ you are the ones not using it.
       counting from power-on.
 - [ ] **Confirm the host address by probing, not by recall.** The older
       tools default to `U64_HOST=10.43.23.81`; that is a home-LAN address
-      and the device moves (it has since been seen at `192.168.2.80` and
-      `.81`). Identify the machine by `GET /v1/info` — `unique_id`,
+      and the device moves (recorded away-LAN address: `192.168.2.81`).
+      A second, DIFFERENT device is also in play — a C64 Ultimate at
+      `10.53.21.158`, which is not the U64E. Identify the machine by
+      `GET /v1/info` — `unique_id`,
       `hostname`, `firmware_version` — and pass `U64_HOST` / `--host`
       explicitly. A stale address fails as "unreachable", which reads like
       a dead device rather than a wrong flag. The newer tools
@@ -131,10 +133,13 @@ you are the ones not using it.
       and will drop the session long before the C64's ~9 min handshake
       completes. The responder has those timeouts disabled; the C64 sets
       the pace.
-- [ ] Check [c64-test-harness#112](https://github.com/JC-000/c64-test-harness/issues/112)
-      — **still OPEN as of 2026-07-16.** If a UCI-state-reset primitive
-      has landed since, use it before each run and the session budget
-      relaxes considerably.
+- [ ] ~~Check [c64-test-harness#112](https://github.com/JC-000/c64-test-harness/issues/112)~~
+      — **CLOSED. Nothing to watch for here.** It was "still OPEN as of
+      2026-07-16" and the runbook asked the operator to keep checking; it
+      has since been resolved, and the session budget it gated is itself
+      retracted (see §2). Left visible rather than deleted because a
+      standing "check whether X has landed" instruction is exactly the kind
+      nobody re-checks.
 - [ ] Preserve `artifacts/aead_diag*.log` from 2026-05-17 (the one good
       post-fix-1 dump). Do not overwrite or delete.
 
@@ -299,19 +304,32 @@ our side. The 3.14d notes are kept because the other quirks still apply.
   on 2026-08-24 so `$88`/`$89` can carry c64-https's `UCI_ERR_NO_SOCKET` /
   `UCI_ERR_WAIT_TIMEOUT` unchanged — logs before that date show this
   condition as `$88`, and logs before the sentinel fix show it constantly.
-- **SOCKET_WRITE status arrives in the STATUS register, not
-  RESP_DATA**, and the written-count is garbage for UDP —
-  `src/net/uci/net.s` already handles both (`uci_chunk_len` override);
-  don't "fix" it back.
+- **SOCKET_WRITE: the status STRING is on STATUS, the written COUNT is on
+  RESP_DATA.** Not either/or — this bullet used to say the count "is
+  garbage for UDP" and told the reader not to "fix" it back. **That was
+  wrong, and the tree says so in as many words** (`src/net/uci/net.s:772-779`
+  states the claim "is FALSE"): the adapter reads the real count off
+  RESP_DATA and returns `$87 UCI_ERR_SHORT_WRITE` on a mismatch
+  (`net.s:334-336`, `:353-355`). Verified on fw 3.15, 2026-08-27.
+  The old wording is called out rather than silently deleted because a
+  retracted fact carrying its own "don't change this" is the hardest kind
+  to dislodge — it disarms the next person who notices.
 - **`writemem` 404s for payloads >64 bytes** — use `run_prg` for
   anything bigger.
 - **`udp_recv_ready` fires ~4× per Type-2** — known firmware buffer
   behaviour, not a bug; don't burn a run investigating it.
 
-## 3. Session plan (wedge-budget-aware)
+## 3. Session plan
 
-Each stage-2 live run is ~25 min wall-clock. With ≤3 runs per
-power-cycle, the priority order is:
+> **The "≤3 runs per power-cycle" budget this section was built around is
+> RETRACTED — see §2.** 7 clean bring-ups in a row have been observed
+> repeatedly, and #58's symptom was confirmed gone on 2026-08-30 across 22
+> consecutive loads. §2 carries its date; this section did not, so the
+> retracted number was the one that read as current. The priority order
+> below is still a reasonable order to work in — it is no longer a
+> rationing plan, and the two-power-cycle structure it implies is obsolete.
+
+Each stage-2 live run is ~25 min wall-clock. Priority order:
 
 **Power-cycle #1**
 1. **Run E first** — x25519-sibling `--dump-aead` (§5). Highest value:
