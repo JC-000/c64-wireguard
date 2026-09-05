@@ -2,8 +2,16 @@
 """test_ip65_rrnet_hw.py — ip65 / RR-Net on REAL HARDWARE, proven from the wire.
 
 OPT-IN. Not in tools/run_regression.py: it needs a physical RR-Net cartridge,
-a dedicated NIC and a rig script run under sudo. Exit 0 PASS / 1 FAIL /
-77 SKIP (rig absent or device lock busy).
+a dedicated NIC and a rig script run under sudo.
+
+Exit codes:
+    0   PASS
+    1   FAIL — something was evaluated and did not hold
+    77  NOTHING RAN — rig down or the device lock was busy; ignore the run
+    78  INCONCLUSIVE — the run happened and everything evaluated passed, but
+        at least one WIRE assertion was never made (no capture, one the
+        decoder refused, or an empty window). NOT a pass, and deliberately
+        NOT 77: a caller treating 77 as "rig absent" would discard it.
 
 WHY THIS SUITE EXISTS
 =====================
@@ -203,7 +211,7 @@ Usage::
     # 3. run
     python3 tools/test_ip65_rrnet_hw.py --capture external
 
-Exit codes: 0 PASS / 1 FAIL / 77 SKIP.
+Exit codes: 0 PASS / 1 FAIL / 77 nothing ran / 78 inconclusive.
 """
 from __future__ import annotations
 
@@ -355,6 +363,15 @@ REQUIRED_LABELS = (
 EXPECTED_LOCAL_PORT = 51820
 
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
+
+#: Exit codes. 77 and 78 are BOTH "not a pass", and they are deliberately
+#: NOT the same code: 77 means NOTHING RAN (rig down, lock busy) and the
+#: run can be ignored; 78 means the run HAPPENED, everything that ran
+#: passed, and a wire claim was never evaluated. Anything treating 77 as
+#: "rig absent" would silently discard the second — which is the exact
+#: collapse fixed inside summarise() (a SKIP swallowed by a status),
+#: reappearing one level up in the caller.
+EXIT_PASS, EXIT_FAIL, EXIT_NOTHING_RAN, EXIT_INCONCLUSIVE = 0, 1, 77, 78
 
 #: The wire assertions. THESE ARE THE CLAIM OF THE RUN — everything a DMA
 #: read can tell us is available without a capture, and the reason this rig
@@ -546,6 +563,112 @@ def selftest_library() -> list[str]:
         bad.append("check_c64_originated PASSED on a capture containing only "
                    "the Mac's own frames — a powered-off C64 would pass")
     return bad
+
+
+def selftest_wire_gate() -> list[str]:
+    """Prove the WIRE_CHECKS join actually blocks a zero exit.
+
+    THE GATE IS STRING EQUALITY between the label a check is recorded
+    under and a literal in WIRE_CHECKS, and nothing else enforces it. All
+    eight labels match today; ONE of them edited in one place and not the
+    other silently un-blocks the exit, and every wire assertion could then
+    be skipped on a run that reports success. That is the same defect the
+    gate was added to fix, one rename away from returning — so the join
+    gets a test rather than a naming convention.
+
+    TWO HALVES, and the second one needs a REAL capture — which the first
+    version of this self-test got wrong. It collected the recorded labels
+    from the no-capture path, but that path skips exactly the WIRE_CHECKS
+    entries, so the comparison was against itself and could never fail. It
+    MISSED a deliberately drifted label when I tested it. So the second
+    half drives a synthetic but genuine capture, where each label comes
+    from the check that actually emits it, and requires every WIRE_CHECKS
+    literal to turn up among them.
+    """
+    class _NoCapture:
+        path, note = None, "self-test: no capture"
+        t_start = t_end = capture_started_at = time.time()
+
+        def stop(self):
+            return None
+
+    saved = list(results)
+    try:
+        results.clear()
+        stage_wire(_NoCapture(), {"c64_mac": "00:0e:3a:64:64:64",
+                                  "host_mac": "c0:56:27:b1:16:38",
+                                  "c64_ip": C64_IP_PINNED, "wg_state": 2},
+                   {"c64_to_host_payload": "X" * 16})
+        code = summarise()
+        bad = []
+        if code != EXIT_INCONCLUSIVE:
+            bad.append(f"a run with NO capture exited {code}, expected "
+                       f"{EXIT_INCONCLUSIVE}: every wire assertion was "
+                       f"skipped and the run still reported success")
+
+        # Half two: the labels the checks REALLY emit, on a real path.
+        results.clear()
+        c64 = bytes.fromhex(C64_MAC_PINNED.replace(":", ""))
+        host = b"\xc0\x56\x27\xb1\x16\x38"
+        cip = C64_IP_PINNED
+        sentinel = "SELFTESTSENTINEL01"
+
+        def _t4(ctr, body):
+            return _synthetic_udp(c64, host, cip, HOST_IP, WG_PORT, WG_PORT,
+                                  bytes([MSG_TYPE_TRANSPORT, 0, 0, 0])
+                                  + struct.pack("<I", 1)
+                                  + struct.pack("<Q", ctr) + body)
+        arp = (b"\xff" * 6 + c64 + b"\x08\x06"
+               + bytes.fromhex("0001080006040001") + c64
+               + bytes(int(o) for o in cip.split(".")) + bytes(6)
+               + bytes(int(o) for o in HOST_IP.split(".")))
+        blob = _synthetic_pcap([
+            _synthetic_udp(c64, host, cip, HOST_IP, WG_PORT, WG_PORT,
+                           bytes([MSG_TYPE_INITIATION]) + bytes(147)),
+            _synthetic_udp(host, c64, HOST_IP, cip, WG_PORT, WG_PORT,
+                           bytes([MSG_TYPE_RESPONSE]) + bytes(91)),
+            arp,
+            _t4(0, b"\xAA" * 40), _t4(1, b"\xBB" * 40),
+            _synthetic_udp(host, c64, HOST_IP, cip, 5000, CONTROL_PORT,
+                           sentinel.encode()),
+        ])
+        import tempfile
+        with tempfile.NamedTemporaryFile("wb", suffix=".pcap",
+                                         delete=False) as fh:
+            fh.write(blob)
+            path = fh.name
+
+        class _RealCapture:
+            note = ""
+            t_start = capture_started_at = 0.0
+            t_end = 4.0e9
+
+            def stop(self):
+                return path
+
+        try:
+            stage_wire(_RealCapture(),
+                       {"c64_mac": C64_MAC_PINNED,
+                        "host_mac": "c0:56:27:b1:16:38", "c64_ip": cip,
+                        "wg_state": SESSION_ACTIVE,
+                        "peer": {"handshake_complete": True},
+                        "cleartext_sentinel": sentinel},
+                       {"c64_to_host_payload": "SELFTESTPAYLOAD1",
+                        "repeated_payload": "SELFTESTREPEAT01",
+                        "repeated_sent": 2})
+        finally:
+            os.unlink(path)
+        emitted = {label for _, label, _ in results}
+        missing = [w for w in WIRE_CHECKS if w not in emitted]
+        if missing:
+            bad.append(f"WIRE_CHECKS entries that no check in stage_wire "
+                       f"actually records — the join is broken, so these "
+                       f"assertions can be skipped without blocking a zero "
+                       f"exit: {missing}")
+        return bad
+    finally:
+        results.clear()
+        results.extend(saved)
 
 
 # ==========================================================================
@@ -2097,6 +2220,27 @@ def stage_wire(cap, run: dict, transport: dict) -> None:
     # came back" and "the C64 is dead" are the same observation until the
     # ARP exchange is in the capture — and they lead to opposite actions.
     # The library had this unit-proven with no caller.
+    #
+    # IN WIRE_CHECKS, i.e. gating a zero exit, and that is only defensible
+    # because ARP is GUARANTEED to fall inside the window. The mechanism,
+    # not an observation:
+    #   * Capture.start() runs before the PRG is loaded, so the window
+    #     opens before anything the C64 does this run.
+    #   * load_prg_verified RESETS the machine, and 'I' re-runs ip65_init,
+    #     so ip65's ARP cache starts empty — it lives in the freshly
+    #     loaded blob's BSS and net_init reinitialises it.
+    #   * ip65 will not transmit to an unresolved next hop: it emits the
+    #     ARP request and returns C=1. That is the same behaviour
+    #     press_h_until_sent retries around.
+    # So an ARP request from the C64 necessarily precedes its first
+    # transmit, inside the window. Confirmed on every recorded run: runs
+    # 2, 3 and 4 each show 6 ARP frames, 3 of them from the C64.
+    #
+    # If a future change ever starts the capture AFTER the load, this
+    # becomes able to false-inconclusive — and a gate that cries wolf is
+    # worse than no gate. The bracket check would catch that change, but
+    # if it is ever made deliberately, take ARP OUT of WIRE_CHECKS rather
+    # than leaving a gate people learn to ignore.
     if c64_mac and host_mac and run.get("c64_ip"):
         verdict(hw.check_arp_exchange(frames, c64_mac=c64_mac,
                                       host_mac=host_mac,
@@ -2270,27 +2414,36 @@ def summarise() -> int:
             for line in detail.splitlines():
                 log.info("        %s", line)
     log.info("=" * 72)
-    log.info("%d passed, %d failed, %d skipped (of %d checks)",
-             npass, nfail, nskip, len(results))
+    nwire = sum(1 for status, label, _ in results
+                if status == SKIP and label in WIRE_CHECKS)
+    # The count line is the skim surface, not the exit code. Without the
+    # wire breakdown, three harmless non-wire skips (bench health at one
+    # speed, the driver MAC table, the dnsmasq leasefile) and one skipped
+    # WIRE assertion print identically, and a reader sees "0 failed" in
+    # both while the loud block is nine lines further down. Same lesson as
+    # the truncated screen dump: the diagnosis has to be where the eye
+    # lands.
+    log.info("%d passed, %d failed, %d skipped (%d of them WIRE assertions) "
+             "of %d checks", npass, nfail, nskip, nwire, len(results))
     if nskip:
         log.warning("%d checks were SKIPPED and are NOT evidence of anything.",
                     nskip)
     if nfail:
-        return 1
+        return EXIT_FAIL
     blocking = [label for status, label, _ in results
                 if status == SKIP and label in WIRE_CHECKS]
     if blocking:
         log.error("=" * 72)
-        log.error("EXIT 77 (INCONCLUSIVE): %d WIRE assertion(s) were never "
-                  "evaluated:", len(blocking))
+        log.error("EXIT %d (INCONCLUSIVE): %d WIRE assertion(s) were never "
+                  "evaluated:", EXIT_INCONCLUSIVE, len(blocking))
         for label in blocking:
             log.error("    %s", label)
         log.error("Nothing failed, but the claims this rig exists to make "
                   "were not made. A zero exit here would report PASS about "
                   "evidence nobody looked at.")
         log.error("=" * 72)
-        return 77
-    return 0
+        return EXIT_INCONCLUSIVE
+    return EXIT_PASS
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -2354,6 +2507,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     log.info("--- self-tests (proving the checks can fail) ---")
     for name, bad in (("ip65_hw_checks leak/origin alarms",
                        selftest_library()),
+                      ("WIRE_CHECKS exit gate", selftest_wire_gate()),
                       ("rig probe", selftest_rig_probe(args.iface))):
         if bad:
             log.error("SELF-TEST FAILED (%s):", name)
@@ -2372,7 +2526,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             log.error("    %s", pr)
         log.error("Bring it up with: sudo bash tools/rig-up-rrnet-macos.sh %s",
                   args.iface)
-        return 77
+        return EXIT_NOTHING_RAN
     log.info("rig up on %s: %s", args.iface, iface_state(args.iface))
 
     # --- build ---
@@ -2425,7 +2579,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                   "device; doing nothing rather than racing it",
                   LOCK_TIMEOUT_S, exc)
         cap.stop()
-        return 77
+        return EXIT_NOTHING_RAN
 
     client = None
     cart_prev: Optional[str] = None
