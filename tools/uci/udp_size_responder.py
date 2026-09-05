@@ -4,6 +4,14 @@ Receives any packet from a peer, then replies with a payload sized to
 ``response_size`` bytes containing a recognisable pattern: byte i = i & 0xFF.
 Used by tools/test_uci_udp_size_probe.py to learn UCI firmware's UDP read
 semantics for datagrams larger than the SOCKET_READ maxlen.
+
+``response_payload`` overrides the default pattern with caller-supplied
+bytes. The probe needs that because ``make_pattern``'s byte i = i & 0xFF
+COLLIDES with a poison fill: any poison scheme has some offset where the
+pattern happens to carry the poison byte, and a coincidental match shortens
+a backward poison scan. The probe therefore sends bytes chosen to differ
+from the poison at every offset (see ``_payload_for`` there) and needs the
+responder to put exactly those bytes on the wire.
 """
 from __future__ import annotations
 
@@ -27,7 +35,15 @@ class UDPSizeResponder(threading.Thread):
         self.sock.settimeout(0.5)
         self.port = self.sock.getsockname()[1]
         self.response_size = 32
+        #: Exact bytes to reply with. When set, it wins over
+        #: ``response_size`` and is sent verbatim — the caller is
+        #: responsible for its length.
+        self.response_payload: bytes | None = None
         self.last_request: tuple | None = None
+        #: Bytes of the most recent reply, so a caller can compare what the
+        #: C64 holds against what actually crossed the wire rather than
+        #: against what it MEANT to send.
+        self.last_response: bytes | None = None
         self.responses_sent = 0
         self._stop = threading.Event()
 
@@ -39,8 +55,10 @@ class UDPSizeResponder(threading.Thread):
             except socket.timeout:
                 continue
             self.last_request = (src, data)
-            payload = make_pattern(self.response_size)
+            payload = (self.response_payload if self.response_payload
+                       is not None else make_pattern(self.response_size))
             self.sock.sendto(payload, src)
+            self.last_response = payload
             self.responses_sent += 1
             log.info(
                 "responder: kick from %s (len=%d), replied with %d bytes",

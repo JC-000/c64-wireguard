@@ -29,6 +29,7 @@ import inspect
 import math
 import os
 import random
+import re
 import struct
 import sys
 import textwrap
@@ -36,6 +37,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 passed = failed = 0
 SEED = 0
@@ -591,17 +594,30 @@ def main() -> int:
         uci_default = _warp_labels("uci", ip_pkt_len=0x9B8F)
         uci_chunked = _warp_labels("uci", ip_pkt_len=0x9DD3, chunked=True)
         ip65_1440 = _warp_labels("ip65", ip_pkt_len=0x9DD3)
-        check("detect_backend: default uci build -> 'uci'",
-              warp.detect_backend(uci_default) == "uci")
-        check("detect_backend: chunked uci build -> 'uci'",
-              warp.detect_backend(uci_chunked) == "uci")
-        check("detect_backend: ip65 build -> 'ip65'",
-              warp.detect_backend(ip65_1440) == "ip65")
-        # Coincidence guard: a classifier that keys on ip65_blob_start
-        # ALONE still passes the three checks above; a mixed map (blob plus
-        # the uci error byte) and an empty map must both be refused.
-        mixed = dict(ip65_1440, net_last_error=0x7C32)
-        for name, lab in (("blob + net_last_error", mixed),
+        for _name, _lab, _want in (("default uci build", uci_default, "uci"),
+                                   ("chunked uci build", uci_chunked, "uci"),
+                                   ("ip65 build", ip65_1440, "ip65")):
+            _got, _why = _classify(warp, _lab)
+            check(f"detect_backend: {_name} -> {_want!r}", _got == _want,
+                  _why or f"returned {_got!r}")
+        # ISSUE #131 LIVED HERE. This block used to read:
+        #
+        #     mixed = dict(ip65_1440, net_last_error=0x7C32)
+        #     check("detect_backend: blob + net_last_error raises ValueError")
+        #
+        # `dict(ip65_build, net_last_error=...)` IS a real post-#120 ip65
+        # build. So this suite did not merely fail to catch #131, it
+        # asserted the defect: it required detect_backend to refuse the
+        # exact shape every shipping ip65 build has. Fixing the classifier
+        # made this check go red, which is the only reason it was ever
+        # looked at.
+        #
+        # The coincidence guard is still needed — a classifier keying on
+        # ip65_blob_start ALONE passes the three checks above — so it is
+        # kept, with an input that is genuinely ambiguous: the ip65 blob
+        # plus a UCI-ONLY marker. No build can produce that.
+        mixed = dict(ip65_1440, uci_socket_open=0x7C30)
+        for name, lab in (("blob + a uci-only marker", mixed),
                           ("no markers at all", {})):
             try:
                 got = warp.detect_backend(lab)
@@ -614,9 +630,10 @@ def main() -> int:
                                 ("chunked uci", uci_chunked, 1440),
                                 ("ip65 WG_MTU1440", ip65_1440, 1440)):
             fp = warp._fingerprint("seam", b"\x00", lab,
-                                   warp.detect_backend(lab))
+                                   _classify(warp, lab)[0] or "?")
             check(f"_fingerprint: {kind} reports WG_MTU {want}",
                   fp["wg_mtu"] == want, f"got {fp['wg_mtu']}")
+        _assert_fixtures_match_a_real_build(check, warp)
         check("_fingerprint: uci_send_part flag follows the label",
               (warp._fingerprint("s", b"", uci_chunked, "uci")["uci_send_part"]
                is True)
@@ -655,16 +672,27 @@ def main() -> int:
         saved_dump = warp.dump_screen
         warp.dump_screen = lambda *a, **k: None
         try:
-            tr = _Tr()
-            warp._dump_failure(tr, ip65_1440, "seam")
-            check("_dump_failure: no reads at all on ip65 labels without "
-                  "hs_* labels (net_last_error never touched)",
-                  tr.reads == [], f"reads={tr.reads}")
-            tr = _Tr()
-            warp._dump_failure(tr, uci_default, "seam")
-            check("_dump_failure: uci labels DO read net_last_error",
-                  tr.reads == [uci_default["net_last_error"]],
-                  f"reads={tr.reads}")
+            # _dump_failure classifies the labels internally, so a broken
+            # classifier makes it RAISE rather than misbehave — and #131
+            # meant it raised on every ip65 build, at the exact moment a
+            # run had already failed and wanted a post-mortem. Reported as
+            # its own named check so that shows up as itself instead of
+            # collapsing the section.
+            for _n, _lab, _want in (
+                    ("no reads at all on ip65 labels without hs_* labels "
+                     "(net_last_error never touched)", ip65_1440, []),
+                    ("uci labels DO read net_last_error", uci_default,
+                     [uci_default["net_last_error"]])):
+                tr = _Tr()
+                try:
+                    warp._dump_failure(tr, _lab, "seam")
+                    detail = f"reads={tr.reads}"
+                    ok_dump = tr.reads == _want
+                except Exception as exc:              # noqa: BLE001
+                    ok_dump, detail = False, (
+                        f"_dump_failure RAISED {exc!r} — the post-mortem "
+                        f"path is unusable on this build")
+                check(f"_dump_failure: {_n}", ok_dump, detail)
         finally:
             warp.dump_screen = saved_dump
 
@@ -750,12 +778,17 @@ def main() -> int:
         check("test_warp_live.detect_backend exists", callable(det),
               "the backend classifier the preflight hangs from is missing")
         if callable(det):
-            check("detect_backend: ip65 labels -> 'ip65'",
-                  det(_fake_labels("ip65")) == "ip65")
-            check("detect_backend: uci labels -> 'uci'",
-                  det(_fake_labels("uci")) == "uci")
-            check("detect_backend: chunked uci labels (uci_send_part) -> 'uci'",
-                  det(_fake_labels("uci", chunked=True)) == "uci")
+            # Wrapped: a raise here used to escape to the section-level
+            # `except` and collapse every remaining check into one generic
+            # "test_warp_live imports FAIL", moving the denominator.
+            for _n, _lab, _want in (
+                    ("ip65 labels", _fake_labels("ip65"), "ip65"),
+                    ("uci labels", _fake_labels("uci"), "uci"),
+                    ("chunked uci labels (uci_send_part)",
+                     _fake_labels("uci", chunked=True), "uci")):
+                _got, _why = _classify(warp, _lab)
+                check(f"detect_backend: {_n} -> {_want!r}", _got == _want,
+                      _why or f"returned {_got!r}")
             try:
                 det(_fake_labels("neither"))
                 ambiguous_raises = False
@@ -787,6 +820,9 @@ def main() -> int:
               f"exit {rc}; argparse_error={argparse_err}; "
               f"names_both={names_both}\n{tail}")
 
+    print("\n=== uncalled verdict functions (the #128 instrument shape) ===")
+    check_no_uncalled_verdicts(check)
+
     check_multipart_builder(SEED)
 
     total = passed + failed
@@ -795,19 +831,247 @@ def main() -> int:
 
 
 
+# Names that promise a VERDICT. A function called `_verify_*` /
+# `check_*` / `score_*` exists to say whether something is true; if
+# nothing ever calls it, the thing it describes is unchecked while the
+# file still reads as though it were checked.
+_VERDICT_NAME = re.compile(
+    r'^_?(verify|check|assert|validate|score|expect)_|_(ok|matches|verified)$')
+
+
+def _uncalled_verdict_functions(tools_dir: Path) -> list[tuple[str, int, str]]:
+    """Module-level verdict functions referenced NOWHERE in tools/.
+
+    ISSUE #128's INSTRUMENT, GENERALISED. tools/test_uci_udp_size_probe.py
+    defined `_verify_pattern` at line 133, documented byte-exact checking
+    in its module docstring, and never called it — the only module-level
+    function in that file with zero call sites. `main()` ended
+    `_print_summary(results); return 0`, so the tool exited 0 whatever the
+    firmware did, and its output was then cited as the control that ruled
+    the UCI read out of #128. It was not a control; it was a table.
+
+    That shape is invisible to every other guard we have. It imports
+    cleanly, so tools/test_suite_imports.py passes it. It has no assertion
+    to observe failing, so "has this ever been red?" returns nothing to
+    look at. Only the call graph shows it.
+
+    CROSS-FILE on purpose. `assert_ip65_build` lives in
+    tools/vice_eth_rig.py and is called by six sibling suites; a
+    same-file-only rule would flag it and five others, and a guard that
+    cries wolf gets disbelieved, which is worse than no guard. Measured on
+    this tree: same-file-only flags 2 helpers, both false; cross-file
+    flags 0. On the pre-fix tree, cross-file flags `_verify_pattern` and
+    nothing else.
+    """
+    srcs: dict[str, str] = {}
+    for f in sorted(os.listdir(tools_dir)):
+        if f.endswith(".py"):
+            try:
+                srcs[f] = (tools_dir / f).read_text()
+            except OSError:
+                pass
+    trees: dict[str, ast.AST] = {}
+    for f, src in srcs.items():
+        try:
+            trees[f] = ast.parse(src)
+        except SyntaxError:
+            pass
+
+    referenced: dict[str, int] = {}
+    for tree in trees.values():
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Name):
+                referenced[n.id] = referenced.get(n.id, 0) + 1
+            elif isinstance(n, ast.alias):
+                referenced[n.name] = referenced.get(n.name, 0) + 1
+            elif isinstance(n, ast.Attribute):
+                referenced[n.attr] = referenced.get(n.attr, 0) + 1
+
+    out: list[tuple[str, int, str]] = []
+    for f, tree in sorted(trees.items()):
+        for n in getattr(tree, "body", []):
+            if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if not _VERDICT_NAME.search(n.name):
+                continue
+            if referenced.get(n.name, 0) == 0:
+                out.append((f, n.lineno, n.name))
+    return out
+
+
+def check_no_uncalled_verdicts(check) -> None:
+    """Gate check + its own alarm proof."""
+    tools_dir = PROJECT_ROOT / "tools"
+    dead = _uncalled_verdict_functions(tools_dir)
+    check("no verdict function in tools/ is defined-but-never-called",
+          not dead,
+          "; ".join(f"{f}:{ln} {nm}() is never called anywhere in tools/ — "
+                    f"whatever it claims to check is unchecked"
+                    for f, ln, nm in dead))
+
+    # ALARM PROOF. Write a file containing exactly the pre-fix shape and
+    # require the scan to report it, then delete it. Without this, "0
+    # flagged" is equally consistent with a scanner that flags nothing.
+    probe = tools_dir / "zz_uncalled_verdict_alarm_probe.py"
+    if probe.exists():
+        check("alarm-proof: uncalled-verdict probe file is writable", False,
+              f"{probe} already exists; refusing to overwrite")
+        return
+    try:
+        probe.write_text(
+            "def _verify_nothing(buf, expected):\n"
+            "    return buf == expected\n\n\n"
+            "def main():\n"
+            "    return 0\n")
+        found = _uncalled_verdict_functions(tools_dir)
+        hit = any(f == probe.name and nm == "_verify_nothing"
+                  for f, _ln, nm in found)
+    finally:
+        probe.unlink(missing_ok=True)
+    check("alarm-proof: a defined-but-uncalled _verify_* IS reported", hit,
+          "the scan did not flag a file written to contain exactly the "
+          "shape it exists to catch, so its clean verdict means nothing")
+
+
+def _classify(warp, lab):
+    """detect_backend(lab) as (verdict, detail); a raise is a verdict, not a
+    crash.
+
+    Calling `warp.detect_backend(x) == "ip65"` directly INSIDE a check()
+    argument means a ValueError escapes to the section-level `except`, and
+    the whole block reports as one generic "backend seams run FAIL" while
+    the remaining checks never run. Two things go wrong then: the failure
+    does not name which case broke, and the denominator moves (143 vs 165
+    checks), so two runs stop being comparable. Both are failure shapes
+    this suite exists to catch elsewhere; it should not have them itself.
+    """
+    try:
+        return warp.detect_backend(lab), ""
+    except ValueError as exc:
+        return None, f"raised ValueError: {exc}"
+
+
+def _assert_fixtures_match_a_real_build(check, warp) -> None:
+    """Pin the synthetic fixtures to a BUILT labels.txt — issue #131.
+
+    This is the check that did not exist, and its absence is the whole of
+    why #131 shipped. Every witness for `detect_backend` was a synthetic
+    dict written by hand from what the backends exported AT THE TIME. #120
+    gave ip65 its own `net_last_error`; the dicts kept the pre-#120 split;
+    the classifier kept keying on it; and every ip65 build was refused
+    while this suite stayed green. The fixture comment even argued the
+    point out loud — "a real build adds nothing but a make dependency" —
+    which is false in exactly the way that matters, because a real build is
+    the only thing that can tell you WHICH labels exist.
+
+    So: classify whichever `build/labels.txt` is on disk, and require the
+    synthetic fixture for that same backend to carry the identical set of
+    DISCRIMINATING markers. A future export change then breaks this check
+    rather than silently rotting the fixtures.
+
+    Skipped, loudly, when there is no build to read — this suite runs in
+    the gate's parallel pool, which always has one, but it must also be
+    runnable on a bare tree without inventing a pass.
+    """
+    labels_path = PROJECT_ROOT / "build" / "labels.txt"
+    if not labels_path.exists():
+        check("fixtures pinned to a real build", True,
+              "SKIPPED: no build/labels.txt on disk")
+        print(f"  NOTE  no {labels_path} — the fixture/real-build "
+              f"cross-check did not run. This is the check that would have "
+              f"caught #131; a run without it proves less than it looks.")
+        return
+    from c64_test_harness import Labels
+    real = dict(Labels.from_file(str(labels_path)))
+
+    # 1. The real build must classify at all. This alone is red on master:
+    #    detect_backend raised ValueError on every ip65 build since #120.
+    try:
+        found = warp.detect_backend(real)
+        err = None
+    except ValueError as exc:
+        found, err = None, str(exc)
+    check("detect_backend classifies the REAL build/labels.txt",
+          found in ("uci", "ip65"),
+          f"raised instead: {err}" if err else f"returned {found!r}")
+    if found is None:
+        # Do NOT return: the three checks below would vanish and the
+        # denominator would move (162 vs 165), making a red run and a green
+        # run incomparable. They cannot be evaluated, so they are reported
+        # as failures of the thing that actually broke.
+        for nm in ("_fake_labels", "_warp_labels"):
+            check(f"{nm}(<real backend>) carries the same discriminating "
+                  f"markers as the built labels.txt", False,
+                  "not evaluated: detect_backend could not classify the "
+                  "real build, so there is no backend to compare against")
+        check("net_last_error is not used as a backend discriminator (#120 "
+              "gave it to BOTH backends)",
+              "net_last_error" not in tuple(warp.IP65_MARKERS)
+              + tuple(warp.UCI_MARKERS),
+              "it is back in IP65_MARKERS/UCI_MARKERS; every ip65 build "
+              "will be refused again, which is issue #131 verbatim")
+        return
+    print(f"  NOTE  build/labels.txt is a {found} build "
+          f"({len(real)} labels)")
+
+    # 2. The synthetic fixture for that backend must carry the SAME
+    #    discriminating markers as the real one. This is the pin.
+    markers = tuple(warp.IP65_MARKERS) + tuple(warp.UCI_MARKERS)
+    real_markers = {m for m in markers if m in real}
+    for fixture_name, fixture in (
+            ("_fake_labels", _fake_labels(found)),
+            ("_warp_labels", _warp_labels(found, ip_pkt_len=0x9DD3))):
+        fake_markers = {m for m in markers if m in fixture}
+        # uci_send_part is build-flag dependent (UCI_CHUNKED_WRITE=1), so
+        # it is excluded from the equality — it is legitimately absent from
+        # a default uci build and present in a chunked one.
+        flag_dependent = {"uci_send_part"}
+        missing = (real_markers - fake_markers) - flag_dependent
+        extra = (fake_markers - real_markers) - flag_dependent
+        check(f"{fixture_name}(<real backend>) carries the same "
+              f"discriminating markers as the built labels.txt",
+              not missing and not extra,
+              f"fixture is missing {sorted(missing)} and invents "
+              f"{sorted(extra)}; the real build exports "
+              f"{sorted(real_markers)}. A fixture that has drifted from "
+              f"the build is a witness to nothing — this is exactly the "
+              f"state that let #131 ship.")
+
+    # 3. net_last_error must NOT be a discriminator. Stated as its own
+    #    check because it is the specific fact #131 turned on, and a
+    #    regression here would otherwise only show up as (1) going red on
+    #    a backend nobody happened to build that day.
+    check("net_last_error is not used as a backend discriminator (#120 "
+          "gave it to BOTH backends)",
+          "net_last_error" not in markers,
+          "it is back in IP65_MARKERS/UCI_MARKERS; every ip65 build will "
+          "be refused again, which is issue #131 verbatim")
+
+
 # ---------------------------------------------------------------------------
 # Labels shaped like the real builds, for the test_warp_live backend seams.
 # Addresses are the measured ones (ip_packet_buf $9833 in every build;
 # ip_pkt_len $9B8F at MTU 860, $9DD3 at MTU 1440).
 # ---------------------------------------------------------------------------
 def _warp_labels(kind: str, ip_pkt_len: int, chunked: bool = False) -> dict:
+    # `net_last_error` is in BOTH arms, because since #120 both backends
+    # export it (src/net/ip65/net.s:112, src/net/uci/net.s). The previous
+    # version of this fixture put it in the uci arm ONLY, which is what let
+    # issue #131 through: detect_backend keyed on it, every real ip65 build
+    # carried it, and no witness here ever looked like a real ip65 build.
+    # _assert_fixtures_match_a_real_build() below now pins these sets to a
+    # BUILT labels.txt so the next such divergence cannot hide.
     L = {"boot_ready": 0x8E60, "wg_state": 0x8E61, "net_initialized": 0x908E,
          "ip_packet_buf": 0x9833, "ip_pkt_len": ip_pkt_len,
-         "WG_MTU": ip_pkt_len - 0x9833}
+         "WG_MTU": ip_pkt_len - 0x9833, "net_last_error": 0x7C32}
     if kind == "ip65":
         L["ip65_blob_start"] = 0x2000
+        L["ip65_blob_end"] = 0x32EF
+        L["ip65_listening"] = 0x7954
     else:
-        L["net_last_error"] = 0x7C32
+        L["uci_socket_open"] = 0x7C30
+        L["uci_wait_idle"] = 0x6A00
+        L["uci_status_buf"] = 0x7C40
         if chunked:
             L["uci_send_part"] = 0x211C
     return L
@@ -830,10 +1094,14 @@ _COMMON_FAKE_LABELS = (
 
 def _fake_labels(kind: str, chunked: bool = False) -> dict[str, int]:
     names = list(_COMMON_FAKE_LABELS)
+    # BOTH backends export net_last_error since #120 — see the note in
+    # _warp_labels. Keeping it in the common set is what makes "ip65" here
+    # the shape of a real ip65 build rather than a pre-#120 fossil.
+    names.append("net_last_error")
     if kind in ("ip65", "both"):
         names += ["ip65_blob_start", "ip65_blob_end", "ip65_listening"]
     if kind in ("uci", "both"):
-        names += ["net_last_error", "uci_socket_open", "uci_wait_idle"]
+        names += ["uci_socket_open", "uci_wait_idle", "uci_status_buf"]
         if chunked:
             names.append("uci_send_part")
     return {n: 0x1000 + 16 * i for i, n in enumerate(names)}
