@@ -1388,6 +1388,13 @@ def case8_net_last_error(rng: random.Random, res: Result) -> None:
     v = C.resolve_symbols(fake, names=())
     res.check(not v.ok, "case8m/no-symbols-requested-refused",
               "resolving an empty symbol list succeeded vacuously")
+    # NOTE ON WHAT PROVES THIS ONE. case8m is an assertion about the TREE --
+    # does the build in build/ actually export the three diagnostic bytes --
+    # not about library behaviour, so no mutation of ip65_hw_checks.py can
+    # be uniquely caught by it, and its absence from the kill credits is
+    # expected rather than a gap. What proves its alarm is
+    # case8l/missing-symbol-is-fatal, which feeds resolve_symbols a label set
+    # that lacks two of the three and requires the refusal.
     if not labels_path.exists():
         res.skip("case8m/this-tree-exports-them", f"{labels_path} not present")
     else:
@@ -1829,6 +1836,16 @@ MUTANTS: dict[str, tuple[str, str]] = {
         'net_last_error registry "',
         '        return Verdict(True, f"${value:02X} is not in the '
         'net_last_error registry "'),
+    # A table entry renumbered away from the tree. ONLY case8g can see this:
+    # it is the check that compares the decoder's table against the tree's
+    # own equates, and $46 appears in the real net.s but in neither of the
+    # synthetic sources case8h and case8i use. Added because case8g had never
+    # been exercised by the mutation harness at all -- it was skipping in
+    # every mutant run -- so its power against a real defect was unmeasured
+    # even after the skip was fixed. Present is not the same as proven.
+    "error/table-entry-renumbered-off-the-tree": (
+        '    0x46: ("NET_ERR_IP65_UDP_LISTEN", "udp_add_listener failed"),',
+        '    0x56: ("NET_ERR_IP65_UDP_LISTEN", "udp_add_listener failed"),'),
     "error/table-not-cross-checked": (
         "    drift = {n: (known.get(n), v) for n, v in found.items() "
         "if known.get(n) != v}",

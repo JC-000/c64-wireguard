@@ -198,7 +198,7 @@ TESTS = [
     # (reproduce with --seed).
     ("ip65_hw_checks", ["tools/test_ip65_hw_checks_unit.py"]),
     # The alarm proof for the alarms above, run every time rather than
-    # trusted from a report: 48 deliberate defects are spliced into
+    # trusted from a report: 49 deliberate defects are spliced into
     # ip65_hw_checks.py one at a time and the suite must go RED for every
     # one, naming which checks caught it. A mutant that survives is a
     # defect the suite cannot see and fails this entry. ~3 s.
