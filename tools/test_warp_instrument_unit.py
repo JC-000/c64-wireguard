@@ -84,7 +84,12 @@ from c64_test_harness.encoding.screen_codes import SCREEN_CODE_TABLE  # noqa: E4
 # branch that does not apply still emits its names as skips. Pinned so a
 # case that silently stops running is a hard error, not a smaller
 # denominator nobody notices.
-EXPECTED_CHECKS = 42
+EXPECTED_CHECKS = 47
+
+#: src/net/uci/uci_errors.inc:244. Retyped here ONLY as the value case 8
+#: pins the BUILT layout against; the tool itself always derives the
+#: buffer width from the map, never from this.
+UCI_STATUS_MAX = 48
 
 LABELS_CANDIDATES = (
     PROJECT_ROOT / "build_msgport53" / "labels.txt",
@@ -1044,6 +1049,134 @@ def case7b_poison_collision(mod, labels, rng, seed, res: Result, ctx) -> None:
           f"per rejected trial (was 1/256 = 3.906e-03)")
 
 
+class _StatusRam:
+    """A memory the size of the status fields, addressed like the device.
+
+    Only `read_memory` is needed: `_read_status_line` does nothing else.
+    """
+
+    def __init__(self, labels: dict, buf: bytes, seen: int, sticky: int):
+        self.mem: dict[int, int] = {}
+        base = labels["uci_status_buf"]
+        cap = labels["uci_status_len"] - base
+        for i in range(cap):
+            self.mem[base + i] = buf[i] if i < len(buf) else 0x00
+        self.mem[labels["uci_status_len"]] = sticky
+        if "uci_status_seen" in labels:
+            self.mem[labels["uci_status_seen"]] = seen
+
+    def read_memory(self, addr: int, n: int) -> bytes:
+        return bytes(self.mem.get(addr + i, 0x00) for i in range(n))
+
+
+def case8_status_splice(mod, labels, rng, seed, res: Result, ctx) -> None:
+    """A sticky length read against a non-sticky buffer splices two lines.
+
+    THE DEFECT (found by adversarial review of 3c23692, which added the
+    capture). `uci_status_len` is sticky-first — `uci_cmd.s:655-657`, "one
+    already held, do not clobber it" — but `uci_status_buf` is rewritten
+    FROM OFFSET 0 on every drain (`@dst_idx` zeroed at `:593`, bytes
+    stored at `:612-617`). `net_poll` runs continuously and every exit
+    calls `uci_drain_status`, the idle `@hdr_none` path included. So the
+    first non-empty line pins the length forever while later lines keep
+    overwriting the buffer.
+
+    Pairing the two therefore reports a LATER line's bytes under an
+    EARLIER line's length. A genuine 24-byte
+    `04,DATAGRAM TRUNCATED: 1420` behind a stuck 5 renders as `04,DA` and
+    `status_truncated_in_buf` is False — a truncated line reported as
+    COMPLETE, which is strictly worse than not capturing it.
+
+    WHY THE HARDWARE RUN DID NOT CATCH IT, AND WHY THIS FIXTURE CAN. A
+    spliced capture and a correct one are byte-identical whenever every
+    drained line is the same length, and all 54 queries of the 2026-09-04
+    run saw the same 14-byte `02,NO DATA: 11`. No amount of clean hardware
+    evidence can distinguish the two; only DIFFERING line lengths can. So
+    the fixture is: a SHORT first line, then a LONGER second line, which
+    is the one shape the whole hardware campaign structurally could not
+    produce.
+
+    The lengths and the payload are drawn from the seeded RNG; the fixed
+    text is the `04,` / `02,` prefix the firmware really emits, which is a
+    PREFIX of a device-authored line rather than a marker we chose.
+    """
+    print("\n[case 8] sticky length vs non-sticky buffer (#132 capture)")
+    # DELIBERATELY NOT GATED ON THE BUILD. _read_status_line takes a plain
+    # Mapping, so this needs a LAYOUT, not a uci binary — and the gate
+    # builds ip65 by default, so an `if "uci_status_buf" in labels:` guard
+    # would skip this case on every gate run and these checks would never
+    # once execute. A check whose subject is skipped on the build under
+    # test is the failure this suite exists to name; it must not have it.
+    #
+    # The layout is PINNED to the real one whenever a uci build is on
+    # disk, so the synthetic addresses cannot rot the way #131's fixtures
+    # did.
+    L = dict(labels) if "uci_status_buf" in labels else {
+        "uci_status_buf": 0x7C00,
+        "uci_status_len": 0x7C00 + UCI_STATUS_MAX,
+        "uci_status_seen": 0x7C00 + UCI_STATUS_MAX + 1,
+    }
+    cap = L["uci_status_len"] - L["uci_status_buf"]
+    res.check(cap == UCI_STATUS_MAX, "case8/layout-matches-the-adapter",
+              f"uci_status_len - uci_status_buf = {cap}, but "
+              f"src/net/uci/uci_errors.inc:244 says UCI_STATUS_MAX = "
+              f"{UCI_STATUS_MAX}. _status_buf_capacity derives the buffer "
+              f"width from that gap, so a disagreement means every capture "
+              f"is read at the wrong width.")
+
+    # A SHORT first line, then a LONGER second one that overflows the
+    # buffer. Lengths and filler come from the seeded RNG; the only fixed
+    # text is the "02,"/"04," prefix the firmware itself emits.
+    first = b"02,NO DATA: " + str(rng.randrange(10, 99)).encode()
+    later_len = cap + rng.randrange(4, 12)
+    later = (b"04,DATAGRAM TRUNCATED: "
+             + str(rng.randrange(1000, 1500)).encode()
+             + b"," + rand_body(rng, max(0, later_len - 27)))
+    # What the device holds AFTER both drains: the buffer carries the
+    # LATER line (clipped to capacity), the sticky latch still holds the
+    # FIRST line's length, and uci_status_seen holds the later line's.
+    tr = _StatusRam(L, later[:cap], seen=min(len(later), 255),
+                    sticky=len(first))
+    got = mod._read_status_line(tr, L)
+
+    res.check(len(later) > len(first) and len(later) > cap,
+              "case8/ground-truth",
+              f"fixture must have a longer second line that overflows the "
+              f"{cap} B buffer; first={len(first)} later={len(later)}")
+
+    # THE RED CHECK. Under the sticky pairing the reported text is the
+    # later line CUT to the first line's length.
+    reported = got.get("status_line", "")
+    spliced = later[:len(first)].decode("latin-1")
+    res.check(reported != spliced or len(later) == len(first),
+              "case8/no-splice",
+              f"reported {reported!r}, which is the LATER line cut to the "
+              f"EARLIER line's length ({len(first)}). The buffer holds "
+              f"{later[:cap]!r}; the length came from uci_status_len "
+              f"(sticky) instead of uci_status_seen (this drain).")
+
+    # A line longer than the buffer must SAY it was truncated. With the
+    # sticky length this reads False whenever the stuck value is small.
+    res.check(got.get("status_truncated_in_buf") is True,
+              "case8/truncation-not-hidden",
+              f"a {len(later)} B line in a {cap} B buffer must report "
+              f"status_truncated_in_buf=True; got "
+              f"{got.get('status_truncated_in_buf')!r} with "
+              f"status_len_seen={got.get('status_len_seen')!r}. A "
+              f"truncated line reported as complete is worse than no "
+              f"capture.")
+
+    # The record must let a reader tell which field the length came from,
+    # so a future regression is visible in the DATA and not only here.
+    knows = ("status_len_sticky" in got or "status_len_field" in got
+             or "status_len_disagrees" in got)
+    res.check(knows, "case8/reports-which-field",
+              f"the query record must expose the sticky length or name the "
+              f"field the reported length came from, so a splice is "
+              f"visible in the artefact rather than inferred. keys: "
+              f"{sorted(got)}")
+
+
 def case5_order_confound(mod, labels, rng, seed, res: Result, ctx) -> None:
     """Sweep position is perfectly confounded with reply size."""
     print("\n[case 5] sweep ladder ordering")
@@ -1142,6 +1275,7 @@ def main(argv=None) -> int:
         "6": case6_unscored_absorption,
         "7": case7_poison_stop,
         "7b": case7b_poison_collision,
+        "8": case8_status_splice,
     }
     for key, fn in cases.items():
         if args.only and args.only != key:
