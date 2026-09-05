@@ -646,6 +646,92 @@ they test, so do not "fix" them by adding a reset. Reset by hand after those.
 
 Only one handshake per staged TAI64N base time is accepted by a real peer (#87); this tool stages a fresh base time and a fresh `run_prg` before each of its two handshakes rather than rekeying in place.
 
+## 5c. ip65 / RR-Net on physical hardware (added 2026-09-05)
+
+**This section is deliberately short.** `tools/test_ip65_rrnet_hw.py` asserts
+everything about the run itself, from a mutation-tested library
+(`tools/ip65_hw_checks.py`, 210 checks / 57 mutants, both in the gate). What
+follows is only what the tool **cannot** do for itself. Do not restate its
+checks here — a second copy of an assertion, in prose, is exactly how the rest
+of this document became untrustworthy.
+
+First validated 2026-09-05: three runs, handshake to ACTIVE in 18.0-19.8 s at
+48 MHz, content-verified transport both ways, no plaintext in a full
+two-station capture. Every ip65 result before that date was emulation.
+
+### Preconditions the tool cannot check
+
+- **A real RR-Net (CS8900a) in the U64E cartridge port.** There is no
+  host-side test for this — see the hazards below — so the tool can only
+  confirm it *during* the run, on the 6510.
+- **`Cartridge Preference` = `External`.** It is **volatile**: it reverts to
+  `Auto` on reboot, so it is set per run, not once. `snapshot_state` does not
+  cover it (that covers `Cartridge`, a different item), so restoring it is the
+  caller's job — the tool does this, but a run you abort by hand may not.
+- **The segment must be up**, which needs a password you have and the tool
+  does not:
+
+  ```bash
+  sudo bash tools/rig-up-rrnet-macos.sh en4     # down: ... en4 down
+  ```
+
+  A direct cable, no switch. The Mac is `10.0.66.1` and serves DHCP; the C64
+  is pinned to `10.0.66.200` by its MAC. **A lease is not a route** — this
+  segment has no path off itself, so the WireGuard peer runs on the Mac.
+
+### Run it
+
+```bash
+python3 tools/test_ip65_rrnet_hw.py            # --iface en4, --host $U64_HOST
+```
+
+It takes the DeviceLock like everything else here. Useful flags: `--speeds`
+(default `1,48`), `--capture auto|external|off`, `--seed N` to reproduce a
+run's randomised payloads, `--skip-build`. The machine-readable artifact is the
+`run` JSON it dumps — that, not the log, is what a later audit reads.
+
+### Exit codes — 78 is the one that matters
+
+| code | meaning |
+|---|---|
+| `0` | the claims were made and they held |
+| `1` | something was evaluated and did not hold |
+| `77` | **nothing ran** — rig down or device lock busy. Ignore the run. |
+| `78` | **INCONCLUSIVE** — the run happened, everything evaluated passed, and at least one **wire** assertion was never made |
+
+`78` exists because a run with no capture used to exit `0` with its headline
+claim — *"the plaintext we sent is absent from every captured frame"* —
+unevaluated. Reachable by the most ordinary path there is: `sudo` asks for a
+password, the capture never starts, six checks skip, and the tool reports
+success. **Treat 78 as a failed run**, not a soft pass.
+
+### Three hazards that will waste a run
+
+- **`$DE00`/`$DF00` host-side reads are OPEN BUS.** They do not round-trip
+  writes and vary between consecutive reads on an unchanged machine. They are
+  **not** a cartridge-presence test in either direction, and a check built on
+  them is non-deterministic rather than merely wrong. The only valid test is
+  `PPPtr = $0000` then `PPData == $630E` **executed on the 6510** — which is
+  what ip65's own driver does before it will initialise.
+- **`READY.` on screen is not the machine being ready.** A post-reset event
+  zeroes `$0801/$0802` once, 2-5 s after the banner, **independent of any
+  write** — proven with a no-write control. A program written into that window
+  silently loses its first two bytes. Filed as `c64-test-harness#216` and fixed
+  there; `run_prg_via_sys` now handles it.
+- **Stock ip65 transmits too soon after `ip65_init`.** `$82 TRANSMIT_FAILED`
+  on roughly 80% of attempts at 48 MHz, never at 1 MHz, and 40/40 clean once
+  ~0.2 s separates the two calls. A 2x2 across init-clock and ping-clock
+  established that **CPU speed is not the variable**. This is upstream ip65
+  behaviour, not ours — if a bench control fails this way, that is the
+  explanation, not a defect in this project.
+
+### What is NOT covered here
+
+The `--prove-red mtu` arm of `tools/test_warp_ip65_vice.py` and the MTU-860 arm
+of `tools/test_ip65_udp_echo_vice.py` were corrected on 2026-09-05 **by
+inspection, not by execution** — no Ethernet VICE rig was available in that
+lane. Run them on the rig before leaning on either.
+
 ## 6. After the session
 
 Record results (per-variant wall-clocks, stage-2 verdicts, the E
