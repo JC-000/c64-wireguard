@@ -13,6 +13,44 @@ Builds verified 2026-07-16; VICE regression smoke of the
 
 ## 1. Binaries under test
 
+> ## ⚠️ THE FOUR-VARIANT PROTOCOL BELOW IS OBSOLETE — DO NOT RUN IT
+>
+> **Measured 2026-09-05 (`make -n` + md5, all four commands):**
+>
+> ```
+> row1 baseline       0d92b4e3d2af16ef204bed88982e63dc
+> row2 x25519-sibling 0d92b4e3d2af16ef204bed88982e63dc
+> row3 chacha-sibling 0d92b4e3d2af16ef204bed88982e63dc
+> row4 both siblings  0d92b4e3d2af16ef204bed88982e63dc
+> ```
+>
+> **Four commands, one binary, three published hashes that cannot occur.**
+> Both sibling toggles now default to `1` (`Makefile:32-33`), so rows 2 and 3
+> set a variable to the value it already holds. The `$(error)` at
+> `Makefile:36` fires only on a genuine mismatch — which is the configuration
+> rows 2 and 3 *name*, so **those two variants are unbuildable by any
+> invocation**. Row 1's "baseline" now needs
+> `USE_X25519_SIBLING=0 USE_CHACHA_SIBLING=0`, which the table never states,
+> and `Makefile:51-52` refuses that pairing at `REU=0` outright — so on the
+> turbo path anyone actually uses, the baseline is gone entirely.
+>
+> **Why this is worse than a build that fails.** Following §4 as written, all
+> four builds succeed, `shasum -a 256` is compared against this table as
+> instructed, and three of four mismatch with no explanation — *after*
+> `make clean` has wiped the tree. A parse error names the Makefile; three
+> hash mismatches point the operator at their toolchain, their submodules or
+> the device. The document manufactures a false alarm about the build
+> rather than reporting that the protocol is obsolete.
+>
+> Only two configurations are reachable today: **both siblings on** (the
+> default, `make BACKEND=uci`) and **both off** (`USE_X25519_SIBLING=0
+> USE_CHACHA_SIBLING=0`, `REU=1` only). If the sibling-vs-in-tree comparison
+> is worth redoing, it is a two-arm experiment, not a four-arm one — and it
+> needs fresh hashes measured on the day.
+
+<details>
+<summary>Original four-variant table, kept for the record</summary>
+
 All four UCI-backend variants build clean from `65b0498`. Every PRG is
 37,889 bytes (the linker layout pads to the same top address), so **file
 size cannot distinguish variants — verify by SHA-256 before flashing**:
@@ -24,27 +62,45 @@ size cannot distinguish variants — verify by SHA-256 before flashing**:
 | chacha-sibling | `make BACKEND=uci USE_CHACHA_SIBLING=1` | `44651e787c3ddf1ef9ad157737b1b2123f0f28de1afe85c9e81056d05b6caef7` |
 | both siblings | `make BACKEND=uci USE_X25519_SIBLING=1 USE_CHACHA_SIBLING=1` | `669f20de37e6c43f542feafc59d5b19809c4b5f37b2b938da4a2d416df853b2b` |
 
-Prebuilt copies (PRG + map) are in `artifacts/wireguard-uci-<variant>.{prg,map}`.
+Prebuilt copies (PRG + map) are in `artifacts/wireguard-uci-<variant>.{prg,map}`
+— these files do still exist, and are the only way to obtain rows 2 and 3.
 Always `make clean` between variants — the build system does not
 track toggle flags in object files.
 
-Map-file deltas vs baseline (measured, decimal bytes):
+</details>
 
-| Segment | baseline | x25519-sib | chacha-sib | both |
-|---|---|---|---|---|
-| CRYPTO_CODE | 6,420 | 7,673 | 4,175 | 5,428 |
-| CRYPTO_RODATA | 1,371 | 795 | 1,323 | 747 |
-| CRYPTO_BSS | 2,688 | 1,247 | 2,176 | 810 |
-| X25519_RODATA (page-aligned) | — | 2,304 @ `$0D40` | — | 2,304 @ `$0D20` |
-| X25519_BSS | — | 1,536 @ `$9600` | — | 1,536 @ `$9600` |
-| CHACHA_CODE | — | — | 8,022 @ `$5FA5` | 8,022 @ `$5F4F` |
-| CHACHA_RODATA | — | — | 512 @ `$1000` | 512 @ `$1700` |
-| CHACHA_BSS | — | — | 295 @ `$9544` | 295 @ `$9C00` |
+### Space — DO NOT BUDGET FROM THIS SECTION
 
-Highest used address is `$9D26` (both-siblings CHACHA_BSS end) — clear
-of `$A000` BASIC ROM shadow with ~700 bytes headroom. That headroom is
-`BACKEND=uci` slack only: under `BACKEND=ip65` the same span from `$A000`
-is `IP65_BSS`, the ip65 blob's private BSS (issue #80), so growth past
+**The segment table that stood here has been deleted rather than
+refreshed.** It described the four-variant layout of `65b0498` (2026-07-16),
+three of whose columns are configurations the build system now refuses, and
+it is the only space table in `docs/` — so it is where someone budgets from
+before adding code. That is the failure mode this project has already
+recorded once as *"MAIN_AREA_LO's 176 free bytes are a lie"*.
+
+Its headline was "highest used address `$9D26`, ~700 bytes headroom under
+the `$A000` ROM shadow". The tree has since taken `UCI_CHUNKED_WRITE`,
+`WG_MTU1440`, the #112 receive fix, the #120 ip65 send fix, #103's
+`LIB_X25519_INIT_CODE` reclaim and `8c0db2b`; `8c0db2b`'s own commit message
+reports `UCI_BSS` ending `$7C51` (REU=0) / `$7D51` (REU=1) and an `$87D0`
+cliff for `APP_CODE`/`APP_EXTRA`/`APP_DATA` — addresses that appear nowhere
+in the old story. Refreshing the digits would just restart the clock on the
+same problem.
+
+**Measure it, from the build you are about to flash:**
+
+```bash
+make clean && make BACKEND=<uci|ip65> REU=<0|1>   # plus WG_MTU1440=0 to opt out on ip65
+grep -E 'BSS|APP_|MAIN_AREA' build/wireguard.map | tail -20
+python3 tools/c64_caps.py                          # reads build/labels.txt, never the .inc
+```
+
+Free space is **per-MTU, not per-backend** — as of 2026-09-05 an MTU-1440
+build leaves 371 B under `$9FFF` and an MTU-860 build 951 B, on either
+backend. The one structural fact worth keeping from the old text: that
+headroom is `BACKEND=uci` slack **only**. Under `BACKEND=ip65` the span
+from `$A000` is `IP65_BSS`, the blob's private BSS (issue #80, closed by
+PR #83 and now held by `tools/test_ip65_bss_guard.py`), so growth past
 `$9FFF` is not free there.
 
 ## 1b. The device is SHARED — queue for it, always
@@ -243,6 +299,28 @@ our side. The 3.14d notes are kept because the other quirks still apply.
   48 MHz (60/60 at 1 and 8 MHz) — the two failures were the silent
   truncation above, not flakiness.
 
+  > **⚠️ THIS SWEEP IS NOT SUFFICIENT, AND PASSING IT PROVES LESS THAN IT
+  > LOOKS.** A *second* cause of the same byte-identical symptom survived
+  > PR #112 and was not found until 2026-09-04 (`8c0db2b`, issue #130):
+  > `net_poll` sampled `UCI_STATUS` twice at `@block_end` and masked
+  > `DATA_AV` off the second read. **These exact four sizes passed while
+  > that bug was live** — so an operator running this sweep and getting
+  > green would have certified a build whose receive path was silently
+  > truncating.
+  >
+  > It is a coincidence-pass because the window is **latency-dependent, not
+  > size-dependent**: measured at ~5450-10900 cycles, i.e. 113-229 µs at
+  > 48 MHz against 5.4-11 ms at 1 MHz — turbo-only, and unrelated to how
+  > large the reply is. Sweeping sizes cannot find it at all.
+  >
+  > **What actually discriminates it:** poison the receive buffer before the
+  > read and check the tail. `poison_stop == 893` on every failure at five
+  > different announced lengths, with the bytes past 893 left untouched, is
+  > the signature; a success has `poison_stop == udp_recv_len` exactly. See
+  > `tools/test_uci_short_read_drop.py` (87 checks, in the gate) and the
+  > `$8F UCI_ERR_SHORT_READ` code plus `uci_short_read_state`, both added by
+  > `8c0db2b` and both absent from the error list in §3 below.
+
 - **Chunked build, bidirectional, at turbo (issue #70, PR #112,
   2026-09-03, GideonZ/1541ultimate#807 spike firmware ONLY).** With the
   receive-side fix in place:
@@ -379,6 +457,30 @@ symptoms as baseline is **not** a D failure — that's Bug #2 (§5).
 
 ## 5. Workstream E — Bug #2 AEAD divergence re-test
 
+> ## ⚠️ OBSOLETE — BUG #2 WAS SOLVED ON 2026-07-21. DO NOT RUN THIS.
+>
+> This stage is scheduled first in §4 and costs ~25 minutes, so it is the
+> single most expensive dead instruction in the document.
+>
+> **The cause was not fe25519 arithmetic**, which is the hypothesis the
+> section below is built to test. It was a **stale `b2s_key_len` after
+> `hs_compute_mac1`** — a keyed-BLAKE2s state bug, a sibling of Bug #1's
+> `out_len` defect, and firmware-independent. Fixed in `c97122e` (PR #43).
+> So the decision tree here does not merely waste the run: its first branch
+> points at the wrong component, and a sibling build "fixing" stage 2 would
+> have been a coincidence, not a diagnosis.
+>
+> Two further reasons it cannot be run as written: the x25519-sibling build
+> it demands is **unbuildable** (see the §1 warning), and §6 asks for a
+> screenshot of "the first end-to-end handshake from a C64", which happened
+> on **2026-05-16** (`docs/phase-9-handshake-milestone.md`).
+>
+> Kept below as the record of how the bug was hunted, which is still worth
+> reading — the AEAD dump tooling it describes is real and still works.
+
+<details>
+<summary>Original workstream E plan, kept for the record</summary>
+
 Background: after the Bug #1 fix (PR #32), stage 2 still fails — the
 C64's `hs_h`/`aead_key` at AEAD-verify totally diverge from the
 responder's (every byte differs; see the 2026-05-17 dump in
@@ -431,6 +533,8 @@ post-Type-1 hs_h match: OK|MISMATCH | hs_c match: OK|MISMATCH
   `handle_initiation` — it's deleted; the test already takes
   `e_pub_resp` from `type2_packet[12:44]`.
 - Save the new `--dump-aead` log to `artifacts/` immediately.
+
+</details>
 
 ## 5a. Chat, rekey and encryption verification (added 2026-08-17)
 
