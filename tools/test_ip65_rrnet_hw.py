@@ -1305,21 +1305,53 @@ def _config_value(payload) -> Optional[str]:
     return None
 
 
-def _config_allowed(payload) -> list:
-    """The item's enum of permitted values, or []."""
-    try:
-        vals = payload[CAT_CART][ITEM_CART_PREF]["values"]
-        return list(vals) if isinstance(vals, list) else []
+def _config_field(payload, *names):
+    """Pull one field of the Cartridge Preference item, whatever shape the
+    harness hands back.
+
+    TWO SHAPES, both live. Before c64-test-harness#214 (their PR #226,
+    merged 2026-09-05) `get_config_item` returned the whole REST envelope:
+    {CAT: {ITEM: {"current":..., "values":[...]}}, "errors":[]}. After it,
+    the item map itself: {"current":..., "values":[...], "default":...}.
+    `_config_value` survived the change only because it already had a
+    generic descent; these two did not, and returned []/None on the new
+    shape -- which DISARMED the guard below rather than failing it. Same
+    descent for all three now, so neither shape is privileged.
+    """
+    if not isinstance(payload, dict):
+        return None
+    try:                                    # old: full REST envelope
+        item = payload[CAT_CART][ITEM_CART_PREF]
+        for n in names:
+            if n in item:
+                return item[n]
     except (KeyError, TypeError):
-        return []
+        pass
+    for n in names:                         # new: the item map itself
+        if n in payload:
+            return payload[n]
+    for v in payload.values():              # anything nested
+        if isinstance(v, dict):
+            got = _config_field(v, *names)
+            if got is not None:
+                return got
+    return None
+
+
+def _config_allowed(payload) -> list:
+    """The item's enum of permitted values, or [] if it could not be read.
+
+    An empty list means UNREADABLE, not "no restrictions" -- see the refusal
+    in set_cartridge_external, which must treat the two identically because
+    it cannot tell them apart and both mean it cannot validate.
+    """
+    vals = _config_field(payload, "values", "presets")
+    return list(vals) if isinstance(vals, list) else []
 
 
 def _config_default(payload) -> Optional[str]:
-    try:
-        got = payload[CAT_CART][ITEM_CART_PREF]["default"]
-        return got if isinstance(got, str) else None
-    except (KeyError, TypeError):
-        return None
+    got = _config_field(payload, "default")
+    return got if isinstance(got, str) else None
 
 
 def set_cartridge_external(client, run: dict) -> Optional[str]:
@@ -1350,10 +1382,26 @@ def set_cartridge_external(client, run: dict) -> Optional[str]:
     default = _config_default(before)
     run["cartridge_preference_before"] = prev
     run["cartridge_preference_values"] = allowed
-    if prev is None or (allowed and prev not in allowed):
-        enum = allowed or "its enum"
+    # AN UNREADABLE ENUM MUST REFUSE, NOT FALL THROUGH.
+    #
+    # This was `if prev is None or (allowed and prev not in allowed)`, and
+    # `allowed` being empty made the second clause unconditionally false --
+    # so an unreadable enum left `prev is None` as the only surviving test
+    # and the PUT went ahead on a value nothing had validated. The docstring
+    # above promises the opposite in as many words. It went live the moment
+    # c64-test-harness#226 merged and `get_config_item` changed shape
+    # (our issue #137): the guard did not fail, it silently stopped guarding,
+    # on a device three lanes share.
+    if not allowed:
         raise RuntimeError(
-            f"could not read {ITEM_CART_PREF!r} as one of {enum} (got "
+            f"could not read the permitted values for {ITEM_CART_PREF!r} "
+            f"(got payload keys {sorted(before) if isinstance(before, dict) else type(before).__name__}). "
+            f"NOT setting it: without the enum this run cannot validate what "
+            f"it is about to write, and a run that cannot restore the bench "
+            f"must not disturb it.")
+    if prev is None or prev not in allowed:
+        raise RuntimeError(
+            f"could not read {ITEM_CART_PREF!r} as one of {allowed} (got "
             f"{prev!r}). NOT setting it: a run that cannot restore the "
             f"bench must not disturb it.")
 
