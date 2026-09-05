@@ -10,7 +10,7 @@ WireGuard Noise protocol implementation for the Commodore 64, written in 6502 as
 
 **The wire is verified encrypted, by assertion rather than inference (2026-08-17).** [`tools/test_wire_encryption_live.py`](tools/test_wire_encryption_live.py) passes 9/9 on hardware: the plaintext is absent from real datagrams in both directions, identical plaintext yields different ciphertext with an advancing counter, and the C64 rejects a packet with one flipped ciphertext bit while the session survives the rejection. See [Verifying encryption on the wire](#verifying-encryption-on-the-wire) — including what is cleartext by design, and the control-plane caveat.
 
-**v1.2.0 is being prepared** (`docs/RELEASE_NOTES_v1.2.0.md`) and **every UCI build should take it**: it fixes a data-corruption bug in the inbound path ([#128](https://github.com/JC-000/c64-wireguard/issues/128)) that silently delivered partially-filled receive buffers under a full announced length, affecting any inbound datagram over 893 bytes on the UCI backend, and a bug that let a remote peer execute PETSCII control codes on the local display ([#129](https://github.com/JC-000/c64-wireguard/issues/129)). The RR-Net (ip65) backend is unaffected by the corruption fix. **[v1.1.0](https://github.com/JC-000/c64-wireguard/releases/tag/v1.1.0)** (2026-09-03) repaired the RR-Net (ip65) backend, which had never completed a handshake with a real peer, and added the standard-MTU `wireguard-uci-*-mtu1440.prg` variants and a `wireguard-mtu1440.d64`. All `wireguard-uci-*` PRGs require Ultimate firmware 3.15 or newer, which as of 2026-09-03 is not a public release (U64/U64E: preview/test-merge builds only; C64 Ultimate firmware line: untested); the `*-mtu1440` PRGs additionally need the `WRITE_SOCKET_CHUNK` command from [GideonZ/1541ultimate#807](https://github.com/GideonZ/1541ultimate/issues/807) (open issue, unmerged) — see the warning below. `wireguard-rrnet-*` PRGs need no Ultimate firmware at all. **[v1.0.0](https://github.com/JC-000/c64-wireguard/releases/tag/v1.0.0) was the first tagged release** (2026-07-28): ready-to-run `.prg` and `.d64` artifacts for both network backends in REU and stock-C64 (no-REU) variants. The released UCI/REU build repeated the full handshake + bidirectional transport on hardware post-tag (`docs/RELEASE_NOTES_v1.0.0.md` §Verification).
+**[v1.2.0](https://github.com/JC-000/c64-wireguard/releases/tag/v1.2.0)** (2026-09-05) and **every UCI build should take it**: it fixes a data-corruption bug in the inbound path ([#128](https://github.com/JC-000/c64-wireguard/issues/128)) that silently delivered partially-filled receive buffers under a full announced length, affecting any inbound datagram over 893 bytes on the UCI backend, and a bug that let a remote peer execute PETSCII control codes on the local display ([#129](https://github.com/JC-000/c64-wireguard/issues/129)). The RR-Net (ip65) backend is unaffected by the corruption fix — and v1.2.0 is also **the first release in which it has run on physical hardware at all**, shipping at **MTU 1440 only** (see the RR-Net paragraph below). `wireguard-rrnet-noreu.prg` and `wireguard-rrnet-reu.prg` have **no successor under those names**. **[v1.1.0](https://github.com/JC-000/c64-wireguard/releases/tag/v1.1.0)** (2026-09-03) repaired the RR-Net (ip65) backend, which had never completed a handshake with a real peer, and added the standard-MTU `wireguard-uci-*-mtu1440.prg` variants and a `wireguard-mtu1440.d64`. All `wireguard-uci-*` PRGs require Ultimate firmware 3.15 or newer, which as of 2026-09-03 is not a public release (U64/U64E: preview/test-merge builds only; C64 Ultimate firmware line: untested); the `*-mtu1440` PRGs additionally need the `WRITE_SOCKET_CHUNK` command from [GideonZ/1541ultimate#807](https://github.com/GideonZ/1541ultimate/issues/807) (open issue, unmerged) — see the warning below. `wireguard-rrnet-*` PRGs need no Ultimate firmware at all. **[v1.0.0](https://github.com/JC-000/c64-wireguard/releases/tag/v1.0.0) was the first tagged release** (2026-07-28): ready-to-run `.prg` and `.d64` artifacts for both network backends in REU and stock-C64 (no-REU) variants. The released UCI/REU build repeated the full handshake + bidirectional transport on hardware post-tag (`docs/RELEASE_NOTES_v1.0.0.md` §Verification).
 
 The shipped build links the sibling crypto libraries [c64-x25519](https://github.com/JC-000/c64-x25519) (v0.11.2) and [c64-ChaCha20-Poly1305](https://github.com/JC-000/c64-ChaCha20-Poly1305) (v0.9.0) as archives per the [c64-lib-contract](https://github.com/JC-000/c64-lib-contract) conventions — every reachable multiply on the X25519 and Poly1305 paths is the contract's constant-time `ct_mul_8x8` body. The in-tree crypto remains available behind `USE_*_SIBLING=0` as a legacy/dev configuration.
 
@@ -64,11 +64,14 @@ Requires:
 
 ```bash
 make                 # ip65/RR-Net backend, REU profile, sibling crypto (default)
+                     # NOTE: this is MTU 860 and is NOT a shipped artifact. v1.2.0
+                     # ships RR-Net at 1440 only; for the released configuration use
+                     # `make REU=0 WG_MTU1440=1` (the build validated on hardware).
 make BACKEND=uci     # Ultimate 64 / C64U UCI backend instead of ip65
 make REU=0           # no-REU build (x25519 onchip profile) — FASTEST on turbo hardware
 make BACKEND=uci UCI_CHUNKED_WRITE=1   # chunked send, MTU 1440 — needs #807 spike firmware
 make WG_MTU1440=1                      # ip65, MTU 1440 — hardware-validated 2026-09-05
-make release         # all 4 PRG variants + 2 D64 images + SHA256SUMS in build/release/
+make release         # all 6 PRG variants + 3 D64 images + SHA256SUMS in build/release/
 make run             # build and launch in VICE (x64sc)
 make clean
 ```
@@ -200,10 +203,19 @@ Tests use the [c64-test-harness](https://github.com/JC-000/c64-test-harness) pac
 ```bash
 pip install c64-test-harness
 
-# All 22 suites — the canonical run, and the gate for any change.
-# Most run in a staggered parallel pool against a single build; the four that
-# rebuild the tree themselves (x25519, write_bytes, uci_stub, both_backends)
-# run serially afterwards, then the default build is restored.
+# All 43 suites — the canonical run, and the gate for any change.
+# Most run in a staggered parallel pool against a single build; the NINE that
+# rebuild the tree themselves (x25519, write_bytes, uci_stub, both_backends,
+# chunked_send, multipart_split, build_mtu1440, ip65_bss_guard,
+# uci_short_read) run serially afterwards, then the default build is restored.
+#
+# A suite must also not write into a directory another suite READS. tools/ is
+# scanned as input by test_cold_init_seam, so scratch files belong in a
+# tempdir — a probe written to tools/ and unlinked in a finally turned that
+# suite red intermittently while passing standalone (fixed 2026-09-05).
+#
+# NOTE the gate leaves build/ as the ip65 DEFAULT build; rebuild explicitly
+# before any hardware run that needs another backend.
 python3 tools/run_regression.py
 
 # Individual suites (per-suite counts drift; the runner reports totals):
@@ -419,7 +431,9 @@ Two interchangeable backends sit behind the `src/net_abi.inc` façade (`net_init
 
 ### Tunnel MTU
 
-**On the default build, peers must be configured with `MTU = 860`, and the Ultimate must run firmware 3.15 or later.** WireGuard's default is 1420; leaving it there will appear to work and then fail on anything large. Firmware 3.14d is not supported (see the UCI paragraph above): its single-read cap of 893 bytes and the 894-request hang are firmware behaviour, fixed upstream in 3.15's multi-block `SOCKET_READ` ([#806](https://github.com/GideonZ/1541ultimate/issues/806)).
+**This section is about the UCI backend. On RR-Net (`BACKEND=ip65`) the shipped build is MTU 1440 and needs no Ultimate firmware at all** — ip65's 1472-byte caps are native, so none of the `SOCKET_WRITE` arithmetic below applies to it, and the `#807` dependency is UCI-only. That configuration is the one validated on physical RR-Net hardware on 2026-09-05.
+
+**On the default UCI build, peers must be configured with `MTU = 860`, and the Ultimate must run firmware 3.15 or later.** WireGuard's default is 1420; leaving it there will appear to work and then fail on anything large. Firmware 3.14d is not supported (see the UCI paragraph above): its single-read cap of 893 bytes and the 894-request hang are firmware behaviour, fixed upstream in 3.15's multi-block `SOCKET_READ` ([#806](https://github.com/GideonZ/1541ultimate/issues/806)).
 
 **On a `UCI_CHUNKED_WRITE=1` build the peer needs no MTU change at all** — see "Chunked send" below; this only applies to a device running the [#807](https://github.com/GideonZ/1541ultimate/issues/807) spike firmware, not stock 3.15 (and no firmware with #807 is publicly released as of 2026-09-03).
 
