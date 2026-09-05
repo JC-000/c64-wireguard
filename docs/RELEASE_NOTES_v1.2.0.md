@@ -222,12 +222,13 @@ make BACKEND=ip65 REU=0 WG_MTU1440=1        WG_MTU $05A0 (1440)
 It is byte-reproducible from this tag. **MTU 1440 on RR-Net needs no firmware
 of any kind** — ip65's 1472-byte caps are native, so the
 `GideonZ/1541ultimate#807` caveat that governs the *UCI* MTU-1440 builds does
-not apply here. That is why it ships on its own disk image rather than on
-`wireguard-mtu1440.d64`, whose entire identity is that firmware dependency.
+not apply here. That is also why it is not on `wireguard-mtu1440.d64`, whose entire identity is
+that firmware dependency; it sits in the ordinary RR-Net slot on
+`wireguard-noreu.d64` instead.
 
-The other RR-Net variants — MTU 860, and the REU MTU-1440 build — remain
-**emulation-verified only**. They were not the build on the bench, and this
-release does not claim otherwise.
+The REU RR-Net build remains **emulation-verified only** — it was not the build
+on the bench, and this release does not claim otherwise. The MTU-860 RR-Net
+builds have been dropped entirely (see Artifacts).
 
 ### A finding that is not ours, and is not filed
 
@@ -242,16 +243,32 @@ not a defect in this release. Not filed upstream pending review.
 
 ## Artifacts
 
-**Eight** `.prg` variants and **four** `.d64` images, plus a `VERSION` stamp and
-`SHA256SUMS` — up from six and three in v1.1.0, the additions being the RR-Net
-MTU-1440 pair and the disk that carries them.
+Six `.prg` variants and three `.d64` images, plus a `VERSION` stamp and
+`SHA256SUMS` — the same shape as v1.1.0, but **the two RR-Net slots now hold
+the MTU-1440 builds instead of the MTU-860 ones.**
+
+### The RR-Net MTU-860 builds are gone
+
+`wireguard-rrnet-noreu.prg` and `wireguard-rrnet-reu.prg` are **not in this
+release and have no successor under those names.** That is deliberate: reusing
+the v1.1.0 filenames for a 1440 build would change what a name means between
+releases without saying so.
+
+WG_MTU 860 derives from `WG_DATAGRAM_CAP` 892, which is the **UCI**
+`SOCKET_WRITE` single-block payload cap. ip65 advertises 1472/1472 natively and
+has never had that limit — so an ip65 build at 860 was carrying a UCI
+constraint into a backend that does not have one. It shipped that way only
+because `WG_MTU1440` is a generic opt-in that defaults off. Dropping it means
+the ip65 slot on every disk is now the build that actually ran on hardware,
+rather than a sibling of it.
+
+If you are on RR-Net, take `wireguard-rrnet-noreu-mtu1440.prg`
+(`wg-rrnet` on `wireguard-noreu.d64`).
 
 | artifact | backend | REU | MTU | evidence |
 |---|---|---|---|---|
 | `wireguard-rrnet-noreu-mtu1440.prg` | ip65 | 0 | 1440 | **physical hardware, 3 runs** |
 | `wireguard-rrnet-reu-mtu1440.prg` | ip65 | 1 | 1440 | emulation only (REU: see #69) |
-| `wireguard-rrnet-noreu.prg` | ip65 | 0 | 860 | emulation only |
-| `wireguard-rrnet-reu.prg` | ip65 | 1 | 860 | emulation only |
 | `wireguard-uci-noreu.prg` | uci | 0 | 860 | hardware (U64E) |
 | `wireguard-uci-reu.prg` | uci | 1 | 860 | hardware (U64E) |
 | `wireguard-uci-noreu-mtu1440.prg` | uci | 0 | 1440 | hardware, **#807 spike fw only** |

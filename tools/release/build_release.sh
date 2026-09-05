@@ -3,8 +3,18 @@
 # tools/release/build_release.sh — build the full release artifact set.
 #
 # Produces in build/release/:
-#   wireguard-rrnet-reu.prg          BACKEND=ip65 REU=1  (RR-Net + REU)
-#   wireguard-rrnet-noreu.prg        BACKEND=ip65 REU=0  (RR-Net, stock C64)
+#   wireguard-rrnet-noreu-mtu1440.prg  BACKEND=ip65 REU=0 WG_MTU1440=1
+#                                    (RR-Net, stock C64, MTU 1440)
+#                                    *** THE ONLY HARDWARE-VALIDATED ARTIFACT
+#                                     IN THIS SET *** — physical RR-Net in the
+#                                     U64E cartridge port, 3 runs 2026-09-05.
+#                                     No firmware dependency: ip65's 1472-byte
+#                                     caps are native. On-disk as wg-rrnet.
+#   wireguard-rrnet-reu-mtu1440.prg  BACKEND=ip65 REU=1 WG_MTU1440=1
+#                                    (same with REU DMA tables; NOT the build
+#                                     that ran — see #69, REU at 48 MHz.)
+#   (there is no ip65 MTU-860 artifact: 860 comes from the UCI 892-byte
+#    SOCKET_WRITE cap, which ip65 does not have — see the call sites below)
 #   wireguard-uci-reu.prg            BACKEND=uci  REU=1  (Ultimate 64 / C64U)
 #   wireguard-uci-noreu.prg          BACKEND=uci  REU=0  (Ultimate, REU disabled)
 #   wireguard-uci-noreu-mtu1440.prg  BACKEND=uci REU=0 UCI_CHUNKED_WRITE=1
@@ -17,16 +27,6 @@
 #                                    (same, REU DMA tables; on-disk as
 #                                     wg-mtu1440-reu; no hardware run — REU
 #                                     fails the handshake at 48 MHz, #69)
-#   wireguard-rrnet-noreu-mtu1440.prg  BACKEND=ip65 REU=0 WG_MTU1440=1
-#                                    *** THE ONLY HARDWARE-VALIDATED ARTIFACT
-#                                     IN THIS SET *** — physical RR-Net in the
-#                                     U64E cartridge port, 3 runs 2026-09-05.
-#                                     No firmware dependency: ip65's 1472-byte
-#                                     caps are native. On-disk wg-rrnet-1440.
-#   wireguard-rrnet-reu-mtu1440.prg  BACKEND=ip65 REU=1 WG_MTU1440=1
-#                                    (same at MTU 1440 with REU DMA tables;
-#                                     NOT the build that ran — see #69, REU at
-#                                     48 MHz. On-disk wg-rrnet-1440r.)
 #   wireguard-reu.d64                wg-rrnet + wg-uci PRGs (REU builds)
 #                                    + wg.cfg + fw-warning
 #   wireguard-noreu.d64              same pair, no-REU builds
@@ -35,11 +35,6 @@
 #                                    wg-mtu1440-reu) + wg.cfg + fw-warning
 #                                    (fw-warning is CR-terminated on disk;
 #                                    the flat .txt copy below keeps LF)
-#   wireguard-rrnet-mtu1440.d64      both RR-Net mtu1440 PRGs (wg-rrnet-1440,
-#                                    wg-rrnet-1440r) + wg.cfg + fw-warning.
-#                                    Separate disk on purpose: these need NO
-#                                    firmware, so they must not sit behind the
-#                                    #807 caveat that defines the disk above.
 #   FIRMWARE-WARNING.txt             copy of tools/release/FIRMWARE-WARNING.txt
 #   VERSION                          `git describe --tags --always --dirty`
 #   SHA256SUMS                       header line names the version
@@ -188,20 +183,33 @@ build_variant() {
     cp build/wireguard.prg "$REL/$out"
 }
 
-build_variant ip65 1 default wireguard-rrnet-reu.prg
-build_variant ip65 0 default wireguard-rrnet-noreu.prg
+# ip65 ships at MTU 1440 ONLY, and no longer at 860.
+#
+# WHY 860 EXISTED AT ALL, since the reason was never an ip65 one: WG_MTU 860
+# derives from WG_DATAGRAM_CAP 892, which is the UCI SOCKET_WRITE payload cap
+# ($11, one block). ip65 advertises NET_UDP_SEND_MAX/RECV_MAX 1472/1472
+# natively and has no such cap -- so an ip65 build at 860 was carrying a UCI
+# limitation into a backend that does not have it. It shipped that way only
+# because WG_MTU1440 is a generic opt-in defaulting off.
+#
+# wireguard-rrnet-noreu-mtu1440.prg is also the ONLY artifact in this set
+# validated on real hardware: a physical CS8900a in the U64E cartridge port,
+# handshake to ACTIVE and content-verified transport both ways, three runs,
+# 2026-09-05. Its sha256 is pinned in docs/RELEASE_NOTES_v1.2.0.md against the
+# run logs, so a rebuild that no longer reproduces it is a signal, not a
+# curiosity. Dropping 860 means the ip65 slot on every disk is now the build
+# that actually ran, rather than a sibling of it.
+#
+# The -mtu1440 suffix is KEPT rather than renaming these to the plain
+# wireguard-rrnet-*.prg names: those names shipped in v1.1.0 meaning MTU 860,
+# and reusing them at 1440 would change what a filename means between releases
+# without saying so. A name with no successor is a louder signal.
+build_variant ip65 0 mtu1440 wireguard-rrnet-noreu-mtu1440.prg
+build_variant ip65 1 mtu1440 wireguard-rrnet-reu-mtu1440.prg
 build_variant uci  1 default wireguard-uci-reu.prg
 build_variant uci  0 default wireguard-uci-noreu.prg
 build_variant uci  0 mtu1440 wireguard-uci-noreu-mtu1440.prg
 build_variant uci  1 mtu1440 wireguard-uci-reu-mtu1440.prg
-# The RR-Net MTU-1440 pair. wireguard-rrnet-noreu-mtu1440.prg is the ONLY
-# artifact in this set that has been validated on real hardware: a physical
-# CS8900a in the U64E cartridge port, handshake to ACTIVE and content-verified
-# transport both ways, three runs, 2026-09-05. Its sha256 is pinned in
-# docs/RELEASE_NOTES_v1.2.0.md against the run logs, so a rebuild that no
-# longer reproduces it is a signal, not a curiosity.
-build_variant ip65 0 mtu1440 wireguard-rrnet-noreu-mtu1440.prg
-build_variant ip65 1 mtu1440 wireguard-rrnet-reu-mtu1440.prg
 
 cp "$WARNING" "$REL/FIRMWARE-WARNING.txt"
 
@@ -234,19 +242,20 @@ make_d64_2() {
     done
 }
 
-make_d64_2 wireguard-reu.d64   wireguard-rrnet-reu.prg   "wg-rrnet" \
-                                wireguard-uci-reu.prg    "wg-uci"   "wireguard reu"
-make_d64_2 wireguard-noreu.d64 wireguard-rrnet-noreu.prg "wg-rrnet" \
-                                wireguard-uci-noreu.prg  "wg-uci"   "wireguard noreu"
+# One disk per REU class, carrying one build of each backend. The ip65 slot is
+# the MTU-1440 build now that 860 is gone; the uci slot stays at 860, which is
+# a real constraint for that backend rather than an inherited one.
+make_d64_2 wireguard-reu.d64   wireguard-rrnet-reu-mtu1440.prg   "wg-rrnet" \
+                                wireguard-uci-reu.prg            "wg-uci"   "wireguard reu"
+make_d64_2 wireguard-noreu.d64 wireguard-rrnet-noreu-mtu1440.prg "wg-rrnet" \
+                                wireguard-uci-noreu.prg          "wg-uci"   "wireguard noreu"
 make_d64_2 wireguard-mtu1440.d64 wireguard-uci-noreu-mtu1440.prg "wg-mtu1440-noreu" \
                                   wireguard-uci-reu-mtu1440.prg   "wg-mtu1440-reu"   "wg mtu1440"
-# The RR-Net 1440 pair gets its OWN disk rather than riding on
-# wireguard-mtu1440.d64, because that disk's whole identity is "needs the
-# GideonZ/1541ultimate#807 spike firmware" and these two need no firmware at
-# all. Putting them there would file the only hardware-validated build in the
-# release behind a caveat that does not apply to it.
-make_d64_2 wireguard-rrnet-mtu1440.d64 wireguard-rrnet-noreu-mtu1440.prg "wg-rrnet-1440" \
-                                        wireguard-rrnet-reu-mtu1440.prg   "wg-rrnet-1440r" "wg rrnet 1440"
+# No separate RR-Net disk: with 860 dropped, both RR-Net builds are already the
+# ip65 slot on wireguard-reu.d64 and wireguard-noreu.d64. A third disk would
+# just be a second copy of the same two PRGs. (It existed in the first draft of
+# this release, when ip65 shipped at both MTUs and the 1440 pair had nowhere to
+# live that was not the #807 firmware disk.)
 
 # --- Version stamp -----------------------------------------------------
 VERSION="$(git describe --tags --always --dirty)"
