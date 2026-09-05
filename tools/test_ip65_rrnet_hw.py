@@ -355,6 +355,27 @@ REQUIRED_LABELS = (
 EXPECTED_LOCAL_PORT = 51820
 
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
+
+#: The wire assertions. THESE ARE THE CLAIM OF THE RUN — everything a DMA
+#: read can tell us is available without a capture, and the reason this rig
+#: exists is the ones below. So a run that SKIPPED any of them has not
+#: evaluated its own headline, and must not exit 0.
+#:
+#: The path that made this urgent: --capture auto, sudo wants a password,
+#: fall back to external, file absent, "continuing WITHOUT a capture", all
+#: six recorded SKIP, exit 0. The only machine-readable output said PASS
+#: about "the plaintext we sent is absent from every captured frame" when
+#: nothing had been looked at. Same for --capture off, for a pcap the
+#: decoder refuses (the missing -s0 case), and for an empty window.
+WIRE_CHECKS = (
+    "the capture brackets this run's events",
+    "frames on the cable came FROM the C64, not just from the Mac",
+    "the C64's MAC is on the wire",
+    "the handshake completed at both ends",
+    "CONTROL: the cleartext sentinel IS found on the wire",
+    "no plaintext appears anywhere in the capture",
+    "identical plaintext produced different ciphertext",
+)
 results: list[tuple[str, str, str]] = []       # (status, label, detail)
 VERBOSE = False
 
@@ -383,6 +404,16 @@ def verdict(v, label: str) -> bool:
     if v.evidence:
         detail += "\n" + "\n".join(f"{k}: {val}"
                                     for k, val in sorted(v.evidence.items()))
+    # INCONCLUSIVE IS NOT FAILURE, and for the leak check the difference is
+    # the whole message. Rendering it as FAIL puts
+    # "FAIL  no plaintext appears anywhere in the capture" on the summary
+    # line, which an operator reads as PLAINTEXT ON THE CABLE — the exact
+    # opposite of what happened, which is that nothing could be determined.
+    # It still must not be green: skipped() is non-evidence and, for a wire
+    # check, blocks a zero exit (see WIRE_CHECKS).
+    if getattr(v, "inconclusive", False):
+        skipped(label, detail)
+        return False
     return check(bool(v.ok), label, detail)
 
 
@@ -925,7 +956,8 @@ def sample_de00(tr, run: dict, when: str) -> str:
     return window
 
 
-def read_ip65_diag(tr, L, tag: str, run: dict) -> dict:
+def read_ip65_diag(tr, L, tag: str, run: dict,
+                   level: int = logging.ERROR) -> dict:
     """Read ip65's own failure diagnostics. Call at EVERY failure.
 
     Addresses come from labels.txt (Labels raises on a missing symbol)
@@ -953,10 +985,8 @@ def read_ip65_diag(tr, L, tag: str, run: dict) -> dict:
         except Exception as exc:                              # noqa: BLE001
             out[name] = f"unread: {exc}"
     run.setdefault("ip65_diag", {})[tag] = out
-    log.error("[%s] ip65 diagnostics (RAW BYTES, NOT DECODED — "
-              "ip65_hw_checks has no net_last_error decoder yet, so these "
-              "are values to look up, not verdicts): net_last_error=$%02X "
-              "ip65_recv_dropped=%s ip65_send_attempts=%s",
+    log.log(level, "[%s] ip65 diagnostics: net_last_error=$%02X "
+            "ip65_recv_dropped=%s ip65_send_attempts=%s",
               tag,
               out["net_last_error"] if isinstance(out["net_last_error"], int)
               else 0, out["ip65_recv_dropped"], out["ip65_send_attempts"])
@@ -1524,7 +1554,7 @@ def stage_bench_health(tr, client, run: dict, mhz: int) -> bool:
                 "screen": " ".join(text.split())}
     check(driver_ok, f"stock ip65 found the RR-Net at {mhz} MHz "
                      f"(INIT DRIVER: OK)",
-          f"screen tail: {text[-200:]!r}. FAILED here means the cs8900a "
+          f"WHOLE screen: {' '.join(text.split())!r}. FAILED here means the cs8900a "
           f"EISA probe at PP $0000 did not return $630E — no cartridge, or "
           f"the combo driver fell through to the ETH64 adaptor.")
     ok = check(m is not None,
@@ -1896,9 +1926,56 @@ def stage_transport(tr, L, peer: HostPeer, rng, run: dict) -> dict:
           f"{int.from_bytes(before, 'little')} -> "
           f"{int.from_bytes(after, 'little')}")
 
+    # --- ip65's own counters, ON THE GREEN PATH ---
+    # read_ip65_diag is called from failure branches only, so a fully green
+    # run never looked at these. A run could report PASS across the board
+    # with ip65_recv_dropped = 57 and net_last_error = $48, and nothing
+    # would say so. The library owns the verdicts; note its guard that a
+    # zero drop counter is not evidence unless the send counter moved,
+    # which is exactly the vacuous shape this suite keeps finding.
+    diag = read_ip65_diag(tr, L, "after-transport", run, level=logging.INFO)
+    nle = diag.get("net_last_error")
+    verdict(hw.decode_net_last_error(nle if isinstance(nle, int) else None),
+            "net_last_error is clear after transport")
+    # NO expect_sends, AND THAT IS THE POINT.
+    #
+    # I first passed `peer.type4_in + 1` here, reasoning that supplying a
+    # floor would clear the library's "this zero is not evidence" note.
+    # BOTH HALVES OF THAT WERE WRONG.
+    #
+    # 1. ip65_send_attempts is PER-SEND, not cumulative: src/net/ip65/net.s
+    #    stores $01 into it at the top of EVERY net_udp_send, and its BSS
+    #    comment says so explicitly, contrasting it with ip65_recv_dropped
+    #    which IS cumulative since net_init. So the counter reads 1 on a
+    #    healthy run and a floor of 7 would have FAILED every good run.
+    # 2. Worse, the note was right and I was trying to make it go away.
+    #    ip65_recv_dropped is incremented ONLY under ip65_send_pump
+    #    (net.s, the callback disarm), and the pump is exactly what makes
+    #    send_attempts exceed 1. On a warm-cache run the pump never fires,
+    #    so the drop counter HAS NO OPPORTUNITY TO MOVE and its zero is
+    #    genuinely weak evidence. Proving it needs a cold or evicted ARP
+    #    cache, which is a different test and does not belong here.
+    #
+    # So the zero stays a weak assertion and the library keeps saying so.
+    # Adjusting an assertion until a caveat disappears is the same shape as
+    # every vacuous check this suite exists to catch — it just happened to
+    # be me doing it.
+    verdict(hw.check_net_counters(
+                diag.get("ip65_recv_dropped") if isinstance(
+                    diag.get("ip65_recv_dropped"), int) else None,
+                diag.get("ip65_send_attempts") if isinstance(
+                    diag.get("ip65_send_attempts"), int) else None),
+            "ip65 dropped no inbound frames (weak: see the verdict's note)")
+    # Recorded as DATA, not scored: 1 = the ARP cache was warm and nothing
+    # was retried; >1 = the #120 ARP-pump path fired, which is informative
+    # rather than a failure.
+    log.info("ip65_send_attempts = %s (per-send: 1 = warm ARP cache, "
+             ">1 = the #120 pump path fired)", diag.get("ip65_send_attempts"))
+
     # --- the same plaintext twice, for the ciphertext-variance claim ---
     repeat = token(16)
     out["repeated_payload"] = repeat
+    out["repeated_sent"] = 0
     for i in (1, 2):
         if not ki.send_message_dma(tr, repeat, L, timeout=30.0):
             check(False, f"repeat message {i} accepted by the C64")
@@ -1906,6 +1983,7 @@ def stage_transport(tr, L, peer: HostPeer, rng, run: dict) -> dict:
         if peer.wait_for_plaintext(TRANSPORT_BUDGET_S) is None:
             check(False, f"repeat message {i} reached the host")
             break
+        out["repeated_sent"] = i
     else:
         check(True, "the same plaintext was sent twice (for the wire stage)")
     return out
@@ -1925,14 +2003,7 @@ def stage_wire(cap, run: dict, transport: dict) -> None:
     this review exists to remove.
     """
     log.info("--- Stage W: the wire ---")
-    wire_checks = [
-        "the capture brackets this run's events",
-        "frames on the cable came FROM the C64, not just from the Mac",
-        "the C64's MAC is on the wire",
-        "the handshake completed at both ends",
-        "CONTROL: the cleartext sentinel IS found on the wire",
-        "no plaintext appears anywhere in the capture",
-    ]
+    wire_checks = list(WIRE_CHECKS)
     path = cap.stop()
     if not path:
         for label in wire_checks:
@@ -2051,6 +2122,42 @@ def stage_wire(cap, run: dict, transport: dict) -> None:
         ("host_to_c64", transport.get("host_to_c64_payload")),
         ("repeated", transport.get("repeated_payload")),
     ) if val}
+    # --- IDENTICAL PLAINTEXT -> DIFFERENT CIPHERTEXT ---
+    # The docstring calls this half of the reason the rig is worth using,
+    # and it was never implemented: `repeated_payload` was only a third
+    # leak needle, and the "sent twice" PASS in Stage C had no consumer at
+    # all. Implemented rather than deleted, because it is cheap here and it
+    # is the one claim in this suite that would catch nonce or keystream
+    # reuse — a real cryptographic failure that every other check passes
+    # straight over.
+    #
+    # The comparison is over the CIPHERTEXT BODY (past the 16-byte type-4
+    # header, which carries a counter that differs by construction and
+    # would make any two datagrams look distinct for free).
+    label_cv = "identical plaintext produced different ciphertext"
+    if not c64_mac:
+        skipped(label_cv, "the C64's MAC was never read, so outbound "
+                          "datagrams cannot be told from the Mac's")
+    elif transport.get("repeated_sent", 0) < 2:
+        skipped(label_cv,
+                f"the repeated payload went out "
+                f"{transport.get('repeated_sent', 0)} time(s), not 2 — with "
+                f"no two datagrams carrying the SAME plaintext, distinct "
+                f"ciphertext is expected for free and proves nothing")
+    else:
+        bodies = [d.udp_payload[16:] for d in hw.reassemble(frames)
+                  if d.dport == WG_PORT and len(d.udp_payload) > 16
+                  and d.udp_payload[0] == MSG_TYPE_TRANSPORT
+                  and c64_mac in [bytes(m) for m in d.eth_srcs]]
+        dupes = len(bodies) - len(set(bodies))
+        check(bool(bodies) and dupes == 0, label_cv,
+              f"{len(bodies)} type-4 ciphertext bodies from the C64, "
+              f"{len(set(bodies))} distinct ({dupes} repeated). The same "
+              f"{len(transport.get('repeated_payload', ''))}-character "
+              f"plaintext was sent twice this run, so two of these decrypt "
+              f"to identical bytes — equal ciphertext would mean the nonce "
+              f"or the key stream repeated.")
+
     if not needles:
         skipped("no plaintext appears anywhere in the capture",
                 "no payload was ever sent")
@@ -2092,7 +2199,22 @@ def summarise() -> int:
     if nskip:
         log.warning("%d checks were SKIPPED and are NOT evidence of anything.",
                     nskip)
-    return 1 if nfail else 0
+    if nfail:
+        return 1
+    blocking = [label for status, label, _ in results
+                if status == SKIP and label in WIRE_CHECKS]
+    if blocking:
+        log.error("=" * 72)
+        log.error("EXIT 77 (INCONCLUSIVE): %d WIRE assertion(s) were never "
+                  "evaluated:", len(blocking))
+        for label in blocking:
+            log.error("    %s", label)
+        log.error("Nothing failed, but the claims this rig exists to make "
+                  "were not made. A zero exit here would report PASS about "
+                  "evidence nobody looked at.")
+        log.error("=" * 72)
+        return 77
+    return 0
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -2290,6 +2412,15 @@ def main(argv: Optional[list[str]] = None) -> int:
             stage_config(tr, L, c64_priv, c64_pub, host_pub)
             if stage_handshake(tr, client, L, peer, args, run):
                 transport = stage_transport(tr, L, peer, rng, run)
+                # INTO THE ARTIFACT. stage_transport's result was passed to
+                # stage_wire and then dropped, so the JSON — the thing most
+                # likely to outlive the log — carried the sentinel but NOT
+                # the two randomised payloads, the msg_port, the receive
+                # counters or what the host actually decrypted. An auditor
+                # holding only the JSON could not re-verify the headline
+                # absence claim, because the needles it was made with were
+                # only ever prose in a log line.
+                run["transport"] = transport
                 # The control goes on the wire LAST, so it cannot be mistaken
                 # for part of the tunnel exchange, and while the capture is
                 # certainly still running.
