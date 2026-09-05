@@ -181,7 +181,7 @@ def _required_labels() -> list[str]:
         "main_loop", "net_init", "net_dhcp_acquire", "net_udp_listen", "net_udp_send",
         "net_poll", "net_local_ip", "net_last_error", "mul_dma_hi",
         "wg_peer_ip", "wg_peer_port", "net_udp_dest_ip", "net_udp_dest_port", "wg_local_port",
-        "udp_recv_ready", "udp_recv_len", "uci_read_hdr", "uci_status_buf", "uci_status_len", "udp_recv_buf", "net_udp_send_len",
+        "udp_recv_ready", "udp_recv_len", "uci_read_hdr", "uci_status_buf", "uci_status_len", "uci_status_seen", "udp_recv_buf", "net_udp_send_len",
     ]
 
 
@@ -331,12 +331,24 @@ def _probe_one_size(
 
     # fw 3.15 reports "04,DATAGRAM TRUNCATED: <real length>" on the $DF1F
     # status line. uci_drain_status now captures it instead of discarding it.
+    # uci_status_len is STICKY-FIRST (uci_cmd.s:655-657) and armed above, so it
+    # is this iteration's FIRST line's length -- deliberate here. But the BUFFER
+    # is rewritten from offset 0 on EVERY drain (@dst_idx zeroed at :593), so a
+    # later line's bytes can sit under an earlier line's length. uci_status_seen
+    # (:645, non-sticky) is the count for the drain whose bytes are actually in
+    # the buffer. Record BOTH: a disagreement is the splice, and it is how a real
+    # "04,DATAGRAM TRUNCATED: 1420" gets reported as a short, complete-looking
+    # line. Same defect was shipped in test_warp_live.py and fixed there.
     n = tr.read_memory(L["uci_status_len"], 1)[0]
+    n_seen = (tr.read_memory(L["uci_status_seen"], 1)[0]
+              if "uci_status_seen" in L else None)
     # DIAGNOSTIC: read the whole buffer regardless of the length byte, so we
     # can tell "only one byte captured" from "buffer full, length wrong".
     raw = bytes(tr.read_memory(L["uci_status_buf"], 40))
     printable = "".join(chr(b) if 32 <= b < 127 else "." for b in raw)
-    status = f"len={n} [{printable}]"
+    status = (f"len={n} seen={n_seen} [{printable}]"
+              + ("  SPLICE: sticky length disagrees with this drain's count"
+                 if n_seen is not None and n_seen != n else ""))
 
     # Read the WHOLE buffer, ALWAYS — not a head window, not gated on
     # `ready`. The interesting cases are exactly the ones the old 16-head /

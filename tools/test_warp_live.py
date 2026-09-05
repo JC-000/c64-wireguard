@@ -455,6 +455,30 @@ SHORT_READ_STATE_NAMES = {0x80: "IDLE ($00)", 0xA0: "DATA_LAST ($20)"}
 # cleared and verified per query, exactly like net_last_error.
 STATUS_BUF_LABEL = "uci_status_buf"
 STATUS_LEN_LABEL = "uci_status_len"
+# uci_status_seen (uci_cmd.s:645, exported at :49) is the ONLY correct length
+# for uci_status_buf. It is rewritten -- zero included -- on EVERY drain, and
+# the adapter documents it as the answer to "did THIS drain see a status".
+# uci_status_len is sticky-first (":654-656 -- one already held, do not
+# clobber it") while the BUFFER is rewritten from offset 0 on every drain
+# (@dst_idx zeroed at :591). Reading a sticky length against a non-sticky
+# buffer SPLICES them: the first line pins the length, later lines overwrite
+# the content, and a real "04,DATAGRAM TRUNCATED: 1420" is reported as
+# "04,DA" with status_truncated_in_buf False -- a truncated line reported as
+# complete, which is worse than not capturing it at all.
+#
+# A CLEAN HARDWARE RUN CANNOT CATCH THIS. A spliced capture and a correct one
+# agree whenever every line is identical, and the 2026-09-04 proof runs saw 54
+# identical 14-byte lines. Both fields are recorded below so a disagreement is
+# visible in the data rather than inferred.
+#
+# THIS DOES NOT CLOSE #132. It makes the capture SELF-CONSISTENT -- length and
+# bytes now come from the same drain -- so a truncated line can no longer be
+# reported as complete. It does NOT make us sample the DELIVERING read: net_poll
+# drains on every exit including the idle path, so by the time the host DMAs
+# these bytes the most recent drain is almost certainly an idle poll. Reading the
+# status of the read that actually delivered a datagram still needs a
+# firmware-side consumer or a tighter race than DMA polling can win.
+STATUS_SEEN_LABEL = "uci_status_seen"
 
 
 def _status_buf_capacity(L: dict) -> int:
@@ -464,6 +488,12 @@ def _status_buf_capacity(L: dict) -> int:
     IS the capacity. Deriving it means a build that resizes the buffer is
     read correctly instead of silently truncated or over-read.
     """
+    # NOTE: this still derives capacity from uci_status_len's ADDRESS, which is
+    # correct -- the layout at uci_cmd.s:673-674 puts uci_status_len immediately
+    # after the buffer, so the gap IS the capacity. Do not "tidy" this to use
+    # STATUS_SEEN_LABEL because the reader above switched to it for the LENGTH:
+    # uci_status_seen sits AFTER uci_status_len, so that gap would be wrong.
+    # Address arithmetic and value semantics are different questions here.
     span = L[STATUS_LEN_LABEL] - L[STATUS_BUF_LABEL]
     return span if 0 < span <= 256 else 48
 
@@ -477,18 +507,25 @@ def _read_status_line(tr: Ultimate64Transport, L: dict) -> dict:
     the line is device-authored text, never executed or matched loosely.
     """
     out: dict = {}
-    if STATUS_BUF_LABEL not in L or STATUS_LEN_LABEL not in L:
+    if (STATUS_BUF_LABEL not in L or STATUS_LEN_LABEL not in L
+            or STATUS_SEEN_LABEL not in L):
         out["status_line_available"] = False
         return out
     out["status_line_available"] = True
     cap = _status_buf_capacity(L)
     try:
-        seen = bytes(tr.read_memory(L[STATUS_LEN_LABEL], 1))[0]
+        seen = bytes(tr.read_memory(L[STATUS_SEEN_LABEL], 1))[0]
+        sticky = bytes(tr.read_memory(L[STATUS_LEN_LABEL], 1))[0]
         raw = bytes(tr.read_memory(L[STATUS_BUF_LABEL], cap))
     except Exception as exc:                                  # noqa: BLE001
         out["status_line_error"] = repr(exc)
         return out
-    out["status_len_seen"] = seen
+    out["status_len_seen"] = seen          # uci_status_seen -- THIS drain
+    out["status_len_sticky"] = sticky      # uci_status_len  -- first drain since clear
+    # A disagreement means the sticky latch is holding an EARLIER line's length
+    # while the buffer holds a later line's bytes. Recorded, not silently reconciled.
+    out["status_len_disagrees"] = (seen != sticky)
+    out["status_saw_line_this_drain"] = (seen != 0)
     out["status_truncated_in_buf"] = seen > cap
     n = min(seen, cap)
     body = raw[:n]
