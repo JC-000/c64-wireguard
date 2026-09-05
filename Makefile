@@ -118,20 +118,53 @@ CA65FLAGS += -D UCI_CHUNKED_WRITE=1
 endif
 
 # --- WG_MTU1440 (issue #70) ---
-# WG_MTU1440=1 is the generic, backend-agnostic opt-in that lifts
-# WG_DATAGRAM_CAP (src/constants.inc) from 892 to 1472 and hence the tunnel
-# MTU from 860 to 1440. Default 0: BOTH backends keep 892 and the default
-# build is byte-identical to a tree without this flag. ip65 already
-# advertises NET_UDP_SEND_MAX/RECV_MAX 1472/1472, so under BACKEND=ip65 the
-# flag alone is enough (its RR-Net path is unmeasured at 1472 and #80 is
-# open, hence opt-in). Under BACKEND=uci only the chunked SOCKET_WRITE path
-# raises NET_UDP_SEND_MAX to 1472, so a uci build with WG_MTU1440=1 but
-# without UCI_CHUNKED_WRITE=1 can never carry a 1440-byte MTU: the §13.3
+# WG_MTU1440=1 lifts WG_DATAGRAM_CAP (src/constants.inc) from 892 to 1472
+# and hence the tunnel MTU from 860 to 1440. The DEFAULT IS BACKEND-
+# DEPENDENT: 1 under BACKEND=ip65, 0 under BACKEND=uci.
+#
+# ip65 defaults ON because 860 was never an ip65 number. It derives from
+# WG_DATAGRAM_CAP 892, the UCI SOCKET_WRITE single-block payload cap; ip65
+# advertises NET_UDP_SEND_MAX/RECV_MAX 1472/1472 natively and has no such
+# cap, so the flag alone is enough and no firmware of any kind is involved
+# — it talks to a CS8900a. The 1440 path was validated on PHYSICAL RR-Net
+# hardware on 2026-09-05 (a real cartridge in the U64E expansion port:
+# three runs, handshake to ACTIVE in 18-20 s at 48 MHz, content-verified
+# transport both ways, no plaintext in a two-station capture), and
+# `make release` ships RR-Net at 1440 ONLY — v1.2.0 dropped the MTU-860
+# RR-Net artifacts. Leaving the source default at 0 meant a bare `make`
+# produced a build no released artifact corresponds to, which is the
+# disagreement this default removes.
+#
+# The reason is therefore the evidence, not a preference: 1440 is the only
+# ip65 configuration `make release` emits and the only one with hardware
+# evidence behind it. (The comment this replaces gave two reasons for
+# opt-in, both since falsified: the RR-Net path at 1472 is no longer
+# "unmeasured", and #80 is CLOSED — the ip65 blob's BSS moved out of
+# MAIN_AREA_LO in PR #83, with tools/test_ip65_bss_guard.py holding it
+# there on every gate run.) Cost, measured off build/wireguard.map:
+# MAIN_AREA_HI free goes 951 B -> 371 B.
+#
+# `?=` still means a command-line assignment wins, so `make WG_MTU1440=0`
+# builds the 860 ip65 PRG. MEASURED, not assumed: that opt-out reproduces
+# the pre-flip default byte-for-byte (sha256 f4cb09d9... for the REU
+# profile), and the new bare `make` reproduces the released
+# wireguard-rrnet-reu-mtu1440.prg (f3f76459...), so this commit moves which
+# artifact `make` selects and does not change either artifact.
+# tools/test_build_mtu1440.py pins both directions on every gate run.
+#
+# uci defaults OFF because only the chunked SOCKET_WRITE path raises
+# NET_UDP_SEND_MAX to 1472, so a uci build with WG_MTU1440=1 but without
+# UCI_CHUNKED_WRITE=1 can never carry a 1440-byte MTU: the §13.3
 # capability fit (WG_MTU + 32 <= NET_UDP_SEND_MAX, src/contract_asserts.s)
 # is kept by constants.inc clamping WG_MTU back to 860, i.e. the flag would
 # be a SILENT no-op — refuse the pairing here, at parse time, with the fix
-# spelled out.
+# spelled out. That refusal is unchanged by the new default: it can only be
+# reached by spelling WG_MTU1440=1 out on a uci build.
+ifeq ($(BACKEND),ip65)
+WG_MTU1440 ?= 1
+else
 WG_MTU1440 ?= 0
+endif
 ifeq ($(WG_MTU1440),1)
 ifeq ($(BACKEND),uci)
 ifneq ($(UCI_CHUNKED_WRITE),1)

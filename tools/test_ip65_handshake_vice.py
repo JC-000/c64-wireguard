@@ -172,7 +172,10 @@ def main() -> int:
 
     skip_if_rig_down(args.vice_bin)
 
-    build_ip65(["WG_MTU1440=1"] if args.mtu1440 else [])
+    # WG_MTU1440 defaults to 1 under BACKEND=ip65 (v1.2.0 ships RR-Net
+    # at 1440 only), so the 860 arm must spell the opt-out out — a bare
+    # `make BACKEND=ip65` is the 1440 build now.
+    build_ip65(["WG_MTU1440=1"] if args.mtu1440 else ["WG_MTU1440=0"])
     for path in (PRG_PATH, LABELS_PATH):
         if not os.path.exists(path):
             log(f"FATAL: missing {path}")
