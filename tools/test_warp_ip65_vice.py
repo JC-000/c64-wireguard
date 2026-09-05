@@ -777,18 +777,22 @@ def main() -> int:
     log(f"Random seed: {seed} (reproduce with --seed {seed})")
 
     if args.prove_red == "mtu":
-        # RED PROOF, no VICE needed: link the SAME sources without
-        # WG_MTU1440 and show the structural pre-check refusing the build.
-        log("=== --prove-red mtu: linking BACKEND=ip65 REU=0 (no "
-            "WG_MTU1440) and re-running the pre-check ===")
-        build_ip65(["REU=0", f"BUILD_DIR={os.path.basename(BUILD_RED)}"])
+        # RED PROOF, no VICE needed: link the SAME sources at MTU 860 and
+        # show the structural pre-check refusing the build. WG_MTU1440=0 is
+        # SPELLED OUT because the knob defaults to 1 under BACKEND=ip65
+        # since v1.2.0 — omitting it builds the 1440 PRG and this proof
+        # would report "GREEN (UNEXPECTED)" while proving nothing.
+        log("=== --prove-red mtu: linking BACKEND=ip65 REU=0 WG_MTU1440=0 "
+            "and re-running the pre-check ===")
+        build_ip65(["REU=0", "WG_MTU1440=0",
+                    f"BUILD_DIR={os.path.basename(BUILD_RED)}"])
         Lr = load_labels(BUILD_RED)
-        fingerprint("red (no WG_MTU1440)", os.path.join(BUILD_RED,
-                                                        "wireguard.prg"), Lr)
+        fingerprint("red (WG_MTU1440=0)", os.path.join(BUILD_RED,
+                                                       "wireguard.prg"), Lr)
         ok = check_mtu_admits(Lr, 1279)
         log(f"\n=> the mtu_admits_replies check is "
             f"{'GREEN (UNEXPECTED)' if ok else 'RED, as it must be'} "
-            "on a tree built without WG_MTU1440.")
+            "on a tree built with WG_MTU1440=0.")
         return 1 if ok else 0
 
     if args.measure_dns:

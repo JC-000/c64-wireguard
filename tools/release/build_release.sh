@@ -190,7 +190,17 @@ build_variant() {
 # ($11, one block). ip65 advertises NET_UDP_SEND_MAX/RECV_MAX 1472/1472
 # natively and has no such cap -- so an ip65 build at 860 was carrying a UCI
 # limitation into a backend that does not have it. It shipped that way only
-# because WG_MTU1440 is a generic opt-in defaulting off.
+# because WG_MTU1440 used to be a generic opt-in defaulting off for both
+# backends. Since v1.2.0 the Makefile defaults it to 1 under BACKEND=ip65, so
+# a bare `make` and the shipped RR-Net artifact are the same build. The
+# WG_MTU1440=1 below is therefore now REDUNDANT and is kept deliberately:
+# every variant in this script names its own shape rather than inheriting
+# one, so a future change to the default cannot silently re-point a release
+# artifact. assert_labels checks the built WG_MTU either way.
+#
+# NOTE ON THE KIND NAMES. `default` and `mtu1440` name the MTU (860 / 1440),
+# not "the default build" -- for ip65 the default build IS the mtu1440 kind,
+# and no ip65 `default` variant is built at all.
 #
 # wireguard-rrnet-noreu-mtu1440.prg is also the ONLY artifact in this set
 # validated on real hardware: a physical CS8900a in the U64E cartridge port,

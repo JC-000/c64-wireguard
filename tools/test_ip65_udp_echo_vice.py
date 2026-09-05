@@ -34,13 +34,17 @@ WHICH INVOCATION IS THE RED ONE
 Both invocations are GREEN when the tree is correct, because each asserts
 what its own build promises:
 
-  python3 tools/test_ip65_udp_echo_vice.py              (default build)
+  python3 tools/test_ip65_udp_echo_vice.py              (WG_MTU1440=0)
       WG_MTU 860. 888-892 must go out whole; 893/1452/1472 must be
       REFUSED by transport_send's 16-bit gate — C=1, tp_packet_len
       untouched, send counter unconsumed, nothing on the wire. A build
       that accepted them would be claiming a capacity it does not have.
+      NOTE this arm now builds with WG_MTU1440=0 SPELLED OUT: since
+      v1.2.0 the knob defaults to 1 under BACKEND=ip65, so a bare
+      `make BACKEND=ip65` is the 1440 build.
 
-  python3 tools/test_ip65_udp_echo_vice.py --mtu1440    (WG_MTU1440=1)
+  python3 tools/test_ip65_udp_echo_vice.py --mtu1440    (WG_MTU1440=1,
+      i.e. the ip65 DEFAULT build and the shipped RR-Net artifact)
       WG_MTU 1440. ALL SEVEN sizes must go out as exactly one datagram.
 
 Both expectations are derived from the BUILD's own exported WG_MTU, so
@@ -586,7 +590,10 @@ def main() -> int:
 
     skip_if_rig_down(args.vice_bin)
 
-    build_ip65(["WG_MTU1440=1"] if args.mtu1440 else [])
+    # WG_MTU1440 defaults to 1 under BACKEND=ip65 (v1.2.0 ships RR-Net
+    # at 1440 only), so the 860 arm must spell the opt-out out — a bare
+    # `make BACKEND=ip65` is the 1440 build now.
+    build_ip65(["WG_MTU1440=1"] if args.mtu1440 else ["WG_MTU1440=0"])
     for path in (PRG_PATH, LABELS_PATH):
         if not os.path.exists(path):
             log(f"FATAL: missing {path}")
