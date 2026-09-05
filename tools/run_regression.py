@@ -14,9 +14,11 @@ eaten by sporadic "Main menu did not appear" timeouts as too many
 VICE instances compete for CPU during boot.
 """
 
+import hashlib
 import os
 import subprocess
 import sys
+import tempfile
 import time
 
 TESTS = [
@@ -29,6 +31,16 @@ TESTS = [
     # Build-tree independent (verified against a tree with no build/ at all),
     # so it is safe in the parallel pool alongside the mutators.
     ("suite_imports", ["tools/test_suite_imports.py"]),
+    # THIS RUNNER'S OWN THREE DEFECTS, found 2026-09-04. All were silent
+    # and two could not be seen from any suite's result: stdout=PIPE with
+    # no reader deadlocked on >64 KB of output; SUITE_TIMEOUT lived only in
+    # a loop below the pool whose condition could never be true, and the
+    # serial loop had no deadline at all; and the restore `make` ignored
+    # both return codes, so a failed rebuild still printed "All N suites
+    # passed!" over an unusable tree. The gate is the one thing no suite
+    # can test from the inside, so it tests itself, with all three shapes
+    # exercised against throwaway subprocesses. Seconds, no build.
+    ("gate_self",  ["tools/run_regression.py", "--self-check"]),
     # Host-side only (no device, no network): judgement about /v1/info's
     # git_commit_hash, incl. that an UNKNOWN hash warns rather than
     # refuses — a host-side allowlist that blocked the next legitimate
@@ -262,33 +274,268 @@ SUITE_TIMEOUT = 1800
 
 
 def launch(name, cmd, env):
+    """Start a suite with its output going to a TEMP FILE, not a pipe.
+
+    NOT subprocess.PIPE. It used to be, with nothing reading the pipe until
+    after `proc.poll()` returned non-None — so a suite writing more than the
+    ~64 KB pipe buffer blocked forever on write, poll() never returned, and
+    the whole gate deadlocked with no timeout to rescue it (the "safety net"
+    below the pool was unreachable dead code; see main()). Reproduced: a
+    suite emitting 2 MB hangs the pre-fix runner indefinitely, poll() = None.
+
+    A file has no such limit and needs no reader thread. The handle is
+    carried alongside the process and read once, at reap.
+    """
+    fh = tempfile.NamedTemporaryFile(
+        prefix=f"gate_{name}_", suffix=".log", delete=False, mode="w+b")
     p = subprocess.Popen(
         ["python3"] + cmd,
-        stdout=subprocess.PIPE,
+        stdout=fh,
         stderr=subprocess.STDOUT,
         env=env,
     )
     print(f"  → launch {name:15s} (PID {p.pid})")
-    return p
+    return p, fh
 
 
-def reap(running, results):
-    """Move any finished processes out of `running` into `results`."""
+def _drain(fh):
+    """Read a finished suite's log file and remove it."""
+    try:
+        fh.flush()
+        fh.seek(0)
+        out = fh.read().decode(errors="replace")
+    except Exception as exc:                                  # noqa: BLE001
+        out = f"(could not read suite log: {exc!r})"
+    finally:
+        try:
+            fh.close()
+            os.unlink(fh.name)
+        except OSError:
+            pass
+    return out
+
+
+def reap(running, results, timeout=None):
+    """Move finished processes out of `running` into `results`.
+
+    *timeout* is now ENFORCED, on every path. It used to exist only in a
+    loop below the pool that could never be entered, so a suite that hung
+    hung the gate — the opposite of what SUITE_TIMEOUT's comment claimed.
+    A suite past its deadline is killed and recorded as a FAILURE, because
+    a suite that had to be killed has not passed.
+    """
     still_running = []
-    for name, proc, started in running:
+    for name, proc, fh, started in running:
         rc = proc.poll()
+        elapsed = time.monotonic() - started
+        if rc is None and timeout is not None and elapsed > timeout:
+            proc.kill()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+            out = _drain(fh)
+            results[name] = (
+                -1,
+                out + f"\n\n*** KILLED: exceeded SUITE_TIMEOUT "
+                      f"({timeout:.0f}s). A suite that had to be killed has "
+                      f"not passed. ***\n")
+            print(f"  ← KILL {name:15s}  ({elapsed:.0f}s, over "
+                  f"{timeout:.0f}s budget)")
+            continue
         if rc is None:
-            still_running.append((name, proc, started))
+            still_running.append((name, proc, fh, started))
         else:
-            out = proc.communicate(timeout=5)[0].decode(errors="replace")
-            elapsed = time.monotonic() - started
+            out = _drain(fh)
             results[name] = (rc, out)
             status = "PASS" if rc == 0 else "FAIL"
             print(f"  ← {status:4s} {name:15s}  ({elapsed:.0f}s)")
     return still_running
 
 
+def restore_default_build():
+    """`make clean && make`, checked. Returns None on success, else why not.
+
+    The gate leaves the tree on the DEFAULT backend (Makefile: BACKEND ?=
+    ip65). That is deliberate and documented, but it is only true if this
+    actually succeeded — which nothing verified before.
+    """
+    for cmd in (["make", "clean"], ["make"]):
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            tail = "\n".join((r.stderr or r.stdout or "").strip()
+                              .splitlines()[-15:])
+            return (f"  `{' '.join(cmd)}` exited {r.returncode}\n{tail}")
+    # Relative to where `make` actually ran, not to PROJECT_ROOT. In the
+    # gate those coincide (main() chdir'd first), so an absolute check
+    # would pass for a reason unrelated to the build it just ran — and it
+    # would validate a DIFFERENT tree than it built. Caught by the
+    # succeeding-build control in self_check().
+    prg = os.path.join(os.getcwd(), "build", "wireguard.prg")
+    if not os.path.exists(prg):
+        return (f"  `make` reported success but {prg} does not exist — the "
+                f"next run with C64_SKIP_BUILD=1 would have nothing to load")
+    return None
+
+
+def describe_tree():
+    """Say what the gate LEFT BEHIND, so the next lane need not guess.
+
+    A gate run leaves build/ on the default (ip65) backend, and the
+    handoff notes record people being caught by that. Printing the
+    fingerprint costs nothing and turns an inherited state into a stated
+    one.
+    """
+    prg = os.path.join(PROJECT_ROOT, "build", "wireguard.prg")
+    labels = os.path.join(PROJECT_ROOT, "build", "labels.txt")
+    try:
+        data = open(prg, "rb").read()
+        sha = hashlib.sha256(data).hexdigest()[:16]
+        size = len(data)
+    except OSError as exc:
+        return f"build/: UNREADABLE ({exc})"
+    backend = "unknown"
+    try:
+        names = open(labels).read()
+        has_ip65 = ".ip65_blob_start" in names
+        has_uci = ".uci_wait_idle" in names
+        backend = ("ip65" if has_ip65 and not has_uci else
+                   "uci" if has_uci and not has_ip65 else "ambiguous")
+    except OSError:
+        pass
+    return (f"Tree left as: BACKEND={backend}  build/wireguard.prg "
+            f"{size} B sha256={sha}...\n"
+            f"(the gate restores the DEFAULT build; rebuild explicitly "
+            f"before any hardware run that needs another backend)")
+
+
+def self_check():
+    """Prove the three gate defects fixed on 2026-09-04 stay fixed.
+
+    Each was silent, and two of them could make a red run look green or
+    make no run finish at all:
+
+      1. stdout=subprocess.PIPE with no reader — a suite emitting more than
+         the pipe buffer blocked on write forever and poll() never
+         returned.
+      2. SUITE_TIMEOUT was referenced only in a loop below the pool whose
+         condition could never be true, and the serial loop had no deadline
+         at all. Nothing bounded a hung suite.
+      3. the restore `make` ignored both return codes, so a failed rebuild
+         still printed "All N suites passed!".
+
+    Runs three throwaway suites in a temp dir. No project build, seconds.
+    """
+    print("=== run_regression self-check ===")
+    failed = 0
+    td = tempfile.mkdtemp(prefix="gate_selfcheck_")
+    chatty = os.path.join(td, "chatty.py")
+    hang = os.path.join(td, "hang.py")
+    with open(chatty, "w") as fh:
+        fh.write("import sys\n"
+                 "for _ in range(20000):\n"
+                 "    sys.stdout.write('x' * 100 + '\\n')\n"
+                 "sys.exit(0)\n")
+    with open(hang, "w") as fh:
+        fh.write("import time\ntime.sleep(3600)\n")
+
+    env = os.environ.copy()
+
+    # (1) 2 MB of output must COMPLETE, not deadlock.
+    results = {}
+    proc, out_fh = launch("chatty", [chatty], env)
+    running = [("chatty", proc, out_fh, time.monotonic())]
+    deadline = time.monotonic() + 60
+    while running and time.monotonic() < deadline:
+        running = reap(running, results, timeout=60)
+        time.sleep(0.2)
+    if running or results.get("chatty", (1,))[0] != 0:
+        print("  FAIL  a suite writing 2 MB to stdout did not complete "
+              "cleanly — the pipe deadlock is back")
+        for _n, pr, _f, _s in running:
+            pr.kill()
+        failed += 1
+    else:
+        got = len(results["chatty"][1])
+        print(f"  PASS  a suite writing 2 MB completes ({got} B captured, "
+              f"far past the ~64 KB pipe buffer that used to deadlock)")
+
+    # (2) a hung suite must be KILLED and recorded as a FAILURE.
+    results = {}
+    proc, out_fh = launch("hang", [hang], env)
+    running = [("hang", proc, out_fh, time.monotonic())]
+    start = time.monotonic()
+    while running and time.monotonic() - start < 30:
+        running = reap(running, results, timeout=3)
+        time.sleep(0.2)
+    took = time.monotonic() - start
+    rc = results.get("hang", (None,))[0]
+    if running or rc is None or rc == 0:
+        print(f"  FAIL  a suite that sleeps for an hour was not killed "
+              f"(rc={rc!r}, still running={bool(running)}) — SUITE_TIMEOUT "
+              f"bounds nothing again")
+        for _n, pr, _f, _s in running:
+            pr.kill()
+        failed += 1
+    elif "KILLED" not in results["hang"][1]:
+        print("  FAIL  the hung suite was reaped but its output does not "
+              "say it was killed; a reader cannot tell a kill from a "
+              "genuine failure")
+        failed += 1
+    else:
+        print(f"  PASS  a hung suite is killed at its deadline "
+              f"({took:.1f}s for a 3 s budget) and recorded as a FAILURE")
+
+    # (3) a failed restore build must be reported, not swallowed.
+    saved = os.getcwd()
+    try:
+        os.chdir(td)
+        # The failing `make` MUST still produce build/wireguard.prg.
+        # Without that, restore_default_build()'s separate "the PRG does
+        # not exist" branch catches the case and the return-code check —
+        # the thing this is meant to prove — is never exercised. Caught
+        # exactly that way on the first draft: disabling the return-code
+        # check left this case still passing.
+        with open(os.path.join(td, "Makefile"), "w") as fh:
+            fh.write("all:\n"
+                     "\t@mkdir -p build && echo prg > build/wireguard.prg\n"
+                     "\t@echo 'deliberate build failure' >&2; exit 1\n"
+                     "clean:\n\t@true\n")
+        why = restore_default_build()
+        # Second control: the SAME Makefile succeeding must NOT be
+        # reported, or this case would pass for a checker that fails
+        # every build.
+        with open(os.path.join(td, "Makefile"), "w") as fh:
+            fh.write("all:\n"
+                     "\t@mkdir -p build && echo prg > build/wireguard.prg\n"
+                     "clean:\n\t@true\n")
+        why_ok = restore_default_build()
+    finally:
+        os.chdir(saved)
+    if not why:
+        print("  FAIL  a `make` that exits 1 (having still written a PRG) "
+              "was reported as a successful restore — the gate would print "
+              "'All suites passed' over a broken tree")
+        failed += 1
+    elif why_ok:
+        print(f"  FAIL  a `make` that SUCCEEDED was reported as a failed "
+              f"restore ({why_ok!r}) — a checker that fails every build "
+              f"discriminates nothing")
+        failed += 1
+    else:
+        print("  PASS  a failing restore build is reported (by its return "
+              "code, with the PRG present) and a succeeding one is not")
+
+    if failed:
+        print(f"\n{failed} gate self-check(s) failed.")
+        return 1
+    print("\nAll three gate defects stay fixed.")
+    return 0
+
+
 def main():
+    if "--self-check" in sys.argv:
+        return self_check()
     os.chdir(PROJECT_ROOT)
 
     # Build once
@@ -311,40 +558,50 @@ def main():
     results = {}
 
     while pending or running:
-        running = reap(running, results)
+        running = reap(running, results, timeout=SUITE_TIMEOUT)
         while pending and len(running) < MAX_PARALLEL:
             name, cmd = pending.pop(0)
-            running.append((name, launch(name, cmd, env), time.monotonic()))
+            proc, fh = launch(name, cmd, env)
+            running.append((name, proc, fh, time.monotonic()))
             time.sleep(STAGGER_SECONDS)
         if running:
             time.sleep(POLL_SECONDS)
 
-    # Hard timeout safety-net for any straggler that somehow deadlocked
-    # (shouldn't fire in practice — reap() completes processes as they
-    # exit — but bounds total wall-clock if a test hangs).
-    start = time.monotonic()
-    while running and time.monotonic() - start < SUITE_TIMEOUT:
-        running = reap(running, results)
-        time.sleep(POLL_SECONDS)
+    # The "hard timeout safety-net" that used to sit here was DEAD CODE:
+    # the loop above exits only when `pending` and `running` are both
+    # empty, so its `while running and ...` condition could never be true.
+    # SUITE_TIMEOUT bounded nothing at all. It is now passed into reap()
+    # on every poll instead, which is the only place that can act on it.
 
     # Build-tree mutators, one at a time, only once the pool is empty. No
     # C64_SKIP_BUILD: each of these needs to build the tree it actually tests.
     serial_env = os.environ.copy()
     serial_env.pop("C64_SKIP_BUILD", None)
     for name, cmd in SERIAL_TESTS:
-        proc = launch(name, cmd, serial_env)
-        pending_one = [(name, proc, time.monotonic())]
+        proc, fh = launch(name, cmd, serial_env)
+        # Bounded, like the pool. This loop previously had NO deadline of
+        # any kind — not even the unreachable one above — so a serial suite
+        # that hung hung the gate forever with no diagnostic.
+        pending_one = [(name, proc, fh, time.monotonic())]
         while pending_one:
-            pending_one = reap(pending_one, results)
+            pending_one = reap(pending_one, results, timeout=SUITE_TIMEOUT)
             if pending_one:
                 time.sleep(POLL_SECONDS)
 
+    restore_failure = None
     if SERIAL_TESTS:
         # Those suites left the tree on whichever backend they built last.
         # Restore the default so a subsequent `make run` or manual test does
         # not silently use it.
-        subprocess.run(["make", "clean"], capture_output=True)
-        subprocess.run(["make"], capture_output=True)
+        #
+        # BOTH RETURN CODES ARE CHECKED. They were not, and that is the
+        # defect that could mask a broken tree: if this rebuild failed, the
+        # gate still printed "All N suites passed!" over an absent or
+        # half-written build/, and the next thing to run — a hardware tool
+        # with C64_SKIP_BUILD=1, which is the documented workflow — would
+        # either die or silently load a stale PRG. A gate that leaves the
+        # tree unusable has not passed.
+        restore_failure = restore_default_build()
 
     print("\n" + "=" * 70)
     all_ok = True
@@ -361,8 +618,14 @@ def main():
         print(f"  {status} {name:15s} {pid_info:40s} {summary}")
 
     print("=" * 70)
+    if restore_failure:
+        all_ok = False
+        print("\nRESTORE BUILD FAILED — the tree this gate leaves behind is "
+              "NOT usable:")
+        print(restore_failure)
     if all_ok:
         print(f"All {len(TESTS) + len(SERIAL_TESTS)} suites passed!")
+        print(describe_tree())
     else:
         print("\nFailed suites:")
         for name, (rc, out) in results.items():
@@ -370,8 +633,8 @@ def main():
                 print(f"\n=== {name} (exit {rc}) ===")
                 print(out[-2000:])
 
-    sys.exit(0 if all_ok else 1)
+    return 0 if all_ok else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

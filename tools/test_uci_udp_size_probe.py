@@ -1,27 +1,84 @@
 #!/usr/bin/env python3
-"""UCI UDP read-size probe.
+"""UCI UDP read-size probe — does `net_poll` deliver what was sent?
 
-Discovers UCI firmware (3.14d) UDP read semantics empirically by sending
-the C64 datagrams of varying sizes and observing what `net_poll` recovers.
+WHAT THIS FILE USED TO DO, AND WHY THAT MATTERED
+================================================
+
+Until 2026-09-04 this tool had NO ASSERTION OF ANY KIND. The docstring
+above this line promised "confirm against the expected pattern (byte i ==
+i & 0xFF)"; `_verify_pattern` was defined and never called (it was the
+only module-level function in the file with zero call sites), and `main()`
+ended `_print_summary(results); return 0` — no return value anywhere
+depended on `results`. Every wrong-length, wrong-content and
+never-delivered row printed and the process exited 0.
+
+That is not a dormant assertion, it is a retracted result. This tool
+produced the claim "the raw path is clean at 1000/1420/1472, verified
+byte-for-byte", and that claim was cited to rule the UCI multi-block read
+OUT of issue #128 — pointing the investigation away from `net_poll`, which
+is where the defect (#130, `@block_short`) actually was. The claim was
+vacuous. The sizes it reported clean happen to sit outside the fatal
+staging window, so the conclusion survived; the evidence never supported
+it.
+
+Two further defects made it blind even had it scored:
+
+  * the poison fill was 64 bytes wide (`b"\xCC" * 64`) and the readback was
+    16 head bytes plus 16 at `udp_recv_buf + rx_len - 16`. #130's
+    signature is a copy that stops at 893 under an announced 1008+ — MID
+    BUFFER, outside every window this tool looked at.
+  * `make_pattern`'s byte i = i & 0xFF collides with any fixed poison
+    byte at some offset, so even a wide `\xCC` fill could not have
+    measured a stop exactly.
+
+WHAT IT DOES NOW
+================
 
 For each size in SIZES:
-  1. Set the host-side responder's response_size.
-  2. Reset C64 udp_recv_ready / udp_recv_len / udp_recv_buf bytes.
-  3. Trigger a kick from the C64 via net_udp_send (always 32 bytes).
-  4. Loop net_poll until udp_recv_ready or timeout.
-  5. Read udp_recv_len + first 16 bytes + last byte; confirm against the
-     expected pattern (byte i == i & 0xFF).
+  1. POISON udp_recv_buf to its full structural capacity (derived from
+     `udp_recv_len - udp_recv_buf`, not assumed) with
+     `poison_pattern` — `P[i] = (i + seed) % 251`, the same fill
+     tools/test_warp_live.py and the upstream firmware lane's
+     `net_target_test.py` use, so all three read the same bytes the same
+     way. Verified by read-back before the trial starts.
+  2. Choose the reply bytes with `_payload_for`: seeded random, forced to
+     differ from the poison at EVERY offset, with a short fixed marker as
+     a SUFFIX. A coincidence therefore cannot move the measured stop.
+  3. Reset udp_recv_ready / udp_recv_len, kick the responder, poll.
+  4. Read the WHOLE buffer back and compute two independent quantities:
+       * `poison_stop` — how far the firmware actually WROTE.
+       * `_verify_pattern` — whether those bytes are the bytes sent.
+  5. SCORE it. `score_results` is a pure function over the recorded rows
+     and `main()` returns non-zero when it reports anything.
 
-Reveals: whether the firmware truncates oversized datagrams (POSIX), splits
-them across multiple SOCKET_READ calls (stream-style), refuses outright
-(error status), or has size-dependent quirks.
+The two quantities answer different questions and both are needed. A
+short read has `poison_stop < udp_recv_len` with every written byte
+correct; corruption has `poison_stop == udp_recv_len` with a mismatch.
+Only the pair distinguishes "the copy stopped early" from "the copy was
+wrong", and #128 spent two days unable to tell them apart.
 
-Runs at 1 MHz with debug-stream capture for failure post-mortem.
+ALARM PROOF
+===========
+
+`--self-check` runs the scorer over fabricated rows — clean, corrupt at a
+known offset, nothing delivered, and a short read stopping at a response
+block boundary — and requires it to flag each one, naming the offset. No
+device, no responder, milliseconds. Run it and you know the detector
+fires. It is also what makes this file safe to trust again: the previous
+version would have passed every hardware run ever put through it.
+
+Runs at 1 MHz with debug-stream capture for failure post-mortem. SPEED IS
+A TEST AXIS AND 1 MHz IS THE WRONG END OF IT: `@block_short` is reached
+only when DATA_AV reads clear AND STATE is $20/$00 in the same latched
+byte, which is a race between the 6510 and the FPGA's staging. At 1 MHz
+the block is essentially always staged in time. A run intended to observe
+$8F must sweep TURBO_MHZ and count occurrences per speed.
 """
 from __future__ import annotations
 
 import datetime as _dt
 import os
+import random
 import sys
 import time
 from pathlib import Path
@@ -59,6 +116,17 @@ from test_uci_udp_echo_live import (  # type: ignore[import-not-found]
 
 from uci.udp_size_responder import UDPSizeResponder, make_pattern  # type: ignore[import-not-found]
 
+# The poison vocabulary is NOT redefined here. tools/test_warp_live.py
+# already carries it, and it was adopted there from the firmware lane's
+# tests/e2e/io/command_interface/net_target_test.py `pattern()`, so this
+# probe, the WARP tool and the Ultimate's own test suite all read the same
+# bytes the same way. A fourth private scheme would make three sets of
+# hardware evidence incomparable. The one-sided-rename risk this import
+# carries is exactly what tools/test_suite_imports.py watches for.
+from test_warp_live import (  # type: ignore[import-not-found]
+    POISON_SEED, _recv_buf_capacity, poison_pattern, poison_stop,
+)
+
 # --- the outbound kick payload ---------------------------------------------
 # REPAIRED 2026-09-03 WITHOUT A HARDWARE RUN. Broken by f021458 (on master,
 # shipped in PR #112), which moved tools/test_uci_udp_echo_live.py to seeded
@@ -78,6 +146,19 @@ KICK_LEN = 32
 KICK_SEED = resolve_seed()
 TEST_PAYLOAD = _payload(KICK_LEN, KICK_SEED)
 assert len(TEST_PAYLOAD) == KICK_LEN <= 64, "kick must fit in SEND_BUF"
+
+# The REPLY alphabet must be DISJOINT from the request's. The kick uses
+# REQUEST_BYTE_ALPHABET = range(0x40, 0x60) (see test_uci_udp_echo_live);
+# a reply drawn from the full 0..255 range with a marker outside 0x40-0x5F
+# means a loopback or an echoed request can never satisfy a reply check.
+# Fixed text is a SUFFIX only, so it cannot be what an instrument keys on
+# at offset 0.
+# Lower-case deliberately: the request alphabet is 0x40-0x5F, so upper
+# case would collide (this assertion caught exactly that on the first
+# draft). Lower case is 0x61-0x7A and '-' is 0x2D, all outside it.
+REPLY_MARKER = b"\x01uci-size-probe-reply-end\x01"
+assert not (set(REPLY_MARKER) & set(range(0x40, 0x60))), (
+    "reply marker shares bytes with the request alphabet")
 
 ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
 # Sweep chosen to bracket every boundary this adapter cares about:
@@ -123,32 +204,90 @@ def _setup_peer(tr: Ultimate64Transport, L: dict, host_ip: str, port: int) -> No
     log.info("peer set to %s:%d", host_ip, port)
 
 
-def _reset_recv_state(tr: Ultimate64Transport, L: dict) -> None:
+def _payload_for(rng: random.Random, n: int, poison: bytes) -> bytes:
+    """`n` reply bytes that differ from the poison at EVERY offset.
+
+    Without this, the last written byte coincides with the poison with
+    probability 1/251, `poison_stop`'s backward scan extends the surviving
+    run by one, and the measured stop reads one below the truth. Here the
+    stop is an EXACT assertion, so the coincidence is designed out rather
+    than tolerated. (In the tunnel the reply is ciphertext and the same
+    coincidence is real; there it is handled by
+    classify_recv_buffer's tolerance in tools/test_warp_live.py.)
+
+    The standing rule is that what crosses the wire is randomised and the
+    seed is logged, with fixed markers only ever as a SUFFIX — a fixed
+    leading pattern is exactly what an instrument can be gamed by.
+    """
+    out = bytearray(rng.randrange(256) for _ in range(n))
+    if n >= len(REPLY_MARKER):
+        out[n - len(REPLY_MARKER):] = REPLY_MARKER
+    for i in range(n):
+        while out[i] == poison[i]:
+            out[i] = (out[i] + 1 + rng.randrange(255)) & 0xFF
+    return bytes(out)
+
+
+def _reset_recv_state(tr: Ultimate64Transport, L: dict, poison: bytes) -> None:
+    """Zero the ready/len flags and POISON THE WHOLE receive buffer.
+
+    The 64-byte `b"\xCC" * 64` guard region this replaced could not see
+    #130 even in principle: that defect stops the copy at 893 bytes under
+    an announced length of 1008 or more, which is past the end of the old
+    fill and past both of the old read windows. The buffer is poisoned to
+    its full structural capacity and the fill is VERIFIED BY READ-BACK, so
+    "the poison did not stick" can never be mistaken for "the firmware
+    wrote here".
+    """
     write_bytes(tr, L["udp_recv_ready"], bytes([0]))
     write_bytes(tr, L["udp_recv_len"], bytes([0, 0]))
-    # Wipe a guard region of udp_recv_buf so partial fills are visible.
-    write_bytes(tr, L["udp_recv_buf"], b"\xCC" * 64)
+    tr.write_memory(L["udp_recv_buf"], poison)
+    back = bytes(tr.read_memory(L["udp_recv_buf"], len(poison)))
+    if back != poison:
+        first = next((i for i, (a, b) in enumerate(zip(back, poison))
+                      if a != b), min(len(back), len(poison)))
+        raise RuntimeError(
+            f"poison fill did not stick: {len(poison)} bytes written to "
+            f"udp_recv_buf ${L['udp_recv_buf']:04X}, read back differs "
+            f"first at offset {first}. Every measurement in this trial "
+            f"would be attributing the firmware's writes to a buffer whose "
+            f"starting state is unknown.")
 
 
-def _verify_pattern(buf: bytes, expected_len: int) -> tuple[bool, str]:
-    """Check that `buf[:expected_len]` matches the size-responder pattern."""
-    expected = make_pattern(expected_len)
-    if len(buf) < expected_len:
-        return False, f"short read: got {len(buf)} need {expected_len}"
-    actual = buf[:expected_len]
-    if actual != expected[:expected_len]:
+def _verify_pattern(buf: bytes, expected: bytes) -> tuple[bool, str]:
+    """Does `buf` hold the bytes that actually crossed the wire?
+
+    *expected* is the responder's `last_response` — what was SENT, not
+    what the host meant to send. Comparing against the intent would make a
+    responder bug indistinguishable from a firmware bug.
+
+    Returns (ok, detail); the detail NAMES THE FIRST DIFFERING OFFSET,
+    because "the content is wrong" and "the content is wrong starting at
+    893" are different findings and only the second one identifies a
+    response-block boundary.
+    """
+    n = len(expected)
+    if len(buf) < n:
+        return False, f"short read: got {len(buf)} need {n}"
+    actual = buf[:n]
+    if actual != expected:
         for i, (a, e) in enumerate(zip(actual, expected)):
             if a != e:
-                return False, f"mismatch at byte {i}: got ${a:02X} want ${e:02X}"
+                return False, (f"mismatch at byte {i} of {n}: "
+                               f"got ${a:02X} want ${e:02X}")
     return True, "OK"
 
 
 def _probe_one_size(
     tr: Ultimate64Transport, L: dict, responder: UDPSizeResponder,
     size: int, listener_kick_ok: bool,
+    rng: random.Random, poison: bytes,
 ) -> dict:
+    reply = _payload_for(rng, size, poison)
     responder.response_size = size
-    _reset_recv_state(tr, L)
+    responder.response_payload = reply
+    responder.last_response = None
+    _reset_recv_state(tr, L, poison)
     # Arm the sticky status capture: zero the length so this iteration's
     # first status line is the one that sticks.
     write_bytes(tr, L["uci_status_len"], bytes([0]))
@@ -199,24 +338,26 @@ def _probe_one_size(
     printable = "".join(chr(b) if 32 <= b < 127 else "." for b in raw)
     status = f"len={n} [{printable}]"
 
+    # Read the WHOLE buffer, ALWAYS — not a head window, not gated on
+    # `ready`. The interesting cases are exactly the ones the old 16-head /
+    # 16-tail windows could not see: a copy that stopped mid-buffer (#130
+    # stops at 893 under an announced 1008+), and a datagram that was never
+    # delivered but left bytes behind. Gating on `ready` would skip the
+    # second one entirely.
+    buf = bytes(tr.read_memory(L["udp_recv_buf"], len(poison)))
+    stop = poison_stop(buf, poison)
+
     rx_len = 0
-    rx_first = b""
-    rx_tail = b""
     if ready:
         lo, hi = tr.read_memory(L["udp_recv_len"], 2)
         rx_len = lo | (hi << 8)
-        # Cap reads at the buffer's known size (1500 bytes per src/wg/data.s)
-        # AND keep within the 16-bit address space.
-        max_buf = 1500
-        n = min(rx_len, 64, max_buf)
-        if n > 0:
-            rx_first = bytes(tr.read_memory(L["udp_recv_buf"], n))
-        if rx_len > 64:
-            effective = min(rx_len, max_buf)
-            tail_off = max(0, effective - 16)
-            tail_addr = L["udp_recv_buf"] + tail_off
-            if 0 <= tail_addr <= 0xFFFF - 16:
-                rx_tail = bytes(tr.read_memory(tail_addr, 16))
+
+    # What actually crossed the wire, not what we meant to send.
+    on_wire = responder.last_response
+    if on_wire is None:
+        content_ok, content_detail = False, "responder never sent a reply"
+    else:
+        content_ok, content_detail = _verify_pattern(buf, on_wire)
 
     # Try a second poll to see if firmware has more (stream-style).
     second_ready = 0
@@ -238,36 +379,256 @@ def _probe_one_size(
         "send_carry": send_carry,
         "nle_after_send": nle_after_send,
         "sent_back": sent_back,
+        "wire_len": len(on_wire) if on_wire is not None else -1,
         "polls": polls,
         "ready": int(ready),
         "rx_len": rx_len,
-        "rx_first16": rx_first[:16].hex(),
-        "rx_tail16": rx_tail.hex() if rx_tail else "",
+        "poison_stop": stop,
+        "content_ok": content_ok,
+        "content_detail": content_detail,
+        "rx_first16": buf[:16].hex(),
+        "rx_tail16": buf[max(0, stop - 16):stop].hex(),
         "second_ready": int(second_ready),
         "second_len": second_len,
         "nle_final": f"${nle_final:02X}",
     }
 
 
+#: net_last_error codes that mean "this datagram was deliberately refused",
+#: as opposed to delivered-but-wrong. A refusal is a legitimate outcome for
+#: an oversized datagram and must not be scored as corruption; it is still
+#: reported, and a refusal is only accepted when NOTHING was delivered.
+REFUSAL_CODES = {0x88, 0x8A, 0x8F, 0x89}
+
+#: One UCI response block. A `poison_stop` landing exactly here under a
+#: larger announced length is #130's signature, and saying so in the failure
+#: text is the difference between "wrong" and "wrong in the known way".
+RESPONSE_BLOCK = 893
+
+
+def score_results(results: list[dict]) -> list[str]:
+    """The verdict. Pure function over the recorded rows; no device.
+
+    THIS FUNCTION IS THE WHOLE POINT OF THE 2026-09-04 REPAIR. Before it,
+    `main()` ended `_print_summary(results); return 0` and no return value
+    anywhere depended on `results`, so every row printed and the process
+    exited 0 whatever the firmware did. A probe whose verdict cannot reach
+    an exit code is a data logger, and citing one as a control — which is
+    what happened to #128 — attributes to measurement something that was
+    never measured.
+
+    Returns a list of human-readable failures; empty means clean. Rows are
+    scored on FOUR independent questions, because collapsing them is how
+    the #128 investigation lost two days:
+
+      1. did the responder actually put bytes on the wire?  (no reply is a
+         broken harness, not a firmware verdict, and must not be silent)
+      2. was the datagram delivered at all?
+      3. `poison_stop` — how far did the firmware WRITE?
+      4. `_verify_pattern` — are those bytes the bytes that were sent?
+
+    A short read is (3) < udp_recv_len with (4) clean on the prefix; a
+    corruption is (3) == udp_recv_len with (4) dirty. Only the pair tells
+    them apart.
+    """
+    failures: list[str] = []
+    for r in results:
+        size = r["size"]
+        tag = f"size={size}"
+        nle = r.get("nle_final", "$00")
+        nle_val = int(nle.lstrip("$"), 16) if isinstance(nle, str) else nle
+
+        # (1) The harness itself.
+        if not r.get("sent_back"):
+            failures.append(
+                f"{tag}: the responder never sent a reply, so this row "
+                f"measures the host, not the firmware. A trial that never "
+                f"reached the wire is not evidence of anything.")
+            continue
+        if r.get("wire_len", -1) != size:
+            failures.append(
+                f"{tag}: responder put {r.get('wire_len')} bytes on the "
+                f"wire, not {size} — the row is mislabelled at the source.")
+            continue
+
+        # (2) Delivered?
+        if not r.get("ready"):
+            if nle_val in REFUSAL_CODES and r.get("poison_stop", 0) == 0:
+                # A clean refusal: nothing delivered AND nothing written.
+                continue
+            failures.append(
+                f"{tag}: nothing delivered (udp_recv_ready=0) and this is "
+                f"not a clean refusal — net_last_error={nle}, "
+                f"poison_stop={r.get('poison_stop')}. Either the datagram "
+                f"was dropped without an error code, or it was refused "
+                f"AFTER writing {r.get('poison_stop')} bytes into the "
+                f"buffer.")
+            continue
+
+        # (3) How far did it write?
+        stop = r.get("poison_stop", 0)
+        rx_len = r.get("rx_len", 0)
+        if rx_len != size:
+            failures.append(
+                f"{tag}: delivered with udp_recv_len={rx_len}, but {size} "
+                f"bytes were sent — the length the caller will trust does "
+                f"not match the datagram.")
+        if stop != rx_len:
+            extra = ""
+            if stop == RESPONSE_BLOCK and rx_len > RESPONSE_BLOCK:
+                extra = (f" This is the #130 signature exactly: the copy "
+                         f"stopped at one response block ({RESPONSE_BLOCK}) "
+                         f"while udp_recv_len reported the announced total, "
+                         f"so the caller reads {rx_len - stop} bytes of "
+                         f"stale buffer as datagram content.")
+            failures.append(
+                f"{tag}: SHORT READ DELIVERED AS FULL LENGTH. The firmware "
+                f"wrote {stop} bytes (poison survives from there on) but "
+                f"udp_recv_ready is set with udp_recv_len={rx_len}."
+                + extra)
+
+        # (4) Are the bytes right?
+        if not r.get("content_ok"):
+            failures.append(
+                f"{tag}: content does not match what was sent — "
+                f"{r.get('content_detail')}"
+                + ("" if stop != rx_len else
+                   " The whole announced length WAS written, so this is "
+                   "corruption, not truncation."))
+    return failures
+
+
 def _print_summary(results: list[dict]) -> None:
     print()
-    print("=" * 90)
-    print(f"{'requested':>9} {'rx_len':>7} {'hdr':>7} {'polls':>6} {'sent_back':>9} "
-          f"{'ready':>5} {'2nd?':>5} {'2nd_len':>8} "
-          f"{'nle':>4}  status")
-    print("-" * 90)
+    print("=" * 110)
+    print(f"{'requested':>9} {'wire':>6} {'rx_len':>7} {'stop':>6} {'hdr':>7} "
+          f"{'polls':>6} {'sent':>5} {'ready':>5} {'2nd?':>5} {'2nd_len':>8} "
+          f"{'nle':>4} {'content':>8}  status")
+    print("-" * 110)
     for r in results:
-        first = r["rx_first16"]
-        tail = r["rx_tail16"]
         print(
-            f"{r['size']:>9} {r['rx_len']:>7} {('$%04X' % r['rx_hdr']):>7} {r['polls']:>6} {str(r['sent_back']):>9} "
+            f"{r['size']:>9} {r.get('wire_len', -1):>6} {r['rx_len']:>7} "
+            f"{r.get('poison_stop', -1):>6} {('$%04X' % r['rx_hdr']):>7} "
+            f"{r['polls']:>6} {str(r['sent_back']):>5} "
             f"{r['ready']:>5} {r['second_ready']:>5} {r['second_len']:>8} "
-            f"{r['nle_final']:>4}  {r.get('status','')}"
+            f"{r['nle_final']:>4} {('OK' if r.get('content_ok') else 'BAD'):>8}"
+            f"  {r.get('status','')}"
         )
-    print("=" * 90)
+        if not r.get("content_ok"):
+            print(f"{'':>9}   -> {r.get('content_detail','')}")
+    print("=" * 110)
+
+
+def self_check() -> int:
+    """ALARM PROOF: fabricate rows and require `score_results` to flag them.
+
+    The previous version of this file would have passed every hardware run
+    ever put through it, because it had no assertion at all. That is not a
+    thing you can find by reading a green log — you find it by breaking the
+    subject on purpose and checking the alarm sounds. So this runs the REAL
+    scorer over rows shaped exactly like the four outcomes that matter, and
+    requires each to be reported.
+
+    No device, no responder, no build. Milliseconds.
+    """
+    print("=== self-check: does the scorer fire? ===")
+    rng = random.Random(0xC0FFEE)
+    poison = poison_pattern(1500)
+    ok_n = 1109
+    reply = _payload_for(rng, ok_n, poison)
+
+    def row(**kw) -> dict:
+        base = dict(size=ok_n, wire_len=ok_n, sent_back=True, ready=1,
+                    rx_len=ok_n, poison_stop=ok_n, content_ok=True,
+                    content_detail="OK", nle_final="$00", rx_hdr=ok_n,
+                    polls=1, second_ready=0, second_len=0, status="",
+                    rx_first16="", rx_tail16="", send_carry=0,
+                    nle_after_send=0)
+        base.update(kw)
+        return base
+
+    # The CONTROL. A clean row must score clean, or every case below is
+    # satisfied by a scorer that simply fails everything.
+    clean = score_results([row()])
+    if clean:
+        print(f"FAIL control: a clean row was reported as {clean!r}. A "
+              "scorer that fails everything discriminates nothing.")
+        return 1
+    print("  PASS  control: a clean, fully-delivered row scores clean")
+
+    # The buffer the firmware would hold if the copy stopped at one block.
+    truncated = bytearray(poison)
+    truncated[:RESPONSE_BLOCK] = reply[:RESPONSE_BLOCK]
+    got_stop = poison_stop(bytes(truncated), poison)
+    if got_stop != RESPONSE_BLOCK:
+        print(f"FAIL: poison_stop measured {got_stop} on a buffer written "
+              f"to exactly {RESPONSE_BLOCK} — the measurement this file "
+              f"rests on is wrong before any scoring happens.")
+        return 1
+    print(f"  PASS  poison_stop measures a {RESPONSE_BLOCK}-byte write "
+          f"exactly")
+
+    # One byte corrupted mid-buffer, everything else written.
+    corrupt_at = 947
+    corrupted = bytearray(reply)
+    corrupted[corrupt_at] ^= 0xFF
+    bad_content = _verify_pattern(bytes(corrupted), reply)
+
+    cases = [
+        ("nothing crossed the wire",
+         row(sent_back=False), "never sent a reply"),
+        ("delivered nothing, no error code",
+         row(ready=0, rx_len=0, poison_stop=0, nle_final="$00"),
+         "not a clean refusal"),
+        ("delivered nothing but wrote 893 bytes first",
+         row(ready=0, rx_len=0, poison_stop=RESPONSE_BLOCK,
+             nle_final="$8F"),
+         "AFTER writing 893"),
+        ("#130: short read delivered as full length",
+         row(poison_stop=RESPONSE_BLOCK), "#130 signature"),
+        ("content corrupt at a known offset",
+         row(content_ok=bad_content[0], content_detail=bad_content[1]),
+         f"mismatch at byte {corrupt_at}"),
+        ("responder sent a different length than the row claims",
+         row(wire_len=ok_n - 1), "not "),
+    ]
+    failed = 0
+    for name, r, want in cases:
+        got = score_results([r])
+        if not got:
+            print(f"  FAIL  {name}: scorer reported NOTHING")
+            failed += 1
+        elif not any(want in g for g in got):
+            print(f"  FAIL  {name}: reported {got!r}, which does not name "
+                  f"{want!r}")
+            failed += 1
+        else:
+            print(f"  PASS  {name}")
+
+    # A clean REFUSAL is a legitimate outcome and must NOT be scored as a
+    # failure, or the scorer cries wolf on every oversized datagram.
+    refusal = score_results([row(ready=0, rx_len=0, poison_stop=0,
+                                nle_final="$8A")])
+    if refusal:
+        print(f"  FAIL  a clean refusal ($8A, nothing written, nothing "
+              f"delivered) was scored as {refusal!r} — this scorer would "
+              f"cry wolf on every legitimately-rejected datagram")
+        failed += 1
+    else:
+        print("  PASS  a clean refusal is reported, not failed")
+
+    if failed:
+        print(f"\n{failed} alarm(s) did not fire. Do not trust a run of "
+              f"this tool until they do.")
+        return 1
+    print("\nThe scorer fires on every outcome it claims to detect, and "
+          "stays quiet on the two that are legitimate.")
+    return 0
 
 
 def main() -> int:
+    if "--self-check" in sys.argv:
+        return self_check()
     # Standing directive: log the seed once, reproducible via TEST_SEED.
     print(f"kick payload: {KICK_LEN} B, seed {KICK_SEED} "
           f"(reproduce with TEST_SEED={KICK_SEED})", flush=True)
@@ -375,10 +736,24 @@ def main() -> int:
         _run_step(tr, step_id=STEP_LISTEN, target=L["net_udp_listen"],
                   reg_a=responder.port & 0xFF, reg_x=responder.port >> 8)
 
-        # Iterate sizes — each call kicks the responder, polls, records.
+        # The buffer's real capacity, read structurally from the labels
+        # (udp_recv_len is the field immediately after udp_recv_buf) rather
+        # than assumed to be 1500.
+        cap = _recv_buf_capacity(L)
+        poison = poison_pattern(cap)
+        rng = random.Random(KICK_SEED)
+        log.info("poison: %d bytes, P[i]=(i+$%02X)%%251, capacity read "
+                 "structurally from labels", cap, POISON_SEED)
         for size in SIZES:
+            if size > cap:
+                log.warning("skipping size=%d: larger than the %d-byte "
+                            "udp_recv_buf, so the poison cannot cover it "
+                            "and poison_stop would be unmeasurable",
+                            size, cap)
+                continue
             log.info("--- probing size=%d ---", size)
-            results.append(_probe_one_size(tr, L, responder, size, True))
+            results.append(_probe_one_size(tr, L, responder, size, True,
+                                           rng, poison))
 
     finally:
         try: client.stream_debug_stop()
@@ -402,6 +777,21 @@ def main() -> int:
         lock.release()
 
     _print_summary(results)
+
+    if not results:
+        print("\nFAIL: no size was probed at all. An empty run is not a "
+              "clean run.")
+        return 1
+    failures = score_results(results)
+    if failures:
+        print(f"\nFAIL: {len(failures)} problem(s) across {len(results)} "
+              f"size(s):")
+        for f in failures:
+            print(f"  - {f}")
+        return 1
+    print(f"\nPASS: all {len(results)} size(s) delivered the exact bytes "
+          f"that crossed the wire, with poison_stop == udp_recv_len on "
+          f"every one.")
     return 0
 
 

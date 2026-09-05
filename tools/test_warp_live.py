@@ -573,25 +573,51 @@ class BackendMismatch(RuntimeError):
     """labels.txt describes a different backend than --backend asked for."""
 
 
+#: Labels only the ip65 backend links.
+IP65_MARKERS = ("ip65_blob_start", "ip65_blob_end", "ip65_listening")
+
+#: Labels only the UCI adapter links. `uci_wait_idle` and `uci_socket_open`
+#: are exported unconditionally by src/net/uci/uci_cmd.s and
+#: src/net/uci/net.s, so they are present in EVERY uci build;
+#: `uci_send_part` exists only under UCI_CHUNKED_WRITE=1 and so cannot be
+#: the discriminator on its own.
+#:
+#: `net_last_error` IS DELIBERATELY ABSENT FROM THIS LIST. It used to be
+#: here, and that was issue #131: since #120 the ip65 backend exports its
+#: own error channel too (src/net/ip65/net.s:112), so a real ip65 build
+#: carries BOTH markers and this classifier refused every single one of
+#: them. A discriminator has to be a label the other backend cannot have.
+UCI_MARKERS = ("uci_socket_open", "uci_wait_idle", "uci_send_part",
+               "uci_status_buf")
+
+
 def detect_backend(L) -> str:
     """'ip65' or 'uci' from label PRESENCE only (any Mapping[str, int]).
 
-    ip65 <=> the RR-Net blob is linked (`ip65_blob_start`) and neither
-    UCI-adapter label is: `uci_send_part` (chunked send, UCI_CHUNKED_WRITE=1
-    only) or `net_last_error` (the UCI adapter's error byte, every uci
-    build). uci <=> exactly the reverse. Anything else raises ValueError so
-    a half-matching labels file is refused rather than guessed.
+    ip65 <=> at least one IP65_MARKER is linked and no UCI_MARKER is.
+    uci <=> exactly the reverse. Anything else raises ValueError so a
+    half-matching labels file is refused rather than guessed.
+
+    ISSUE #131. The previous version keyed on `net_last_error` as a
+    UCI-only marker. #120 gave ip65 an error channel of its own, so from
+    that commit every ip65 build matched BOTH sides and this function
+    raised on all of them — `--backend ip65` was unusable. It went
+    unnoticed because the only witnesses were synthetic label dicts in
+    tools/test_live_tool_seams.py that hard-coded the pre-#120 split, and
+    one of them asserted that the real post-#120 shape MUST raise. Those
+    fixtures are now cross-checked against a BUILT labels.txt, which is
+    the only witness that tracks what the backends actually export.
     """
-    has_blob = "ip65_blob_start" in L
-    has_uci = ("uci_send_part" in L) or ("net_last_error" in L)
-    if has_blob and not has_uci:
+    found_ip65 = [m for m in IP65_MARKERS if m in L]
+    found_uci = [m for m in UCI_MARKERS if m in L]
+    if found_ip65 and not found_uci:
         return "ip65"
-    if has_uci and not has_blob:
+    if found_uci and not found_ip65:
         return "uci"
     raise ValueError(
-        f"labels match neither backend: ip65_blob_start={has_blob} "
-        f"uci_send_part={'uci_send_part' in L} "
-        f"net_last_error={'net_last_error' in L}")
+        f"labels match neither backend: ip65 markers {found_ip65 or 'none'}, "
+        f"uci markers {found_uci or 'none'} (net_last_error is present in "
+        f"BOTH backends since #120 and is not a discriminator)")
 
 
 def load_labels_for_backend(labels_path: Path, backend: str) -> dict:
@@ -611,10 +637,10 @@ def load_labels_for_backend(labels_path: Path, backend: str) -> dict:
     if found != backend:
         raise BackendMismatch(
             f"requested --backend {backend} but {labels_path} is a {found} "
-            f"build (ip65_blob_start={'ip65_blob_start' in L}, "
-            f"uci_send_part={'uci_send_part' in L}, "
-            f"net_last_error={'net_last_error' in L}) — rebuild with "
-            f"BACKEND={backend} or pass --backend {found}")
+            f"build (ip65 markers "
+            f"{[m for m in IP65_MARKERS if m in L] or 'none'}, uci markers "
+            f"{[m for m in UCI_MARKERS if m in L] or 'none'}) — rebuild "
+            f"with BACKEND={backend} or pass --backend {found}")
     return L
 
 
