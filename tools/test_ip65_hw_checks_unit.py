@@ -66,8 +66,23 @@ import tempfile
 import time
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# --self-check copies this file into a tempdir, so `__file__`'s parent's
+# parent is that tempdir's parent and NOT the repo. Two checks read real
+# tree files (src/net/ip65/net.s, build/labels.txt); inferring the root from
+# the file's own location made them SKIP in every mutant run including the
+# baseline -- 184 passed / 0 failed / 2 skipped, with a headline that still
+# read "0 failed". A silent skip inside the harness that certifies the other
+# checks is worth more than one in an ordinary test, so the root is now
+# passed in explicitly, the same way the module under test already is.
+PROJECT_ROOT = Path(os.environ.get(
+    "IP65_PROJECT_ROOT", Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(PROJECT_ROOT / "tools"))
+
+#: Set by _run_against in the mutation child. A skip is the right answer for
+#: a developer running this standalone without a built tree; inside a
+#: mutation run it narrows the very denominator the run is measuring, so
+#: there it is a failure instead.
+IN_MUTATION_RUN = os.environ.get("IP65_MUTATION_CHILD") == "1"
 
 # The module under test is loaded BY PATH, not by name. --self-check re-runs
 # this suite against a mutated copy in a temporary directory, and a plain
@@ -345,6 +360,15 @@ class Result:
             print(f"  FAIL  {name}\n        {detail}")
 
     def skip(self, name: str, why: str) -> None:
+        """A check that could not apply, still counted in the denominator.
+
+        Refuses to skip inside a mutation run: see IN_MUTATION_RUN.
+        """
+        if IN_MUTATION_RUN:
+            self.check(False, name,
+                       f"cannot skip inside a mutation run ({why}); the "
+                       "denominator the run is measuring must be whole")
+            return
         self.names.append(name)
         self.passed += 1
         self.skipped += 1
@@ -1739,6 +1763,18 @@ def case13_bench_health(rng: random.Random, res: Result) -> None:
 #: This is the answer to "the cases pass, but would they ever fail?" -- the
 #: question nobody asked of the raw-path tool that returned 0 unconditionally
 #: for two days.
+#:
+#: AND ITS LIMIT, which is worth knowing before trusting a score here.
+#: Mutation testing proves a check discriminates SOMETHING. It cannot prove
+#: it discriminates the RIGHT thing. This suite has the case on record: the
+#: mutant that replaced check_net_counters' drop_counter_proven expression
+#: with a bare `True` passed for weeks while the expression itself was
+#: wrong -- `> 0` where `> 1` was meant. The two differ only when
+#: send_attempts == 1, the healthy warm-cache case, and no mutant had
+#: thought to vary it. A mutant now pins that boundary
+#: (counters/proven-at-greater-than-zero), but the general lesson stands: a
+#: mutant kills a defect someone imagined. Reading the tree is what finds
+#: the ones nobody did.
 MUTANTS: dict[str, tuple[str, str]] = {
     "leak/compares-at-offset-0": (
         "at = hay.find(pat)\n        while at >= 0:",
@@ -1887,20 +1923,30 @@ def _run_against(module_src: str, seed: int) -> tuple[int, list[str]]:
             [sys.executable, str(d / "suite.py"), "--seed", str(seed)],
             capture_output=True, text=True, timeout=120,
             env={**os.environ,
-                 "IP65_CHECKS_MODULE": str(d / "ip65_hw_checks.py")})
-        return proc.returncode, re.findall(r"^  FAIL  (\S+)", proc.stdout, re.M)
+                 "IP65_CHECKS_MODULE": str(d / "ip65_hw_checks.py"),
+                 "IP65_PROJECT_ROOT": str(PROJECT_ROOT),
+                 "IP65_MUTATION_CHILD": "1"})
+        skips = re.findall(r"^  SKIP  (\S+)", proc.stdout, re.M)
+        return (proc.returncode,
+                re.findall(r"^  FAIL  (\S+)", proc.stdout, re.M), skips)
 
 
 def self_check(seed: int) -> int:
     src = _CHECKS_PATH.read_text()
     print(f"\n[--self-check] {len(MUTANTS)} deliberate defects in "
           f"{_CHECKS_PATH.name}, each must turn this suite red")
-    rc, fails = _run_against(src, seed)
+    rc, fails, skips = _run_against(src, seed)
     if rc != 0:
         print(f"  FATAL  the unmutated baseline is already red ({fails}); "
               "no mutant result would mean anything")
         return 2
-    print("  baseline (unmutated) is green")
+    if skips:
+        print(f"  FATAL  the baseline skipped {skips} inside the mutation "
+              "harness. Every mutant below would be measured against a "
+              "denominator missing those checks, and the headline would still "
+              "read '0 failed'")
+        return 2
+    print("  baseline (unmutated) is green, with no skipped checks")
     survived, missing = [], []
     for name, (old, new) in MUTANTS.items():
         if old not in src:
@@ -1909,7 +1955,12 @@ def self_check(seed: int) -> int:
                   "below would be a lie")
             missing.append(name)
             continue
-        rc, fails = _run_against(src.replace(old, new, 1), seed)
+        rc, fails, skips = _run_against(src.replace(old, new, 1), seed)
+        if skips:
+            print(f"  FAIL  {name}\n        the mutant run skipped {skips}; "
+                  "its verdict was reached with checks missing")
+            survived.append(name)
+            continue
         if rc == 0:
             print(f"  FAIL  {name}\n        SURVIVED — this suite cannot see "
                   "that defect")
