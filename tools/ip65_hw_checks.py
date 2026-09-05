@@ -1675,6 +1675,8 @@ def provenance(paths: Sequence[Path | str], *, repo: Path | str | None = None) -
         "commit": commit,
         "dirty": None if porcelain is None else bool(porcelain.strip()),
         "dirty_files": [],
+        "untracked": [],
+        "loaded_untracked": [],
         "loaded": [],
         "loaded_outside_repo": [],
         "loaded_modified": [],
@@ -1683,14 +1685,25 @@ def provenance(paths: Sequence[Path | str], *, repo: Path | str | None = None) -
                 "cannot be tied to a commit",
     }
     changed: set[str] = set()
+    untracked: set[str] = set()
     if porcelain:
         for line in porcelain.splitlines():
             name = line[3:].strip()
             if "->" in name:                      # a rename: take the target
                 name = name.split("->")[-1].strip()
-            if name:
-                changed.add(name)
+            if not name:
+                continue
+            # TRACKED CHANGES AND UNTRACKED FILES ARE SEPARATED because they
+            # are different facts and only one of them usually means
+            # anything. Editor caches and tool config sit untracked in this
+            # tree permanently, so a marker that reads DIRTY on every single
+            # run is a marker a reader learns to skip -- and then it is not
+            # there for the run that matters. An untracked file is still
+            # reported, and is a hard warning when it is one of OUR INPUTS:
+            # a loaded file that is untracked is not in the commit at all.
+            (untracked if line.startswith("??") else changed).add(name)
         out["dirty_files"] = sorted(changed)
+        out["untracked"] = sorted(untracked)
     for p in paths:
         p = Path(p)
         try:
@@ -1716,6 +1729,9 @@ def provenance(paths: Sequence[Path | str], *, repo: Path | str | None = None) -
             out["loaded_outside_repo"].append(str(p))
         if rel is not None and rel in changed:
             out["loaded_modified"].append(rel)
+        if rel is not None and any(rel == u or rel.startswith(u.rstrip("/") + "/")
+                                   for u in untracked):
+            out["loaded_untracked"].append(rel)
         out["loaded"].append(entry)
     return out
 
@@ -1729,10 +1745,17 @@ def format_provenance(prov: dict) -> list[str]:
     """
     lines: list[str] = []
     if prov.get("commit"):
-        state = ("CLEAN" if prov.get("dirty") is False else
-                 f"DIRTY ({len(prov.get('dirty_files') or [])} paths modified "
-                 "in the worktree)" if prov.get("dirty") else
-                 "worktree state UNKNOWN")
+        tracked = len(prov.get("dirty_files") or [])
+        untracked_n = len(prov.get("untracked") or [])
+        if prov.get("dirty") is None:
+            state = "worktree state UNKNOWN"
+        elif tracked:
+            state = (f"DIRTY ({tracked} tracked paths modified"
+                     + (f", {untracked_n} untracked)" if untracked_n else ")"))
+        elif untracked_n:
+            state = f"tracked tree CLEAN ({untracked_n} untracked paths)"
+        else:
+            state = "CLEAN"
         lines.append(f"provenance: {prov['commit']} {state}   repo={prov.get('repo')}")
     else:
         lines.append(f"provenance: NO COMMIT -- {prov.get('note')}")
@@ -1749,4 +1772,7 @@ def format_provenance(prov: dict) -> list[str]:
     for rel in prov.get("loaded_modified", []):
         lines.append(f"  !! {rel} is MODIFIED in the worktree -- this run is NOT "
                      f"of {prov.get('commit')}")
+    for rel in prov.get("loaded_untracked", []):
+        lines.append(f"  !! {rel} is UNTRACKED -- it is not in "
+                     f"{prov.get('commit')} at all")
     return lines

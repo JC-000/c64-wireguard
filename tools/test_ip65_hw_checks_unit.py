@@ -109,7 +109,7 @@ _spec.loader.exec_module(C)
 #: whichever branch it takes, so two runs are comparable and a case that
 #: silently stopped running is a hard error rather than a smaller
 #: denominator nobody notices. Update deliberately when adding a check.
-EXPECTED_CHECKS = 206
+EXPECTED_CHECKS = 210
 
 # Disjoint alphabets: an echo of a request can never satisfy a reply check.
 REQ_ALPHABET = string.ascii_uppercase + string.digits
@@ -755,6 +755,39 @@ def case18_provenance(rng: random.Random, res: Result) -> None:
                   "state must not be separable, or a reader takes in the commit "
                   "and misses the state — which is the failure this stamp exists "
                   "to prevent")
+
+        # Untracked files must not read as tracked modifications. Editor
+        # caches and tool config sit untracked in the real tree permanently,
+        # so a marker that says DIRTY on every run is one a reader learns to
+        # skip — and then it is not there for the run that matters.
+        subprocess.run(("git", "-C", str(repo), "checkout", "--", "tracked.txt"),
+                       check=True, capture_output=True)
+        stray = repo / "stray.txt"
+        stray.write_bytes(rand_bytes(rng, 16))
+        pv = C.provenance([tracked], repo=repo)
+        res.check(pv.get("dirty_files") == [] and pv.get("untracked") == ["stray.txt"],
+                  "case18f/untracked-is-not-a-tracked-change",
+                  f"dirty_files={pv.get('dirty_files')!r} "
+                  f"untracked={pv.get('untracked')!r} for a tree whose only "
+                  "difference is one untracked file")
+        head = C.format_provenance(pv)[0]
+        res.check("CLEAN" in head and "untracked" in head,
+                  "case18f/headline-separates-them",
+                  f"headline is {head!r}; it must say the TRACKED tree is clean "
+                  "while still reporting the untracked files, or the marker "
+                  "becomes noise and stops being read")
+
+        # A loaded file that is untracked is not in the commit at all, which
+        # is a stronger statement than 'modified' and gets its own warning.
+        pv = C.provenance([stray], repo=repo)
+        res.check(pv.get("loaded_untracked") == ["stray.txt"],
+                  "case18g/untracked-input-is-flagged",
+                  f"loaded_untracked={pv.get('loaded_untracked')!r} for an input "
+                  "that is not in the commit at all")
+        res.check(any("UNTRACKED" in ln for ln in C.format_provenance(pv)),
+                  "case18g/untracked-warning-reaches-the-output",
+                  "the rendered stamp does not say the input is untracked")
+        stray.unlink()
 
         # A frozen copy run against a PROJECT_ROOT pointing at the repo is a
         # legitimate configuration and unreadable after the fact unless said.
@@ -2023,6 +2056,12 @@ MUTANTS: dict[str, tuple[str, str]] = {
     "provenance/commit-and-state-split": (
         'lines.append(f"provenance: {prov[\'commit\']} {state}   repo={prov.get(\'repo\')}")',
         'lines.append(f"provenance: {prov[\'commit\']}")'),
+    "provenance/untracked-counted-as-a-tracked-change": (
+        '            (untracked if line.startswith("??") else changed).add(name)',
+        '            changed.add(name)'),
+    "provenance/untracked-input-not-flagged": (
+        '        if rel is not None and any(rel == u or rel.startswith(u.rstrip("/") + "/")',
+        '        if False and any(rel == u or rel.startswith(u.rstrip("/") + "/")'),
     "provenance/unreadable-path-dropped": (
         '            out["loaded"].append({"path": str(p), "error": str(exc)})',
         '            pass'),
