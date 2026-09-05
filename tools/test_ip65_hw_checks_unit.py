@@ -109,7 +109,7 @@ _spec.loader.exec_module(C)
 #: whichever branch it takes, so two runs are comparable and a case that
 #: silently stopped running is a hard error rather than a smaller
 #: denominator nobody notices. Update deliberately when adding a check.
-EXPECTED_CHECKS = 195
+EXPECTED_CHECKS = 206
 
 # Disjoint alphabets: an echo of a request can never satisfy a reply check.
 REQ_ALPHABET = string.ascii_uppercase + string.digits
@@ -678,6 +678,116 @@ def case17_send_attempts_semantics(rng: random.Random, res: Result) -> None:
     v = C.check_net_counters(4, 1)
     res.check(not v.ok, "case17d/drops-still-fail",
               "four dropped datagrams passed because the pump was not proven")
+
+
+# ===========================================================================
+# Case 18 — the provenance stamp, which goes into every report
+# ===========================================================================
+def _mkrepo(rng: random.Random) -> Path:
+    """A throwaway git repo with one committed file. Never our tree."""
+    d = Path(tempfile.mkdtemp(prefix="ip65prov-"))
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    # core.hooksPath is set GLOBALLY on this machine, so a throwaway repo
+    # inherits the user's pre-commit hooks and the commit below fails with a
+    # CalledProcessError that has nothing to do with what is under test.
+    # Point it at a directory that does not exist, and commit --no-verify.
+    for args in (("init", "-q"), ("config", "user.email", "t@t"),
+                 ("config", "user.name", "t"),
+                 ("config", "core.hooksPath", str(d / "no-such-hooks")),
+                 ("config", "commit.gpgsign", "false")):
+        subprocess.run(("git", "-C", str(d)) + args, check=True,
+                       capture_output=True, env=env)
+    f = d / "tracked.txt"
+    f.write_bytes(rand_bytes(rng, 64))
+    subprocess.run(("git", "-C", str(d), "add", "tracked.txt"), check=True,
+                   capture_output=True, env=env)
+    subprocess.run(("git", "-C", str(d), "commit", "-q", "--no-verify", "-m", "x"),
+                   check=True, capture_output=True, env=env)
+    return d
+
+
+def case18_provenance(rng: random.Random, res: Result) -> None:
+    """The stamp is read by people deciding whether a result is real.
+
+    It is therefore code whose failure mode is a confident wrong statement
+    about which state of the work produced an output -- the same class as
+    everything else in this file, one level out. Today four exchanges
+    turned on exactly that.
+    """
+    print("\n[case 18] the provenance stamp")
+    repo = _mkrepo(rng)
+    tracked = repo / "tracked.txt"
+    try:
+        pv = C.provenance([tracked], repo=repo)
+        res.check(bool(pv.get("commit")) and pv.get("dirty") is False,
+                  "case18a/clean-repo",
+                  f"commit={pv.get('commit')!r} dirty={pv.get('dirty')!r} for a "
+                  "freshly committed tree")
+        res.check(pv["loaded"][0]["sha256"]
+                  == hashlib.sha256(tracked.read_bytes()).hexdigest(),
+                  "case18a/hash-is-of-the-file-loaded",
+                  "the stamped hash is not the hash of the file's bytes")
+
+        # THE ONE THAT MATTERS. Modify the very file being loaded: the run is
+        # then not a run of the commit it names, and the stamp has to say so
+        # rather than print a clean-looking commit over changed inputs.
+        tracked.write_bytes(rand_bytes(rng, 80))
+        pv = C.provenance([tracked], repo=repo)
+        res.check(pv.get("dirty") is True, "case18b/dirty-worktree-detected",
+                  "a modified tracked file left the worktree reading clean")
+        res.check(pv.get("loaded_modified") == ["tracked.txt"],
+                  "case18b/loaded-file-named-as-modified",
+                  f"loaded_modified={pv.get('loaded_modified')!r}, "
+                  f"dirty_files={pv.get('dirty_files')!r}. The stamp knows the "
+                  "worktree is dirty but not that OUR OWN INPUT is one of the "
+                  "dirty files, which is the whole point: a run over a modified "
+                  "input is not a run of the commit it prints, and on a tree "
+                  "several lanes are writing to it would attribute their edits "
+                  "to this freeze")
+        lines = C.format_provenance(pv)
+        res.check(any("MODIFIED" in ln for ln in lines),
+                  "case18b/warning-reaches-the-output",
+                  f"the rendered stamp does not carry the warning: {lines}")
+        res.check("DIRTY" in lines[0] and pv["commit"] in lines[0],
+                  "case18b/commit-and-state-on-one-line",
+                  f"first line is {lines[0]!r}; the commit and the clean/dirty "
+                  "state must not be separable, or a reader takes in the commit "
+                  "and misses the state — which is the failure this stamp exists "
+                  "to prevent")
+
+        # A frozen copy run against a PROJECT_ROOT pointing at the repo is a
+        # legitimate configuration and unreadable after the fact unless said.
+        outside = Path(tempfile.mkdtemp(prefix="ip65out-")) / "copy.txt"
+        outside.write_bytes(rand_bytes(rng, 32))
+        pv = C.provenance([outside], repo=repo)
+        res.check(pv.get("loaded_outside_repo") == [str(outside)],
+                  "case18c/outside-the-repo-is-flagged",
+                  f"loaded_outside_repo={pv.get('loaded_outside_repo')!r} for a "
+                  "file loaded from another directory entirely")
+        res.check(any("OUTSIDE" in ln for ln in C.format_provenance(pv)),
+                  "case18c/outside-warning-reaches-the-output",
+                  "the rendered stamp does not say the file came from elsewhere")
+
+        # Outside a repo the stamp must say so, not invent a commit.
+        plain = Path(tempfile.mkdtemp(prefix="ip65norepo-"))
+        (plain / "f.txt").write_bytes(b"x")
+        pv = C.provenance([plain / "f.txt"], repo=plain)
+        res.check(pv.get("commit") is None and pv.get("note"),
+                  "case18d/not-a-repo-degrades",
+                  f"commit={pv.get('commit')!r} outside a git repository")
+        res.check(C.format_provenance(pv) and "NO COMMIT" in
+                  C.format_provenance(pv)[0],
+                  "case18d/not-a-repo-renders",
+                  "the stamp did not render outside a repo")
+
+        # A path that does not exist must be reported, not skipped silently.
+        pv = C.provenance([repo / "nope.txt"], repo=repo)
+        res.check(len(pv["loaded"]) == 1 and "error" in pv["loaded"][0],
+                  "case18e/unreadable-path-reported",
+                  f"a missing input vanished from the stamp: {pv['loaded']}")
+    finally:
+        shutil.rmtree(repo, ignore_errors=True)
 
 
 # ===========================================================================
@@ -1896,6 +2006,26 @@ MUTANTS: dict[str, tuple[str, str]] = {
         "    if replies < 1:", "    if False:"),
     "symbols/missing-symbol-tolerated": (
         "    if missing:", "    if False:"),
+    # The provenance stamp is code that goes into a report a human reads to
+    # decide whether a hardware result is real, so its failure mode is a
+    # confident wrong statement about which state of the work produced the
+    # output. Same class as everything else here, one level out.
+    "provenance/dirty-input-not-named": (
+        "        if rel is not None and rel in changed:", "        if False:"),
+    "provenance/worktree-dirt-not-reported": (
+        '        "dirty": None if porcelain is None else bool(porcelain.strip()),',
+        '        "dirty": False,'),
+    "provenance/git-output-left-stripped": (
+        '    return r.stdout.rstrip("\\n") if r.returncode == 0 else None',
+        '    return r.stdout.strip() if r.returncode == 0 else None'),
+    "provenance/outside-repo-not-flagged": (
+        "        if toplevel and rel is None:", "        if False:"),
+    "provenance/commit-and-state-split": (
+        'lines.append(f"provenance: {prov[\'commit\']} {state}   repo={prov.get(\'repo\')}")',
+        'lines.append(f"provenance: {prov[\'commit\']}")'),
+    "provenance/unreadable-path-dropped": (
+        '            out["loaded"].append({"path": str(p), "error": str(exc)})',
+        '            pass'),
     "symbols/empty-request-accepted": (
         "    if not names:", "    if False and not names:"),
     # The two blockers found after the first merge attempt. Neither may
@@ -1992,13 +2122,6 @@ def self_check(seed: int) -> int:
 
 
 # ===========================================================================
-def stamp(path: Path) -> str:
-    data = path.read_bytes()
-    return (f"{path} sha256={hashlib.sha256(data).hexdigest()[:16]} "
-            f"mtime={time.strftime('%Y-%m-%dT%H:%M:%S', time.localtime(path.stat().st_mtime))} "
-            f"bytes={len(data)}")
-
-
 def main() -> int:
     global VERBOSE
     ap = argparse.ArgumentParser()
@@ -2015,8 +2138,9 @@ def main() -> int:
     seed = args.seed if args.seed is not None else \
         int(os.environ.get("TEST_SEED", random.randrange(1 << 30)))
     print(f"seed={seed}   (reproduce with --seed {seed})")
-    print(f"loaded {stamp(_CHECKS_PATH)}")
-    print(f"suite  {stamp(Path(__file__).resolve())}")
+    for line in C.format_provenance(C.provenance(
+            [_CHECKS_PATH, Path(__file__).resolve()], repo=PROJECT_ROOT)):
+        print(line)
     rng = random.Random(seed)
 
     if args.self_check:
@@ -2039,6 +2163,7 @@ def main() -> int:
         "13": lambda: case13_bench_health(rng, res),
         "14": lambda: case14_empty_corpus(rng, res),
         "17": lambda: case17_send_attempts_semantics(rng, res),
+        "18": lambda: case18_provenance(rng, res),
         "15": lambda: case15_shifted_petscii(rng, res),
         "16": lambda: case16_cs8900a(rng, res),
     }

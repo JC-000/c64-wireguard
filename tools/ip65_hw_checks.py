@@ -44,8 +44,12 @@ TRAPS THAT ARE ALREADY IN THE TREE
 """
 from __future__ import annotations
 
+import hashlib
 import struct
+import subprocess
+import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Iterable, Sequence
 
 # ---------------------------------------------------------------------------
@@ -1619,3 +1623,130 @@ def resolve_symbols(labels: dict, names: Sequence[str] = DIAG_SYMBOLS) -> Verdic
                        "cartridge from a DHCP failure", ev)
     return Verdict(True, f"resolved {len(found)} symbols from the build's labels: "
                          + ", ".join(f"{n}=${a:04X}" for n, a in found.items()), ev)
+
+
+# ===========================================================================
+# Provenance — what state of the work produced this output
+# ===========================================================================
+def _git(repo: Path, *args: str) -> str | None:
+    """A git command, or None if git or the repo is not there."""
+    try:
+        r = subprocess.run(("git", "-C", str(repo)) + args,
+                           capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    # rstrip("\n") and NOT strip(): `git status --porcelain` encodes the
+    # status in the first two COLUMNS, so " M tools/x.py" begins with a
+    # space, and a leading strip() eats it -- the path then parses one
+    # character short ("ools/x.py"), matches nothing, and the stamp reports
+    # a dirty worktree while failing to notice that one of the dirty files
+    # is its own input. Measured: dirty_files=['racked.txt'].
+    return r.stdout.rstrip("\n") if r.returncode == 0 else None
+
+
+def provenance(paths: Sequence[Path | str], *, repo: Path | str | None = None) -> dict:
+    """Which COMMIT, and whether the worktree was dirty, produced this run.
+
+    A file hash identifies that FILE. It does not identify the state of the
+    work, and today four separate exchanges turned on that difference: one
+    of two stamped files was unchanged across three commits, so quoting its
+    hash back looked like a statement about the tree and was not.
+
+    THE DIRTY MARKER MATTERS MORE THAN THE COMMIT. Three of those four were
+    a clean-versus-dirty question rather than a which-commit question, and
+    on a tree several lanes are writing to, a run over a dirty worktree
+    silently attributes someone else's edits to your freeze. So `dirty` is
+    reported for the whole worktree AND the loaded files are checked
+    individually: a run whose own inputs are modified is not a run of the
+    commit it names, and says so.
+
+    Loaded paths are reported with their hashes whether or not they are
+    inside the repo. Running a frozen copy out of a scratchpad against a
+    PROJECT_ROOT pointing at the repo is a legitimate configuration and an
+    extremely confusing one to read afterwards, so it is called out rather
+    than left to be inferred.
+    """
+    root = Path(repo) if repo is not None else Path.cwd()
+    commit = _git(root, "rev-parse", "--short", "HEAD")
+    toplevel = _git(root, "rev-parse", "--show-toplevel")
+    porcelain = _git(root, "status", "--porcelain") if commit else None
+    out: dict = {
+        "repo": toplevel,
+        "commit": commit,
+        "dirty": None if porcelain is None else bool(porcelain.strip()),
+        "dirty_files": [],
+        "loaded": [],
+        "loaded_outside_repo": [],
+        "loaded_modified": [],
+        "note": "" if commit else
+                "not a git repository, or git unavailable -- this output "
+                "cannot be tied to a commit",
+    }
+    changed: set[str] = set()
+    if porcelain:
+        for line in porcelain.splitlines():
+            name = line[3:].strip()
+            if "->" in name:                      # a rename: take the target
+                name = name.split("->")[-1].strip()
+            if name:
+                changed.add(name)
+        out["dirty_files"] = sorted(changed)
+    for p in paths:
+        p = Path(p)
+        try:
+            data = p.read_bytes()
+            entry = {
+                "path": str(p),
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "bytes": len(data),
+                "mtime": time.strftime("%Y-%m-%dT%H:%M:%S",
+                                       time.localtime(p.stat().st_mtime)),
+            }
+        except OSError as exc:
+            out["loaded"].append({"path": str(p), "error": str(exc)})
+            continue
+        rel = None
+        if toplevel:
+            try:
+                rel = str(p.resolve().relative_to(Path(toplevel).resolve()))
+            except ValueError:
+                rel = None
+        entry["repo_relative"] = rel
+        if toplevel and rel is None:
+            out["loaded_outside_repo"].append(str(p))
+        if rel is not None and rel in changed:
+            out["loaded_modified"].append(rel)
+        out["loaded"].append(entry)
+    return out
+
+
+def format_provenance(prov: dict) -> list[str]:
+    """The stamp, as lines to print. Cannot be read halfway.
+
+    The commit and the dirty state are on ONE line, so a reader who takes in
+    only the first line of the stamp still cannot come away with a commit
+    and no idea whether the worktree was clean.
+    """
+    lines: list[str] = []
+    if prov.get("commit"):
+        state = ("CLEAN" if prov.get("dirty") is False else
+                 f"DIRTY ({len(prov.get('dirty_files') or [])} paths modified "
+                 "in the worktree)" if prov.get("dirty") else
+                 "worktree state UNKNOWN")
+        lines.append(f"provenance: {prov['commit']} {state}   repo={prov.get('repo')}")
+    else:
+        lines.append(f"provenance: NO COMMIT -- {prov.get('note')}")
+    for entry in prov.get("loaded", []):
+        if "error" in entry:
+            lines.append(f"  loaded !! {entry['path']}: {entry['error']}")
+            continue
+        where = entry.get("repo_relative") or entry["path"]
+        lines.append(f"  loaded {where}  sha256={entry['sha256'][:16]} "
+                     f"bytes={entry['bytes']} mtime={entry['mtime']}")
+    for p in prov.get("loaded_outside_repo", []):
+        lines.append(f"  !! {p} is OUTSIDE {prov.get('repo')} -- this run did not "
+                     "load the repo's copy")
+    for rel in prov.get("loaded_modified", []):
+        lines.append(f"  !! {rel} is MODIFIED in the worktree -- this run is NOT "
+                     f"of {prov.get('commit')}")
+    return lines

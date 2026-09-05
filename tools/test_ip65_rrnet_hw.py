@@ -2521,7 +2521,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
     rng = random.Random(seed)
     log.info("Random seed: %d (reproduce with --seed %d)", seed, seed)
-    run: dict = {"seed": seed, "iface": args.iface, "host": args.host}
+
+    # WHICH STATE OF THE WORK PRODUCED THIS OUTPUT. A file hash identifies
+    # that file, not the state of the tree — several lanes write here, and a
+    # run over a dirty worktree silently attributes their edits to whatever
+    # commit this prints. The dirty marker matters more than the hash, and
+    # both are on one line so the stamp cannot be read halfway. Paths are
+    # printed too: running a frozen copy against a repo PROJECT_ROOT is a
+    # legitimate configuration and unreadable afterwards unless it is said.
+    prov = hw.provenance(
+        [Path(__file__).resolve(), Path(hw.__file__).resolve()],
+        repo=Path(__file__).resolve().parent.parent)
+    for _line in hw.format_provenance(prov):
+        log.info("%s", _line)
+    run: dict = {"seed": seed, "iface": args.iface, "host": args.host,
+                 "provenance": prov}
     # The Mac's own MAC. check_c64_originated needs BOTH to tell a C64
     # frame from a Mac frame — and on a two-station cable a frame from a
     # third MAC means the capture is not of this segment at all.
