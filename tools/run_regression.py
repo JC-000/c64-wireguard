@@ -163,6 +163,47 @@ TESTS = [
     # UNSEEDED here; the payloads are random per run and the seed is on the
     # first line of its output (reproduce with --seed).
     ("warp_instrument", ["tools/test_warp_instrument_unit.py"]),
+    # The ip65/RR-Net HARDWARE validation, made capable of failing. Every
+    # verdict that run reaches lives in tools/ip65_hw_checks.py as a pure
+    # function over bytes, and this suite feeds each one a known-bad input
+    # off-device and requires it to fail: plaintext on the wire at a
+    # non-zero offset, torn across two IP fragments, reversed, in PETSCII,
+    # in the Ethernet pad, in an ARP frame; a handshake the responder calls
+    # complete while the C64 sits at HS_SENT; a reply the C64 never
+    # decrypted; ip65's BUILD-TIME cfg_ip 192.168.1.64 and cfg_mac
+    # 00:80:10:00:51:00 read as a lease and a programmed NIC; and a capture
+    # of the Mac talking to itself passing as proof the C64 did anything.
+    # The absence verdicts are three-state: a capture with no C64-sourced
+    # datagrams in it is INCONCLUSIVE, never a pass, because on this cable
+    # the Mac is DHCP server, peer, capturer and sentinel sender all at
+    # once, so "we looked and it was clean" and "there was nothing of ours
+    # to look at" are satisfied by the same guards.
+    # Also: net_last_error $41 (our loader dropped the cartridge) decoded
+    # apart from $42 (dnsmasq is not answering), which look identical on the
+    # screen and lead to opposite actions, with the code table cross-checked
+    # against the tree's own equates so a renumbering cannot leave it
+    # confidently wrong; a stale pcap from an earlier session rejected rather
+    # than parsed as evidence; and ICMP echo replies PAIRED to this run's
+    # requests by (id, seq), because macOS queues replies against a stale
+    # neighbour entry and flushes the backlog in one millisecond when an ARP
+    # resolves -- so a checker that counts replies scores its best result on
+    # exactly the broken case.
+    # Each red case also asserts that the NAIVE checker it indicts still
+    # passes, so a case whose trap has gone stale says so instead of
+    # quietly proving nothing.
+    #
+    # Host-side only: no VICE, no device, no build, no DeviceLock, ~0.05 s.
+    # Deliberately UNSEEDED here; the payloads, MACs and lease address are
+    # random per run and the seed is on the first line of its output
+    # (reproduce with --seed).
+    ("ip65_hw_checks", ["tools/test_ip65_hw_checks_unit.py"]),
+    # The alarm proof for the alarms above, run every time rather than
+    # trusted from a report: 45 deliberate defects are spliced into
+    # ip65_hw_checks.py one at a time and the suite must go RED for every
+    # one, naming which checks caught it. A mutant that survives is a
+    # defect the suite cannot see and fails this entry. ~3 s.
+    ("ip65_hw_checks_mutation",
+     ["tools/test_ip65_hw_checks_unit.py", "--self-check"]),
     # Issue #128, the firmware half of the same retraction. transport_decrypt
     # has ONE `lda #$ff` shared by five rejection causes, so "DECRYPT FAILED"
     # is not evidence of an AEAD failure — which is how "9/9 fail AEAD" was
