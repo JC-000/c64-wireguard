@@ -375,6 +375,7 @@ WIRE_CHECKS = (
     "CONTROL: the cleartext sentinel IS found on the wire",
     "no plaintext appears anywhere in the capture",
     "identical plaintext produced different ciphertext",
+    "the two stations resolved each other by ARP",
 )
 results: list[tuple[str, str, str]] = []       # (status, label, detail)
 VERBOSE = False
@@ -927,7 +928,7 @@ ITEM_CART_PREF = "Cartridge Preference"
 
 
 def sample_de00(tr, run: dict, when: str) -> str:
-    """Record the host-side $DE00..$DE0F window. DATA, NEVER A CHECK.
+    """Record the host-side $DE00..$DE07 window. DATA, NEVER A CHECK.
 
     This gates nothing and can fail nothing. It exists because three
     observers have now reported three different patterns for this window
@@ -947,11 +948,20 @@ def sample_de00(tr, run: dict, when: str) -> str:
     control reports.
     """
     try:
-        window = bytes(tr.read_memory(0xDE00, 16)).hex(" ")
+        # $DE00-$DE07 ONLY. Offsets $08/$09 of this window are the
+        # CS8900a's RxTx data port, where a READ POPS THE RECEIVE FIFO —
+        # and this samples twice with ip65 live. It is safe only because
+        # the host path is open bus and never reaches the cartridge, which
+        # is a conclusion resting on n=1 write plus a handful of reads.
+        # That is thin ground for an instrument to stand on inside its own
+        # hazard, and this gates nothing, so it costs nothing to step out
+        # of the blast radius. (Same shape as the $630E probe that reset
+        # the machine inside the window it had itself measured.)
+        window = bytes(tr.read_memory(0xDE00, 8)).hex(" ")
     except Exception as exc:                                  # noqa: BLE001
         window = f"unread: {exc}"
     run.setdefault("de00_window", {})[when] = window
-    log.info("$DE00..$DE0F [%s]: %s   (DATA ONLY — gates nothing)",
+    log.info("$DE00..$DE07 [%s]: %s   (DATA ONLY — gates nothing)",
              when, window)
     return window
 
@@ -1857,8 +1867,12 @@ def stage_handshake(tr, client, L, peer: HostPeer, args, run: dict) -> bool:
     check(peer.handshake_complete,
           "the host responder also considers the handshake complete",
           f"type1_seen={peer.type1_seen} type2_sent={peer.type2_sent}")
+    # NOT "exactly one": press_h_until_sent retries up to SEND_ATTEMPTS,
+    # and a cold ARP cache makes more than one initiation the expected
+    # case, so the old label was simply false whenever the retry fired.
     check(peer.type1_seen >= 1 and peer.type2_sent >= 1,
-          "exactly one type-1 was answered with a type-2",
+          f"every type-1 was answered with a type-2 "
+          f"({peer.type1_seen} seen, {peer.type2_sent} answered)",
           f"type1_seen={peer.type1_seen} type2_sent={peer.type2_sent}")
     run["hs_timestamp"] = bytes(tr.read_memory(L["hs_timestamp"], 12)).hex()
     return True
@@ -2078,6 +2092,20 @@ def stage_wire(cap, run: dict, transport: dict) -> None:
                       "the Mac", "the C64's MAC is on the wire"):
             skipped(label, "the C64 or host MAC was never read")
 
+    # macOS holds replies against a stale neighbour entry, so "no replies
+    # came back" and "the C64 is dead" are the same observation until the
+    # ARP exchange is in the capture — and they lead to opposite actions.
+    # The library had this unit-proven with no caller.
+    if c64_mac and host_mac and run.get("c64_ip"):
+        verdict(hw.check_arp_exchange(frames, c64_mac=c64_mac,
+                                      host_mac=host_mac,
+                                      c64_ip=run["c64_ip"],
+                                      host_ip=HOST_IP),
+                "the two stations resolved each other by ARP")
+    else:
+        skipped("the two stations resolved each other by ARP",
+                "a MAC or the C64's address was never read")
+
     verdict(hw.check_handshake_complete(run.get("wg_state"),
                                         bool(run.get("peer", {})
                                              .get("handshake_complete")),
@@ -2174,8 +2202,15 @@ def stage_wire(cap, run: dict, transport: dict) -> None:
                 "the cleartext control was not found, so an absence result "
                 "here is INCONCLUSIVE rather than green")
     else:
+        # require_type4_port: without it the green means "the C64 put at
+        # least one datagram of ANY kind on the cable" — DHCP satisfies
+        # that. Today it is covered incidentally, because the sentinel is
+        # only sent once peer.type4_in > 0 and control_ok gates this
+        # branch; but that is a property of a DIFFERENT guard, and one
+        # refactor away from silence.
         verdict(hw.check_plaintext_absent(frames, needles,
-                                          c64_mac=c64_mac or None),
+                                          c64_mac=c64_mac or None,
+                                          require_type4_port=WG_PORT),
                 "no plaintext appears anywhere in the capture")
 
 
@@ -2307,9 +2342,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         run["build"] = build_ip65(build_dir)
     assert_ip65_build(build_dir)
     L = load_labels(build_dir)
-    check(True, f"BACKEND=ip65 build confirmed structurally "
-                f"(ip65_blob.o in wireguard.map), sha256 "
-                f"{run['build']['sha256'][:16]}…")
+    # assert_ip65_build() above is the real assertion — it raises SystemExit
+    # on a non-ip65 build. A check(True, ...) here would be a PASS with a
+    # literal True predicate: a row in the summary that can never fail and
+    # therefore says nothing. Logged instead of scored.
+    log.info("BACKEND=ip65 build confirmed structurally (ip65_blob.o in "
+             "wireguard.map), sha256 %s…", run["build"]["sha256"][:16])
 
     # --- keys, randomised per run ---
     from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
@@ -2410,8 +2448,26 @@ def main(argv: Optional[list[str]] = None) -> int:
                 raise RuntimeError("Stage A failed; later stages cannot mean "
                                    "anything without a lease")
             stage_config(tr, L, c64_priv, c64_pub, host_pub)
+            # Recorded HERE, not after stage_transport: an exception
+            # inside transport used to skip this entirely, and Stage W
+            # would then report "the responder did not complete the
+            # handshake" about a responder that had — the wrong
+            # diagnosis on exactly the path where diagnosis matters.
+            # Refreshed again at the end so a clean run reports final
+            # counts.
+            def _snap_peer():
+                run["peer"] = {"handshake_complete": peer.handshake_complete,
+                               "type1_seen": peer.type1_seen,
+                               "type2_sent": peer.type2_sent,
+                               "type4_in": peer.type4_in,
+                               "errors": list(peer.errors)}
+            _snap_peer()
             if stage_handshake(tr, client, L, peer, args, run):
-                transport = stage_transport(tr, L, peer, rng, run)
+                _snap_peer()
+                try:
+                    transport = stage_transport(tr, L, peer, rng, run)
+                finally:
+                    _snap_peer()
                 # INTO THE ARTIFACT. stage_transport's result was passed to
                 # stage_wire and then dropped, so the JSON — the thing most
                 # likely to outlive the log — carried the sentinel but NOT
@@ -2455,11 +2511,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             if peer.errors:
                 log.warning("host responder recorded %d error(s): %s",
                             len(peer.errors), peer.errors[:5])
-            run["peer"] = {"handshake_complete": peer.handshake_complete,
-                           "type1_seen": peer.type1_seen,
-                           "type2_sent": peer.type2_sent,
-                           "type4_in": peer.type4_in,
-                           "errors": peer.errors}
+            _snap_peer()
     except Exception as exc:                                  # noqa: BLE001
         log.error("run aborted: %s: %s", type(exc).__name__, exc)
         check(False, "the run completed without aborting", f"{exc}")
