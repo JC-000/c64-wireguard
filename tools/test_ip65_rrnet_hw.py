@@ -1365,10 +1365,32 @@ def set_cartridge_external(client, run: dict) -> Optional[str]:
     expected to fail the run: a run that cannot restore the bench should
     not disturb it.
 
-    Volatile — reverts to Auto on reboot — so it is set per run rather
-    than once, and the harness's snapshot_state does not cover it (it
-    covers `Cartridge`, the preset, which is a different item), so
-    restoring it is ours to do.
+    SET PER RUN, and NOT because the item is volatile.
+    ==================================================
+    This used to say "Volatile — reverts to Auto on reboot". **That claim
+    was never measured and the evidence contradicts it.** Every observation
+    behind it was OUR OWN TEARDOWN: this function restores to `Auto`, so
+    the next run finds `Auto` and the item looks self-clearing.
+
+        run 2   before=External  set=External  restore_to=Auto   <- run 1 leaked
+        run 3   before=Auto      set=External  restore_to=Auto   <- run 2 wrote it
+        run 4   before=Auto      set=External  restore_to=Auto   <- run 3 wrote it
+
+    No run has ever rebooted the device, so the reboot half was never
+    tested; and nothing here touched the cartridge slot at all before
+    2026-09-04, when the RR-Net arrived — so every observation lives in a
+    ~36-hour window with two or three lanes setting and restoring it on a
+    shared box. Confounded by construction.
+
+    If reboot-reversion does happen it is not special to this item: config
+    PUTs are memory-only until `save_config_to_flash`, so a reboot reloads
+    FLASH for everything — and to the flash value, which need not be
+    `Auto` (c64-test-harness#227, from firmware source).
+
+    It is still set per run, which is correct for a different reason: the
+    device is shared and another lane may have left it anywhere. The
+    harness's `snapshot_state` does not cover it (that covers `Cartridge`,
+    a different item), so restoring it is ours to do.
     """
     before = client.get_config_item(CAT_CART, ITEM_CART_PREF)
     log.info("%s raw payload: %r", ITEM_CART_PREF, before)
@@ -2687,8 +2709,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         set_reu(client, False)
         time.sleep(0.5)
 
-        # 1. Cartridge Preference = External. Volatile (reverts to Auto on
-        #    reboot) so it is set per run, and the previous value is kept
+        # 1. Cartridge Preference = External. Set per run because the
+        #    device is SHARED, not because the item self-clears (that claim
+        #    was ours, unmeasured, and our own restore explains it).
         #    for teardown — the harness's snapshot_state does NOT cover
         #    this item, only `Cartridge`, which is the preset.
         sample_de00(tr, run, "1-before-External")

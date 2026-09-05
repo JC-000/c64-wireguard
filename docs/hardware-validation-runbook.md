@@ -664,10 +664,30 @@ two-station capture. Every ip65 result before that date was emulation.
 - **A real RR-Net (CS8900a) in the U64E cartridge port.** There is no
   host-side test for this — see the hazards below — so the tool can only
   confirm it *during* the run, on the 6510.
-- **`Cartridge Preference` = `External`.** It is **volatile**: it reverts to
-  `Auto` on reboot, so it is set per run, not once. `snapshot_state` does not
-  cover it (that covers `Cartridge`, a different item), so restoring it is the
-  caller's job — the tool does this, but a run you abort by hand may not.
+- **`Cartridge Preference` = `External`.** Set it **per run**, because the
+  device is shared and another lane may have left it anywhere —
+  **not** because the item self-clears. An earlier revision of this section
+  called it "volatile, reverts to `Auto` on reboot"; **that was never measured
+  and our own logs contradict it.** The tool restores to `Auto`, so the next
+  run finds `Auto` and the item appears to revert:
+
+  ```
+  run 2   before=External  set=External  restore_to=Auto   <- run 1 leaked
+  run 3   before=Auto      set=External  restore_to=Auto   <- run 2 wrote it
+  run 4   before=Auto      set=External  restore_to=Auto   <- run 3 wrote it
+  ```
+
+  No run has rebooted the device, so the reboot half was never tested, and
+  nothing here touched the cartridge slot before 2026-09-04 — every
+  observation sits inside a ~36-hour window with several lanes setting and
+  restoring it. If reboot-reversion happens at all it is general, not
+  item-specific: config PUTs are memory-only until `save_config_to_flash`, so
+  a reboot reloads **flash** for every item, and to the flash value rather
+  than to `Auto` (`c64-test-harness#227`, from firmware source).
+
+  `snapshot_state` does not cover it (that covers `Cartridge`, a different
+  item), so restoring it is the caller's job — the tool does this, but a run
+  you abort by hand may not.
 - **The segment must be up**, which needs a password you have and the tool
   does not:
 
