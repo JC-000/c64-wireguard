@@ -582,8 +582,26 @@ def selftest_wire_gate() -> list[str]:
     entries, so the comparison was against itself and could never fail. It
     MISSED a deliberately drifted label when I tested it. So the second
     half drives a synthetic but genuine capture, where each label comes
-    from the check that actually emits it, and requires every WIRE_CHECKS
-    literal to turn up among them.
+    from the check that actually emits it.
+
+    AND IT COMPARES THE TWO AS SETS, IN BOTH DIRECTIONS, which the SECOND
+    version still got wrong. It asserted only WIRE_CHECKS subset-of
+    emitted, i.e. "every literal turns up" — so DELETING an entry from the
+    tuple passed cleanly: the check goes on emitting its correct label,
+    the remaining entries still turn up, and the eight remaining skips
+    still produce EXIT_INCONCLUSIVE. Measured: dropping the leak, nonce or
+    ARP entry was MISSED; only emptying the tuple entirely was caught.
+
+    Removal is the LIKELIER edit. Drift needs someone to reword a label in
+    one place and not the other; removal happens whenever a check is
+    renamed, retired, or the tuple is tidied — and the result is that a
+    claim silently stops blocking a zero exit, which is finding 1 coming
+    back by the exact route this test exists to close.
+
+    Two people tested this guard with mutations and both got clean
+    answers, because a guard tends to get tested against the failure its
+    author was picturing: one pictured a rename, the other a deletion. Set
+    equality is what makes the direction irrelevant.
     """
     class _NoCapture:
         path, note = None, "self-test: no capture"
@@ -659,12 +677,20 @@ def selftest_wire_gate() -> list[str]:
         finally:
             os.unlink(path)
         emitted = {label for _, label, _ in results}
-        missing = [w for w in WIRE_CHECKS if w not in emitted]
-        if missing:
+        declared = set(WIRE_CHECKS)
+        # SET EQUALITY, not membership. Both differences are defects and
+        # they are different defects, so both are named.
+        unmatched = sorted(declared - emitted)
+        ungated = sorted(emitted - declared)
+        if unmatched:
             bad.append(f"WIRE_CHECKS entries that no check in stage_wire "
-                       f"actually records — the join is broken, so these "
-                       f"assertions can be skipped without blocking a zero "
-                       f"exit: {missing}")
+                       f"records — the label drifted, so the tuple no "
+                       f"longer joins to anything: {unmatched}")
+        if ungated:
+            bad.append(f"stage_wire makes these claims but they are NOT in "
+                       f"WIRE_CHECKS, so skipping them does NOT block a "
+                       f"zero exit — a run can report success having never "
+                       f"evaluated them: {ungated}")
         return bad
     finally:
         results.clear()
