@@ -116,8 +116,18 @@ the real bug was findable:
 New suites: `test_uci_short_read_drop.py` (87 checks, driving the real
 assembled `net_poll` on a host-side 6502 against a model of the register
 protocol), `test_issue_129_petscii_control.py`, `test_warp_instrument_unit.py`
-and `test_warp_instrument_vice.py`. Regression gate: **36 suites → 41** (measured at tag time from the gate's own
-output, which now also reports the backend and PRG hash it leaves the tree in).
+and `test_warp_instrument_vice.py`. Regression gate: **34 suites at v1.1.0 → 43 at this tag** (counted from the
+runner's `TESTS` + `SERIAL_TESTS` registrations at `214bfcd`, and matching the
+gate's own `All 43 suites passed!` line, which now also reports the backend and
+PRG hash it leaves the tree in).
+
+> This sentence previously read "**36 suites → 41** (measured at tag time from
+> the gate's own output)". **41 is a value the tree never held** — 34 at
+> v1.1.0, 36 before #133, 40 at #133's head, 43 at this tag — and the
+> parenthetical asserted a provenance the number did not have: it was not
+> measured from any gate run. Corrected rather than quietly replaced, because
+> a false *provenance* claim is worse than a wrong number: it tells the next
+> reader not to bother re-deriving it.
 
 ### An audit of the tests themselves
 
