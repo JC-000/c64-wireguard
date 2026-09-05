@@ -1310,28 +1310,79 @@ def check_net_counters(recv_dropped: int | None, send_attempts: int | None,
                        *, expect_sends: int | None = None) -> Verdict:
     """ip65_recv_dropped and ip65_send_attempts, read alongside the error byte.
 
-    `recv_dropped == 0` is asserted here, and on its own that is NOT
-    coverage: a counter reading zero because nothing was dropped is
-    satisfied equally by a counter that can never move. So a zero is
-    reported as unproven unless `expect_sends` shows the send path moved
-    the other counter in the same run.
+    THE TWO COUNTERS HAVE DIFFERENT LIFETIMES, and getting that wrong makes
+    this function report the opposite of the property it names. From the
+    tree, not inferred:
+
+      ip65_send_attempts   PER-SEND. net_udp_send stores $01 into it at the
+                           top of EVERY call (src/net/ip65/net.s:382-383),
+                           so it describes the LAST send and never the run.
+                           net_arp_pump is the only thing that increments it
+                           further (net.s:659-731), so 1 means the ARP cache
+                           was warm and nothing was retried, and >1 means the
+                           #120 pump path fired. The BSS comment at
+                           net.s:982-989 says exactly this.
+      ip65_recv_dropped    CUMULATIVE since net_init, and moved ONLY by
+                           net_udp_recv_cb's disarm branch (net.s:758-765),
+                           which is gated on ip65_send_pump -- a flag only
+                           net_arp_pump ever sets.
+
+    So the drop counter can move only while the pump runs, and the pump
+    running is exactly what pushes send_attempts past 1. `send_attempts > 1`
+    is therefore the condition under which a zero here is evidence.
+
+    WHY `> 0` WOULD BE WORSE THAN A WRONG BOOLEAN. Every send that happened
+    at all leaves the byte >= 1, so `> 0` reports the drop counter as PROVEN
+    precisely on the healthy warm-cache runs where it is proven least -- and
+    what it suppresses is the note. A missing caveat reads as "not checked";
+    a suppressed one reads as evidence.
+
+    THE FLAG UNDER-CLAIMS ON PURPOSE, and the next reader should know why
+    rather than try to satisfy it. Because send_attempts describes only the
+    LAST send, a run whose pump fired on an earlier send but not the final
+    one reads 1 here even though the drop counter did have its opportunity.
+    True therefore means "proven"; False means "not proven", never
+    "disproven". And on a healthy warm-cache run the flag is unreachable BY
+    CONSTRUCTION -- the pump only fires on a send that already failed -- so
+    the note simply stands on those runs. That is the honest state of
+    affairs. Do not feed the function a number to clear it.
+
+    `expect_sends` is the number of sends the run made. It CANNOT be
+    validated against ip65_send_attempts -- comparing them would fail every
+    healthy multi-send run, because five warm sends leave the byte reading 1
+    -- so it is used only to require that the byte shows a send happened at
+    all, and is otherwise recorded as context.
     """
     ev = {"ip65_recv_dropped": recv_dropped, "ip65_send_attempts": send_attempts,
-          "expect_sends": expect_sends, "drop_counter_proven": False}
+          "sends_this_run": expect_sends, "drop_counter_proven": False,
+          "send_attempts_is_per_send": True}
     if recv_dropped is None or send_attempts is None:
         return Verdict(False, "ip65_recv_dropped / ip65_send_attempts were not "
                               "read; they are the context the error byte is "
                               "interpreted in", ev)
-    if expect_sends is not None and send_attempts < expect_sends:
-        return Verdict(False, f"ip65_send_attempts is {send_attempts}, fewer than "
-                              f"the {expect_sends} sends this run made", ev)
-    ev["drop_counter_proven"] = bool(expect_sends and send_attempts > 0)
+    if expect_sends is not None and expect_sends >= 1 and send_attempts < 1:
+        return Verdict(False,
+                       f"the run made {expect_sends} sends but ip65_send_attempts "
+                       "is 0, so net_udp_send never reached the store at the top "
+                       "of itself -- no send happened", ev)
+    ev["drop_counter_proven"] = send_attempts > 1
     if recv_dropped:
         return Verdict(False, f"ip65 dropped {recv_dropped} received datagrams", ev)
-    note = ("" if ev["drop_counter_proven"] else
-            " (NOTE: nothing in this run proves the drop counter can move, so "
-            "its zero is not evidence)")
-    return Verdict(True, f"no drops, {send_attempts} send attempts" + note, ev)
+    attempts = (f"{send_attempts} send attempts on the last send"
+                + (" (the #120 ARP pump fired)" if send_attempts > 1
+                   else " (warm ARP cache, nothing retried)"))
+    if ev["drop_counter_proven"]:
+        return Verdict(True, f"no drops, {attempts}", ev)
+    # The note goes to BOTH the reason and the evidence: a caller that logs
+    # structured evidence rather than the prose must not silently lose the
+    # one sentence that says the zero above is not evidence.
+    note = ("nothing in this run proves the drop counter can move, so its zero "
+            "is not evidence: ip65_recv_dropped is incremented only by "
+            "net_udp_recv_cb's disarm branch, which runs only while "
+            "net_arp_pump holds ip65_send_pump set, and send_attempts == "
+            f"{send_attempts} says the pump did not fire on the last send")
+    ev["unproven_note"] = note
+    return Verdict(True, f"no drops, {attempts} (NOTE: {note})", ev)
 
 
 # ===========================================================================

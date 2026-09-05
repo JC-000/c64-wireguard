@@ -94,7 +94,7 @@ _spec.loader.exec_module(C)
 #: whichever branch it takes, so two runs are comparable and a case that
 #: silently stopped running is a hard error rather than a smaller
 #: denominator nobody notices. Update deliberately when adding a check.
-EXPECTED_CHECKS = 186
+EXPECTED_CHECKS = 195
 
 # Disjoint alphabets: an echo of a request can never satisfy a reply check.
 REQ_ALPHABET = string.ascii_uppercase + string.digits
@@ -570,6 +570,90 @@ def case1_plaintext(rng: random.Random, res: Result) -> None:
               "case1l/clipped-search-would-pass",
               "the clipped capture did not read as clean, so this case no longer "
               "shows why truncation must be refused")
+
+
+# ===========================================================================
+# Case 17 — ip65_send_attempts is PER-SEND, and the drop counter can only
+#           move while the pump is running
+# ===========================================================================
+def case17_send_attempts_semantics(rng: random.Random, res: Result) -> None:
+    """The two counters have different lifetimes, and it decides both checks.
+
+    Verified in the tree, not inferred:
+
+      src/net/ip65/net.s:382-383   net_udp_send stores $01 into
+                                   ip65_send_attempts at the TOP OF EVERY
+                                   SEND. It describes the LAST send, not the
+                                   run.
+      net.s:982-989 (BSS)          "1 = the ARP cache was warm and nothing
+                                   was retried; >1 is the #120 path having
+                                   fired", and ip65_recv_dropped is
+                                   "CUMULATIVE since net_init, unlike
+                                   ip65_send_attempts which is per-send".
+      net_arp_pump (net.s:659-731) the only place that increments it past 1,
+                                   and it holds ip65_send_pump = 1 for the
+                                   duration.
+      net_udp_recv_cb (:758-765)   increments ip65_recv_dropped ONLY when
+                                   ip65_send_pump is set.
+
+    So the drop counter can move ONLY while the pump runs, and the pump
+    running is exactly what makes send_attempts exceed 1.
+    """
+    print("\n[case 17] ip65_send_attempts is per-send, not a run total")
+
+    # A healthy warm-cache send: attempts == 1, the pump never ran, so the
+    # drop counter had NO OPPORTUNITY to move and its zero is not evidence.
+    v = C.check_net_counters(0, 1, expect_sends=1)
+    res.check(v.ok, "case17a/warm-send-is-not-a-failure",
+              f"a warm-cache send was reported as a failure: {v.reason}")
+    res.check(v.evidence.get("drop_counter_proven") is False,
+              "case17a/warm-send-does-not-prove-the-drop-counter",
+              "send_attempts == 1 means the ARP cache was warm and the pump "
+              "never ran; net_udp_recv_cb increments ip65_recv_dropped ONLY "
+              "while ip65_send_pump is set, so nothing in this run could have "
+              "been dropped. Reporting the counter as PROVEN here claims the "
+              "opposite of the truth, and suppresses the note — a missing "
+              "caveat reads as 'not checked', a suppressed one reads as "
+              "evidence")
+    res.check("unproven_note" in v.evidence,
+              "case17a/the-note-survives",
+              "the caveat is not in the evidence, so a caller that logs "
+              "evidence rather than the reason string loses it entirely")
+
+    # The pump DID fire: attempts > 1. Now the counter had an opportunity.
+    v2 = C.check_net_counters(0, 3, expect_sends=1)
+    res.check(v2.ok and v2.evidence.get("drop_counter_proven") is True,
+              "case17b/pump-fired-proves-the-opportunity",
+              f"send_attempts == 3 is the #120 pump path having fired, which is "
+              f"the only thing that can move the drop counter: {v2.reason}")
+    res.check("unproven_note" not in v2.evidence,
+              "case17b/no-note-once-proven",
+              "the caveat is still attached to a run in which the counter "
+              "demonstrably had its opportunity")
+    res.check(v.reason != v2.reason, "case17b/two-distinct-reports",
+              "a proven and an unproven zero read identically")
+
+    # FIVE sends, all warm. ip65_send_attempts still reads 1, because every
+    # net_udp_send overwrites it. A check that compares it to the number of
+    # sends the run made fails a perfectly healthy run, every time.
+    v = C.check_net_counters(0, 1, expect_sends=5)
+    res.check(v.ok, "case17c/five-warm-sends-is-not-a-shortfall",
+              "a run of five warm-cache sends was failed for 'ip65_send_attempts "
+              "is 1, fewer than the 5 sends this run made'. That byte is stored "
+              "as $01 at the top of EVERY net_udp_send (net.s:382-383), so it "
+              "reads 1 after five successful sends and the comparison is a "
+              "guaranteed false alarm")
+
+    # Zero attempts means net_udp_send never ran at all.
+    v = C.check_net_counters(0, 0, expect_sends=1)
+    res.check(not v.ok, "case17d/no-send-at-all-is-a-failure",
+              "ip65_send_attempts == 0 means net_udp_send never reached its "
+              "store, i.e. no send happened, and that passed")
+
+    # A drop is a drop whatever the attempt count.
+    v = C.check_net_counters(4, 1)
+    res.check(not v.ok, "case17d/drops-still-fail",
+              "four dropped datagrams passed because the pump was not proven")
 
 
 # ===========================================================================
@@ -1248,9 +1332,19 @@ def case8_net_last_error(rng: random.Random, res: Result) -> None:
               "case8k/zero-drops-alone-is-unproven",
               "a drop counter reading zero in a run that sent nothing was "
               "reported as proven; a counter that can never move reads zero too")
+    # WAS "case8k/fewer-sends-than-we-made", which required this to FAIL.
+    # That assertion encoded the wrong model: it read ip65_send_attempts as a
+    # run total, so it demanded a false alarm on a healthy multi-send run.
+    # net_udp_send stores $01 at the top of every call (net.s:382-383), so
+    # 2 attempts after 5 sends means the last send retried twice and the four
+    # before it were warm — an ordinary, correct run. Case 17 owns the
+    # semantics now; this one is kept as the positive control that the
+    # corrected reading does not fail it.
     v = C.check_net_counters(0, 2, expect_sends=5)
-    res.check(not v.ok, "case8k/fewer-sends-than-we-made",
-              "ip65_send_attempts of 2 passed for a run that made 5 sends")
+    res.check(v.ok and v.evidence.get("drop_counter_proven") is True,
+              "case8k/last-send-retried-in-a-multi-send-run",
+              f"a run of five sends whose last one retried was rejected: "
+              f"{v.reason}")
 
     # The ADDRESSES come from the build, never from a constant. $78A7/$78A9/
     # $78AA are where these sit in build/labels.txt today; a tool that typed
@@ -1703,9 +1797,22 @@ MUTANTS: dict[str, tuple[str, str]] = {
         "    drift = {n: (known.get(n), v) for n, v in found.items() "
         "if known.get(n) != v}",
         "    drift = {}"),
+    # The exact defect two reviewers found: `> 0` is true on every send that
+    # happened at all, so it reports the drop counter as proven precisely on
+    # the warm-cache runs where it is proven least, and SUPPRESSES the note.
+    "counters/proven-at-greater-than-zero": (
+        'ev["drop_counter_proven"] = send_attempts > 1',
+        'ev["drop_counter_proven"] = send_attempts > 0'),
     "counters/zero-drops-claimed-proven": (
-        'ev["drop_counter_proven"] = bool(expect_sends and send_attempts > 0)',
+        'ev["drop_counter_proven"] = send_attempts > 1',
         'ev["drop_counter_proven"] = True'),
+    # Reading the per-send byte as a run total: a guaranteed false alarm on
+    # every healthy multi-send run.
+    "counters/per-send-byte-read-as-cumulative": (
+        "    if expect_sends is not None and expect_sends >= 1 and send_attempts < 1:",
+        "    if expect_sends is not None and send_attempts < expect_sends:"),
+    "counters/note-dropped-from-evidence": (
+        '    ev["unproven_note"] = note', '    _dropped = note'),
     "bracket/stale-capture-accepted": (
         "    if not inside:", "    if False:"),
     "bracket/untruncated-capture-accepted": (
@@ -1863,6 +1970,7 @@ def main() -> int:
         "12": lambda: case12_config_and_pin(rng, res),
         "13": lambda: case13_bench_health(rng, res),
         "14": lambda: case14_empty_corpus(rng, res),
+        "17": lambda: case17_send_attempts_semantics(rng, res),
         "15": lambda: case15_shifted_petscii(rng, res),
         "16": lambda: case16_cs8900a(rng, res),
     }
