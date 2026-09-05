@@ -912,22 +912,32 @@ def check_no_uncalled_verdicts(check) -> None:
     # ALARM PROOF. Write a file containing exactly the pre-fix shape and
     # require the scan to report it, then delete it. Without this, "0
     # flagged" is equally consistent with a scanner that flags nothing.
-    probe = tools_dir / "zz_uncalled_verdict_alarm_probe.py"
-    if probe.exists():
-        check("alarm-proof: uncalled-verdict probe file is writable", False,
-              f"{probe} already exists; refusing to overwrite")
-        return
-    try:
+    # The probe goes in a TEMPDIR, not in tools/.
+    #
+    # It used to be written as tools/zz_uncalled_verdict_alarm_probe.py and
+    # unlinked in the finally. That is invisible standalone and wrong under
+    # the parallel gate: tools/ is scanned by other suites, and
+    # test_cold_init_seam globs tools/*.py. It caught the probe in its
+    # listing, the unlink landed before its read, and it reported
+    # "unreadable" as a call-site VIOLATION -- a red gate, passing
+    # standalone, diagnosing a file that no longer existed. Measured
+    # 2026-09-05: one red run, two green, identical tree.
+    #
+    # A tempdir keeps the proof intact. What is being proven is "a file
+    # containing exactly the shape IS reported", and the scanner takes the
+    # directory as an argument, so a directory holding only the probe proves
+    # it without touching a tree anyone else is reading.
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="seams-alarm-") as td:
+        probe = Path(td) / "zz_uncalled_verdict_alarm_probe.py"
         probe.write_text(
             "def _verify_nothing(buf, expected):\n"
             "    return buf == expected\n\n\n"
             "def main():\n"
             "    return 0\n")
-        found = _uncalled_verdict_functions(tools_dir)
+        found = _uncalled_verdict_functions(Path(td))
         hit = any(f == probe.name and nm == "_verify_nothing"
                   for f, _ln, nm in found)
-    finally:
-        probe.unlink(missing_ok=True)
     check("alarm-proof: a defined-but-uncalled _verify_* IS reported", hit,
           "the scan did not flag a file written to contain exactly the "
           "shape it exists to catch, so its clean verdict means nothing")

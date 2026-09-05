@@ -1,4 +1,4 @@
-# c64-wireguard v1.2.0 — a real receive-path bug, and the instrument that hid it
+# c64-wireguard v1.2.0 — a real receive-path bug, the instrument that hid it, and the first RR-Net hardware run
 
 Released 2026-09-05. Supersedes [v1.1.0](RELEASE_NOTES_v1.1.0.md).
 
@@ -8,7 +8,8 @@ announced length. It affects any inbound datagram over 893 bytes on the UCI
 backend, and it is timing-dependent rather than size-deterministic — so a build
 that appears to work can be corrupting traffic.
 
-The RR-Net (ip65) backend is unaffected by the corruption fix.
+The RR-Net (ip65) backend is unaffected by the corruption fix — and this
+release is the first in which it has **run on physical hardware at all**.
 
 ---
 
@@ -180,9 +181,101 @@ findings, all fixed here:
 
 ---
 
+## New — the RR-Net backend on real hardware, for the first time
+
+Every previous ip65 result in this project was **emulation**: bridged-Ethernet
+VICE on a real LAN, against a real peer over the internet. Good evidence, and
+not the same claim. On 2026-09-05 the backend ran on a **physical RR-Net
+(CS8900a) cartridge in the U64E expansion port**, cabled directly to a host NIC.
+
+| | run 2 | run 3 | run 4 |
+|---|---|---|---|
+| checks passed | 30 | 30 | 32 |
+| failed | 0 | 4 | 2 |
+| **skipped** | **0** | **0** | **0** |
+| handshake to ACTIVE @48 MHz | 18.8 s | 18.0 s | 19.8 s |
+
+`net_initialized` in 1.0 s at 1 MHz; DHCP lease taken; `wg_local_port` 51820;
+content-verified transport in both directions against per-run randomised
+payloads. **No WireGuard check failed in any run** — the failures in runs 3 and
+4 are confined to the stock-ip65 bench control (below) and the CS8900a probe.
+
+Verified a second time by parsing the packet capture directly, independently of
+the tool that produced the numbers:
+
+- plaintext **absent** in both directions, in ASCII **and** shifted-PETSCII
+  forms, across every frame in the run window;
+- the deliberately-cleartext control sentinel **found** by the identical
+  search — absence only means something when presence is demonstrable;
+- type-4 nonce counters `[0,1,2,3,4,5]`, distinct and strictly increasing;
+- frame accounting exact to the byte against the run's own JSON.
+
+### Which artifact this was
+
+**`wireguard-rrnet-noreu-mtu1440.prg`**, and only that one:
+
+```
+sha256 e577d167745e617ffe609a784c77d205a9f5820b189f5599d5665e977c621d09
+make BACKEND=ip65 REU=0 WG_MTU1440=1        WG_MTU $05A0 (1440)
+```
+
+It is byte-reproducible from this tag. **MTU 1440 on RR-Net needs no firmware
+of any kind** — ip65's 1472-byte caps are native, so the
+`GideonZ/1541ultimate#807` caveat that governs the *UCI* MTU-1440 builds does
+not apply here. That is also why it is not on `wireguard-mtu1440.d64`, whose entire identity is
+that firmware dependency; it sits in the ordinary RR-Net slot on
+`wireguard-noreu.d64` instead.
+
+The REU RR-Net build remains **emulation-verified only** — it was not the build
+on the bench, and this release does not claim otherwise. The MTU-860 RR-Net
+builds have been dropped entirely (see Artifacts).
+
+### A finding that is not ours, and is not filed
+
+Stock ip65 **transmits too soon after `ip65_init`**: `$82 TRANSMIT_FAILED` on
+roughly 80% of attempts at 48 MHz, never at 1 MHz, and 40/40 clean once ~0.2 s
+separates the two calls. A 2×2 across init-clock and ping-clock established the
+CPU speed is not the variable. This is upstream ip65 behaviour, reproduced on
+our bench; it is the bench control that fails in runs 3 and 4 above, and it is
+not a defect in this release. Not filed upstream pending review.
+
+---
+
 ## Artifacts
 
-Unchanged in shape from v1.1.0: six `.prg` variants across both backends in REU
-and no-REU forms plus the two MTU-1440 builds, three `.d64` disk images, a
-`VERSION` stamp and `SHA256SUMS`. Every variant's `labels.txt` is checked
-structurally after build, so a `BACKEND` that silently fell back cannot ship.
+Six `.prg` variants and three `.d64` images, plus a `VERSION` stamp and
+`SHA256SUMS` — the same shape as v1.1.0, but **the two RR-Net slots now hold
+the MTU-1440 builds instead of the MTU-860 ones.**
+
+### The RR-Net MTU-860 builds are gone
+
+`wireguard-rrnet-noreu.prg` and `wireguard-rrnet-reu.prg` are **not in this
+release and have no successor under those names.** That is deliberate: reusing
+the v1.1.0 filenames for a 1440 build would change what a name means between
+releases without saying so.
+
+WG_MTU 860 derives from `WG_DATAGRAM_CAP` 892, which is the **UCI**
+`SOCKET_WRITE` single-block payload cap. ip65 advertises 1472/1472 natively and
+has never had that limit — so an ip65 build at 860 was carrying a UCI
+constraint into a backend that does not have one. It shipped that way only
+because `WG_MTU1440` is a generic opt-in that defaults off. Dropping it means
+the ip65 slot on every disk is now the build that actually ran on hardware,
+rather than a sibling of it.
+
+If you are on RR-Net, take `wireguard-rrnet-noreu-mtu1440.prg`
+(`wg-rrnet` on `wireguard-noreu.d64`).
+
+| artifact | backend | REU | MTU | evidence |
+|---|---|---|---|---|
+| `wireguard-rrnet-noreu-mtu1440.prg` | ip65 | 0 | 1440 | **physical hardware, 3 runs** |
+| `wireguard-rrnet-reu-mtu1440.prg` | ip65 | 1 | 1440 | emulation only (REU: see #69) |
+| `wireguard-uci-noreu.prg` | uci | 0 | 860 | hardware (U64E) |
+| `wireguard-uci-reu.prg` | uci | 1 | 860 | hardware (U64E) |
+| `wireguard-uci-noreu-mtu1440.prg` | uci | 0 | 1440 | hardware, **#807 spike fw only** |
+| `wireguard-uci-reu-mtu1440.prg` | uci | 1 | 1440 | no hardware run (#69) |
+
+Every variant's `labels.txt` is checked structurally after build, so a `BACKEND`
+that silently fell back cannot ship. That check now discriminates the two routes
+to MTU 1440: a `uci` 1440 build must carry `uci_send_part` (the chunked
+`SOCKET_WRITE` path) and an `ip65` 1440 build must not, because no UCI
+translation unit links into it at all.

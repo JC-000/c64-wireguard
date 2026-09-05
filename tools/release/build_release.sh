@@ -3,8 +3,18 @@
 # tools/release/build_release.sh — build the full release artifact set.
 #
 # Produces in build/release/:
-#   wireguard-rrnet-reu.prg          BACKEND=ip65 REU=1  (RR-Net + REU)
-#   wireguard-rrnet-noreu.prg        BACKEND=ip65 REU=0  (RR-Net, stock C64)
+#   wireguard-rrnet-noreu-mtu1440.prg  BACKEND=ip65 REU=0 WG_MTU1440=1
+#                                    (RR-Net, stock C64, MTU 1440)
+#                                    *** THE ONLY HARDWARE-VALIDATED ARTIFACT
+#                                     IN THIS SET *** — physical RR-Net in the
+#                                     U64E cartridge port, 3 runs 2026-09-05.
+#                                     No firmware dependency: ip65's 1472-byte
+#                                     caps are native. On-disk as wg-rrnet.
+#   wireguard-rrnet-reu-mtu1440.prg  BACKEND=ip65 REU=1 WG_MTU1440=1
+#                                    (same with REU DMA tables; NOT the build
+#                                     that ran — see #69, REU at 48 MHz.)
+#   (there is no ip65 MTU-860 artifact: 860 comes from the UCI 892-byte
+#    SOCKET_WRITE cap, which ip65 does not have — see the call sites below)
 #   wireguard-uci-reu.prg            BACKEND=uci  REU=1  (Ultimate 64 / C64U)
 #   wireguard-uci-noreu.prg          BACKEND=uci  REU=0  (Ultimate, REU disabled)
 #   wireguard-uci-noreu-mtu1440.prg  BACKEND=uci REU=0 UCI_CHUNKED_WRITE=1
@@ -21,7 +31,7 @@
 #                                    + wg.cfg + fw-warning
 #   wireguard-noreu.d64              same pair, no-REU builds
 #                                    + wg.cfg + fw-warning
-#   wireguard-mtu1440.d64            both mtu1440 PRGs (wg-mtu1440-noreu,
+#   wireguard-mtu1440.d64            both UCI mtu1440 PRGs (wg-mtu1440-noreu,
 #                                    wg-mtu1440-reu) + wg.cfg + fw-warning
 #                                    (fw-warning is CR-terminated on disk;
 #                                    the flat .txt copy below keeps LF)
@@ -110,48 +120,96 @@ assert_labels() {
             echo "ERROR: assert_labels: unknown backend '$backend'" >&2; exit 1 ;;
     esac
 
+    # WG_MTU is decided by the kind; uci_send_part is decided by the kind AND
+    # the backend, because the two 1440 routes are not the same mechanism.
+    # Under BACKEND=uci the only way to 1440 is the chunked SOCKET_WRITE path,
+    # so uci_send_part MUST be there. Under BACKEND=ip65 the 1472-byte caps
+    # are native (Makefile: "or use BACKEND=ip65 where the 1472-byte caps are
+    # native"), WG_MTU1440=1 alone suffices, and NO UCI translation unit links
+    # at all -- so uci_send_part must be ABSENT. Asserting it present for
+    # every mtu1440 build would make an ip65 1440 variant unbuildable, and
+    # asserting it absent for every one would let a uci 1440 build ship with
+    # its send path silently missing.
     case "$kind" in
         default)
             [ "$mtu_hex" = "035C" ] || {
                 echo "ERROR: $out: expected WG_MTU=\$035C (860), got \$$mtu_hex" >&2; exit 1; }
-            [ "$send_part_present" -eq 0 ] || {
-                echo "ERROR: $out: uci_send_part unexpectedly present for a default build" >&2; exit 1; }
+            want_send_part=0
             ;;
         mtu1440)
             [ "$mtu_hex" = "05A0" ] || {
                 echo "ERROR: $out: expected WG_MTU=\$05A0 (1440), got \$$mtu_hex" >&2; exit 1; }
-            [ "$send_part_present" -eq 1 ] || {
-                echo "ERROR: $out: uci_send_part missing for an mtu1440 build" >&2; exit 1; }
+            [ "$backend" = "uci" ] && want_send_part=1 || want_send_part=0
             ;;
         *)
             echo "ERROR: assert_labels: unknown kind '$kind'" >&2; exit 1 ;;
     esac
+    [ "$send_part_present" -eq "$want_send_part" ] || {
+        echo "ERROR: $out: uci_send_part is $([ "$send_part_present" -eq 1 ] && echo present || echo absent)," \
+             "expected $([ "$want_send_part" -eq 1 ] && echo present || echo absent)" \
+             "for a $kind/$backend build" >&2; exit 1; }
     echo "    labels OK: WG_MTU=\$$mtu_hex uci_send_part=$([ "$send_part_present" -eq 1 ] && echo present || echo absent)" \
          "backend=$backend (net_arp_pump=$arp_pump uci_tod_start=$tod_start)"
 }
 
-# $1 = backend, $2 = REU, $3 = chunked (0|1), $4 = output filename
+# $1 = backend, $2 = REU, $3 = kind (default|mtu1440), $4 = output filename
+#
+# The MTU-1440 FLAG DIFFERS BY BACKEND and this is the whole reason the kind
+# is passed explicitly rather than inferred from a "chunked" boolean:
+#   uci  + mtu1440 -> UCI_CHUNKED_WRITE=1  (the chunked SOCKET_WRITE path;
+#                     needs Ultimate fw 3.15+ plus GideonZ/1541ultimate#807)
+#   ip65 + mtu1440 -> WG_MTU1440=1         (native 1472 caps, NO firmware
+#                     dependency of any kind -- it talks to a CS8900a, not to
+#                     the Ultimate firmware)
+# Passing UCI_CHUNKED_WRITE=1 to an ip65 build would be meaningless, and
+# passing WG_MTU1440=1 to a uci build without the chunked path is refused by
+# the Makefile at parse time because WG_MTU would silently clamp back to 860.
 build_variant() {
-    local backend="$1" reu="$2" chunked="$3" out="$4"
-    local kind="default"
+    local backend="$1" reu="$2" kind="$3" out="$4"
     local -a extra=()
-    if [ "$chunked" = "1" ]; then
-        extra=(UCI_CHUNKED_WRITE=1)
-        kind="mtu1440"
+    if [ "$kind" = "mtu1440" ]; then
+        case "$backend" in
+            uci)  extra=(UCI_CHUNKED_WRITE=1) ;;
+            ip65) extra=(WG_MTU1440=1) ;;
+            *) echo "ERROR: build_variant: unknown backend '$backend'" >&2; exit 1 ;;
+        esac
+    elif [ "$kind" != "default" ]; then
+        echo "ERROR: build_variant: unknown kind '$kind'" >&2; exit 1
     fi
-    echo "=== $out (BACKEND=$backend REU=$reu${chunked:+ UCI_CHUNKED_WRITE=$chunked}) ==="
+    echo "=== $out (BACKEND=$backend REU=$reu ${extra[*]:-default-MTU}) ==="
     make clean >/dev/null
     make BACKEND="$backend" REU="$reu" "${extra[@]}" >/dev/null
     assert_labels "$out" "$kind" "$backend"
     cp build/wireguard.prg "$REL/$out"
 }
 
-build_variant ip65 1 0 wireguard-rrnet-reu.prg
-build_variant ip65 0 0 wireguard-rrnet-noreu.prg
-build_variant uci  1 0 wireguard-uci-reu.prg
-build_variant uci  0 0 wireguard-uci-noreu.prg
-build_variant uci  0 1 wireguard-uci-noreu-mtu1440.prg
-build_variant uci  1 1 wireguard-uci-reu-mtu1440.prg
+# ip65 ships at MTU 1440 ONLY, and no longer at 860.
+#
+# WHY 860 EXISTED AT ALL, since the reason was never an ip65 one: WG_MTU 860
+# derives from WG_DATAGRAM_CAP 892, which is the UCI SOCKET_WRITE payload cap
+# ($11, one block). ip65 advertises NET_UDP_SEND_MAX/RECV_MAX 1472/1472
+# natively and has no such cap -- so an ip65 build at 860 was carrying a UCI
+# limitation into a backend that does not have it. It shipped that way only
+# because WG_MTU1440 is a generic opt-in defaulting off.
+#
+# wireguard-rrnet-noreu-mtu1440.prg is also the ONLY artifact in this set
+# validated on real hardware: a physical CS8900a in the U64E cartridge port,
+# handshake to ACTIVE and content-verified transport both ways, three runs,
+# 2026-09-05. Its sha256 is pinned in docs/RELEASE_NOTES_v1.2.0.md against the
+# run logs, so a rebuild that no longer reproduces it is a signal, not a
+# curiosity. Dropping 860 means the ip65 slot on every disk is now the build
+# that actually ran, rather than a sibling of it.
+#
+# The -mtu1440 suffix is KEPT rather than renaming these to the plain
+# wireguard-rrnet-*.prg names: those names shipped in v1.1.0 meaning MTU 860,
+# and reusing them at 1440 would change what a filename means between releases
+# without saying so. A name with no successor is a louder signal.
+build_variant ip65 0 mtu1440 wireguard-rrnet-noreu-mtu1440.prg
+build_variant ip65 1 mtu1440 wireguard-rrnet-reu-mtu1440.prg
+build_variant uci  1 default wireguard-uci-reu.prg
+build_variant uci  0 default wireguard-uci-noreu.prg
+build_variant uci  0 mtu1440 wireguard-uci-noreu-mtu1440.prg
+build_variant uci  1 mtu1440 wireguard-uci-reu-mtu1440.prg
 
 cp "$WARNING" "$REL/FIRMWARE-WARNING.txt"
 
@@ -184,12 +242,20 @@ make_d64_2() {
     done
 }
 
-make_d64_2 wireguard-reu.d64   wireguard-rrnet-reu.prg   "wg-rrnet" \
-                                wireguard-uci-reu.prg    "wg-uci"   "wireguard reu"
-make_d64_2 wireguard-noreu.d64 wireguard-rrnet-noreu.prg "wg-rrnet" \
-                                wireguard-uci-noreu.prg  "wg-uci"   "wireguard noreu"
+# One disk per REU class, carrying one build of each backend. The ip65 slot is
+# the MTU-1440 build now that 860 is gone; the uci slot stays at 860, which is
+# a real constraint for that backend rather than an inherited one.
+make_d64_2 wireguard-reu.d64   wireguard-rrnet-reu-mtu1440.prg   "wg-rrnet" \
+                                wireguard-uci-reu.prg            "wg-uci"   "wireguard reu"
+make_d64_2 wireguard-noreu.d64 wireguard-rrnet-noreu-mtu1440.prg "wg-rrnet" \
+                                wireguard-uci-noreu.prg          "wg-uci"   "wireguard noreu"
 make_d64_2 wireguard-mtu1440.d64 wireguard-uci-noreu-mtu1440.prg "wg-mtu1440-noreu" \
                                   wireguard-uci-reu-mtu1440.prg   "wg-mtu1440-reu"   "wg mtu1440"
+# No separate RR-Net disk: with 860 dropped, both RR-Net builds are already the
+# ip65 slot on wireguard-reu.d64 and wireguard-noreu.d64. A third disk would
+# just be a second copy of the same two PRGs. (It existed in the first draft of
+# this release, when ip65 shipped at both MTUs and the 1440 pair had nowhere to
+# live that was not the #807 firmware disk.)
 
 # --- Version stamp -----------------------------------------------------
 VERSION="$(git describe --tags --always --dirty)"

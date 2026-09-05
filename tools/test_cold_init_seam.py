@@ -447,6 +447,8 @@ def main() -> int:
     print("\n=== tools/ call sites ===")
     scanned = 0
     all_bad: list[str] = []
+    vanished: list[str] = []
+    unreadable: list[str] = []
     for path in sorted(TOOLS_DIR.glob("*.py")):
         # This file is NOT skipped. The mutants are `.format()` templates
         # whose placeholder resolves to no real label, so they cannot
@@ -454,8 +456,24 @@ def main() -> int:
         # likely to grow a real call site unscanned.
         try:
             source = path.read_text()
+        except FileNotFoundError:
+            # TOCTOU, not a finding. glob() listed it and it was gone before
+            # the read, which means another suite wrote a scratch .py into
+            # tools/ and cleaned it up mid-scan — test_live_tool_seams did
+            # exactly that with zz_uncalled_verdict_alarm_probe.py and turned
+            # this suite red inside a parallel gate run while passing
+            # standalone. A file that no longer exists CANNOT contain a call
+            # site, so folding it into all_bad asserted the opposite of what
+            # was observed, and printed the BRK diagnosis below about a file
+            # nothing had read. Recorded and reported, never counted as a
+            # violation.
+            vanished.append(path.name)
+            continue
         except OSError as exc:
-            all_bad.append(f"{path.name}: unreadable ({exc})")
+            # Still present but unreadable is a real scan failure: the file
+            # is there and its call sites are unknown. That is inconclusive,
+            # which is its own check below rather than a span violation.
+            unreadable.append(f"{path.name}: {exc}")
             continue
         try:
             bad = violations_in(source, lo, hi, labels)
@@ -466,6 +484,10 @@ def main() -> int:
         for v in bad:
             all_bad.append(describe(f"tools/{path.name}", v))
 
+    if vanished:
+        print(f"  note  {len(vanished)} file(s) vanished between glob and "
+              f"read (another suite's scratch file): {', '.join(vanished)}")
+
     check(f"no tools/*.py call site executes an address in the span "
           f"({scanned} files scanned)",
           not all_bad,
@@ -475,6 +497,11 @@ def main() -> int:
               "sits below the APP_BSS boundary and runs surviving code "
               "first. Delete the call: there is no build in which it is "
               "needed." if all_bad else ""))
+
+    # Separate, because "I could not look" and "I looked and it was bad" are
+    # different claims and must not share a verdict line.
+    check("every tools/*.py that still exists was readable",
+          not unreadable, "\n".join(unreadable))
 
     self_test(lo, hi, labels)
 
