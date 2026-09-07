@@ -163,7 +163,11 @@ WHAT WE DO NOT ASSUME
   published:
     - Reads vs writes: `lda $DE02` and `sta $DE02` -- SAME address, same
       128-unrolled body, opcode the only difference -- both 32640 ticks,
-      bit-identical, in two independent runs. RAM at $CF00 was likewise
+      bit-identical, in two independent runs. Independently confirmed at
+      the address the transmit path actually uses: W measured
+      assumption-free as (T256-T192)/32 gives 0.997 PHI2 per access at
+      RTDATA $DE08/$DE09 at index 15, so the TX data phase reaches the
+      floor too. RAM at $CF00 was likewise
       measured with lda AND sta at one address and shows zero excess both
       ways. (The VIC row is the loose one: $D012 read vs $D020 write, since
       $D012 cannot meaningfully be written. It does not bear on the
@@ -184,8 +188,19 @@ WHAT WE DO NOT ASSUME
       rounds the period UP to 2, 3 or 4. An earlier "2 PHI2 for an isolated
       access" figure is withdrawn on that basis -- 2.000 is what one
       particular loop period rounds to, not an access cost. Saturation sets
-      in around 0.5-0.6 PHI2 of CPU work per access. No closed-form model is
-      offered: theirs matched 94 of 128 cells and was withheld, correctly.
+      in around 0.5-0.6 PHI2 of CPU work per access.
+      The behaviour is now MODELLED and the model CONFIRMED, on six
+      spacings it was not fitted to: period(gap) = max(1, ceil(A + w)),
+      w = gap_cycles/M in PHI2, A in [0.4687, 0.4870]. At index 15 the
+      registered pair n=10 -> 1.0623 and n=11 -> 1.9998 landed as predicted
+      -- one nop apart, a factor-of-two step nothing smooth produces. The
+      same run EXCLUDED the previously quoted A = 0.451, which fitted the
+      original 128 cells and predicts 1.0625 where 1.9998 was measured.
+      IT PREDICTS, IT DOES NOT EXPLAIN. A ~ 0.478 sits measurably below one
+      half (0.5000 is excluded by ~0.013 PHI2), so the obvious "a request
+      must arrive before the halfway point to catch the current slot"
+      reading is wrong, and no account of the difference is offered. Do not
+      read the formula as a mechanism.
 
   STATED LIMIT, not an open question: nothing available on this hardware
   separates the connector's electrical timing from the core choosing to run
