@@ -113,14 +113,19 @@ deprecated alias, but it is a hard assign that clobbers the library's own
 `-t c64 -g` — every sibling object through the v0.10.1 pin was assembled
 without the C64 target or debug info.
 
-The companion `CONTRACT_ZP_DEFINES` is threaded through but left empty.
-It would be the natural home for `-D ZP_CONFIG_NO_EXPORTS=1` (WG #51),
-which suppresses `zp_config.o`'s redundant `.exportzp` block — but
-`libs/x25519/src/constants.s` assigns that symbol *unguarded* before
-including `zp_config.s`, so a command-line `-D` is a hard
-"already defined" error in every TU. Not currently reachable through any
-supported seam; filed as [c64-x25519#99](https://github.com/JC-000/c64-x25519/issues/99),
-where the fix is a one-line `.ifndef`.
+The companion `CONTRACT_ZP_DEFINES` carries `-D ZP_CONFIG_NO_EXPORTS=1`
+(`build_x25519.sh:140,151`), which suppresses `zp_config.o`'s redundant
+`.exportzp` block — the ten-name collision with WG's own ZP registry that
+is WG #51. It was *not* reachable before the v0.11.1 pin:
+`libs/x25519/src/constants.s` assigned that symbol *unguarded* before
+including `zp_config.s`, so a command-line `-D` was a hard
+"already defined" error in every TU. Filed as
+[c64-x25519#99](https://github.com/JC-000/c64-x25519/issues/99) and fixed
+upstream with the one-line `.ifndef` guard in v0.11.1; the flag has been
+passed here since. The precondition is standing, not incidental: WG must
+keep supplying *every* slot in the library's `zp_config.s`, not just the
+overlapping ones, or suppression turns a duplicate export into an
+unresolved external.
 
 Two ca65/make traps this flag list exists to avoid, both of which fail
 **silently**:

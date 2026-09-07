@@ -236,7 +236,8 @@ WG_REU_BANKS_USED = $00
 ; should look at. A band would only buy room to miss a small regression.
 ;
 ; RE-MEASURING. When a pin bump legitimately moves a number, do not widen
-; a tolerance — rebuild all four profiles and read the new values from the
+; a tolerance — rebuild all four BACKEND x REU cells and read the new values
+; from the
 ; `Segment list` of build/wireguard.map:
 ;   for B in uci ip65; do for R in 0 1; do make clean; make BACKEND=$B REU=$R
 ;     && grep -E '^LIB_(X25519|CHACHA20_POLY1305)_' build/wireguard.map; done; done
@@ -251,13 +252,16 @@ WG_REU_BANKS_USED = $00
 ; --version` and `git -C libs/x25519 status` first.
 ;
 ; Values below MEASURED 2026-09-06 at the x25519 v0.16.0 / chacha v0.11.0
-; pins, all four profiles, one clean matrix run.
+; pins, all four BACKEND x REU cells, one clean matrix run. Those four cells
+; cover both library profiles (onchip at REU=0, REU at REU=1). The RELEASE
+; set is SIX variants, not four, but the MTU axis moves neither library —
+; MEASURED: every figure in this section is identical across all six.
 .import __LIB_CHACHA20_POLY1305_CODE_SIZE__, __LIB_CHACHA20_POLY1305_DATA_SIZE__
 .import __LIB_X25519_CODE_SIZE__, __LIB_X25519_DATA_SIZE__, __LIB_X25519_INIT_CODE_SIZE__
 
 ; chacha is REU-free on every path (its LIB_CHACHA20_POLY1305_REU_BANKS_USED
 ; is $00), so its two segments do not vary with the profile.
-.assert __LIB_CHACHA20_POLY1305_CODE_SIZE__ = 8448, lderror, "LIB_CHACHA20_POLY1305_CODE is not the 8448 bytes measured at the v0.11.0 pin — the bytes ld65 pulled from chacha20poly1305.a changed; if a pin bump moved it, re-measure all four profiles off build/wireguard.map and update src/contract_asserts.s §6.6"
+.assert __LIB_CHACHA20_POLY1305_CODE_SIZE__ = 8448, lderror, "LIB_CHACHA20_POLY1305_CODE is not the 8448 bytes measured at the v0.11.0 pin — the bytes ld65 pulled from chacha20poly1305.a changed; if a pin bump moved it, re-measure all four BACKEND x REU cells off build/wireguard.map and update src/contract_asserts.s §6.6"
 .assert __LIB_CHACHA20_POLY1305_DATA_SIZE__ = 295, lderror, "LIB_CHACHA20_POLY1305_DATA is not the 295 bytes measured at the v0.11.0 pin — see §6.6 re-measuring note"
 
 ; x25519's DATA segment is the mul tables; it loads into LOADER, not
@@ -290,9 +294,55 @@ WG_REU_BANKS_USED = $00
 ; equates, it reads them from the manifest TU.
 ;
 ; MEASURED at these pins (declared vs linked): x25519 8234 vs 7058 onchip,
-; 8506 vs 7330 REU; chacha 17664 vs 8743 both. x25519's COLD equate tracks
-; INIT_CODE exactly (160 / 947), so that leg is asserted `=`, not `>=`.
-.assert LIB_X25519_RESIDENT_BYTES >= (__LIB_X25519_CODE_SIZE__ + __LIB_X25519_DATA_SIZE__), lderror, "x25519 declares fewer RESIDENT_BYTES than its segments contribute to this link — the library's manifest under-states its own archive; do not plan memory against it"
+; 8506 vs 7330 REU; chacha 17664 vs 8743 both (identical on all SIX release
+; variants — the six collapse to TWO library profiles, onchip at REU=0 and
+; REU at REU=1; BACKEND and MTU change neither library). x25519's COLD
+; equate tracks INIT_CODE exactly (160 / 947), so that leg is asserted `=`,
+; not `>=`.
+;
+; BASIS: PLACED SPAN, DELIBERATELY. Both legs compare the declaration against
+; __LIB_*_SIZE__, which is what ld65 PLACED — the segment's span, internal
+; alignment fill included. That is the basis c64-lib-contract draft §5 pins,
+; but it does not rest on that: span is the quantity we must actually find
+; address space for — 8448 bytes for LIB_CHACHA20_POLY1305_CODE, not 8056 —
+; so adopting the object-size-sum basis instead would weaken these legs by
+; 392 B in exchange for nothing. The reasoning outlives the clause; if §5
+; ever repins, re-derive from this paragraph rather than from conformance.
+; Pre-segment fill is NOT charged and must not be: c64-https demonstrated
+; that routing one of their OWN segments out moved a library segment's
+; leading pad by a full page with the segment's size unchanged, so it is a
+; consumer property, not a library one. Link-published sizes already exclude
+; everything before the segment, so this comparison needs no adjustment for
+; it.
+;
+; The two bases genuinely differ today, and by enough to matter. MEASURED at
+; these pins: x25519's three segments carry 0 B of internal fill, so both
+; bases coincide there; LIB_CHACHA20_POLY1305_CODE carries 392 B across 7
+; modules — od65 object-size sum 8056, placed span 8448. So a library that
+; declares the OBJECT-SIZE SUM fails this section, and fails it CORRECTLY:
+; DEMONSTRATED by setting chacha's RESIDENT_BYTES to its true sum of 8351,
+; which trips the leg below (8743 links). Diagnose such a failure as a
+; declaration published on the wrong basis — not as a bug in these asserts,
+; and not as a manifest that under-states its own archive.
+;
+; That 392 needs no guard of its own: any cfg `align =` change moves the
+; segment SIZE, so the exact-equality ratchets ~40 lines above fire on the
+; byte and force a re-measure before this number can mislead anyone. A fill
+; assert would be a second guard for a condition the first already catches,
+; and catches first — and could not be written directly anyway, since ld65
+; publishes no object-size sum. This is a documented dependency on the
+; ratchet, not an unguarded number.
+;
+; INERT AT CURRENT PINS — READ THIS BEFORE COUNTING IT AS PROTECTION.
+; x25519 declares 8234/8506 RESIDENT and contributes 7058/7330 to this link,
+; so this leg carries 1176 B of slack in BOTH profiles (MEASURED; bisected —
+; a declared 7058 links, 7057 fires). It does NOT fire on a one-byte manifest
+; mutation, unlike the COLD leg below. Any real movement in x25519's linked
+; size trips the exact-equality ratchets ~25 lines above first, because ld65
+; reports only its first error. Of the 1176, 1024 is LIB_X25519_PRECALC_sqtab_SIZE
+; — a consumer-placed table the declaration deliberately covers and these
+; segments do not — and 152 is util.o, the one archive member WG never pulls.
+.assert LIB_X25519_RESIDENT_BYTES >= (__LIB_X25519_CODE_SIZE__ + __LIB_X25519_DATA_SIZE__), lderror, "x25519 declares fewer RESIDENT_BYTES than its LIB_X25519_CODE+DATA span contributes to this link — the basis here is ld65 PLACED SPAN (internal alignment fill charged, pre-segment fill not), per c64-lib-contract draft §5; if the manifest now publishes an od65 object-size sum instead, this fires CORRECTLY and the declaration is on the wrong basis (MEASURED 0 B of internal fill in these two segments at the v0.16.0 pin, so the two bases coincided for x25519 when this was written; chacha's CODE segment differs by 392 B). Otherwise the manifest under-states its own archive; either way, do not plan memory against it"
 ; EQUALITY HERE IS DELIBERATE, AND IT ASSERTS A WG PROPERTY, NOT A LIBRARY
 ; ONE. COLD_BYTES is an archive-wide declaration; __LIB_X25519_INIT_CODE_SIZE__
 ; is what THIS link pulled. `>=` is the relation that follows from linked
@@ -307,8 +357,16 @@ WG_REU_BANKS_USED = $00
 .assert LIB_X25519_COLD_BYTES = __LIB_X25519_INIT_CODE_SIZE__, lderror, "x25519 declares more COLD_BYTES than LIB_X25519_INIT_CODE contributes to this link — most likely WG no longer references every one of x25519 cold members (upstream added cold code we do not call), not a malformed manifest; see the note above before editing the library"
 ; INERT AT CURRENT PINS — READ THIS BEFORE COUNTING IT AS PROTECTION.
 ; chacha declares 17664 RESIDENT_BYTES and contributes 8743 B to this link,
-; so this assert carries 8921 B of slack (MEASURED, all four profiles) and
-; cannot fire on any realistic movement. It is the mild form of the
+; so this assert carries 8921 B of slack (MEASURED on all SIX release
+; variants — the figure is identical across them; bisected, a declared 8743
+; links and 8742 fires) and cannot fire on any realistic movement. The 8921
+; decomposes exactly: 1120 B the manifest over-declares on purpose (its own
+; comment measures this branch at 16544), plus 8193 B from
+; POLY1305_MULTIPLY_ROLLED_OUTER — an axis the manifest does not model at
+; all, so 17664 describes a configuration WG never builds — minus the 392 B
+; of link fill noted above. NOT under-linking: our link pulls every member
+; of the archive as we configure it, and the SHARED_* deferral defines are
+; worth 297 B, not 8921. It is the mild form of the
 ; tautology deleted above and is kept for ONE reason only: it gives
 ; LIB_CHACHA20_POLY1305_RESIDENT_BYTES a reader, so the .import stays and
 ; the equate is still REQUIRED to exist at link time. The guard that
@@ -533,7 +591,8 @@ WG_REU_BANKS_USED = $00
 ; reaches them, so the library's domain guard is statically decidable at
 ; those two sites and cannot reject. transport.s was the only call site with
 ; runtime-derived operands, which is why it is the only one that needed the
-; status check. (MEASURED: hs_packet resolves to $8930 in all four profiles.)
+; status check. (MEASURED: hs_packet resolves to $8930 in all SIX release
+; variants.)
 ;
 ; WHAT THIS ASSERT DOES AND DOES NOT DO. It bounds the highest byte those two
 ; sites write — the second tag lands at hs_packet+100..115 — against the 148

@@ -348,7 +348,7 @@ endif
 # the migration history).
 all: $(PRG)
 
-# Build the full release artifact set (4 PRG variants + 2 D64 images +
+# Build the full release artifact set (6 PRG variants + 3 D64 images +
 # SHA256SUMS) into build/release/. See tools/release/build_release.sh.
 # (Declared after `all` — the first rule in the file is the default goal.)
 release:
