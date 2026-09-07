@@ -74,6 +74,26 @@ KNOWN_BUILDS = {
         "multi-part parity rests on the firmware lane's uci-net-target, "
         "which is a third-party report, not our measurement.",
     ),
+    "4011c97c": (
+        "chunked",
+        "The image on device 601A96 (fw 3.15, fpga 125, core 1.4F). $16 "
+        "OBSERVED TO DISPATCH on 2026-09-07: test_uci_udp_echo_live.py with "
+        "ECHO_PAYLOAD_LEN=888,1472 against a UCI_CHUNKED_WRITE=1 build "
+        "returned udp_recv_len=1472 net_last_error=$00 — not $8E. A full-MTU "
+        "wire-encryption run the same day passed 60/60 with 1452- and "
+        "1472-byte datagrams. REASSEMBLY-EVIDENCE: 1472B as 1 datagram on "
+        "2026-09-07. So firmware-side "
+        "REASSEMBLY is measured on this image, unlike a474a7ed. "
+        "READ THIS AS BEHAVIOURAL, NOT AS IDENTIFICATION: git_commit_hash is "
+        "the builder's assertion, embedded from git rev-parse with no --dirty "
+        "marker, so what is recorded is 'a device reporting this hash "
+        "dispatched $16 on 601A96 on 2026-09-07', NOT 'this commit contains "
+        "the handler'. A different image reporting the same hash is not "
+        "covered. NOTE this hash was on the device before 2026-09-07 and we "
+        "declined to build chunked against it for weeks, having inferred "
+        "absence of the capability from absence of an attestation. Probe, do "
+        "not assume.",
+    ),
 }
 
 # Verdicts describe what we know about the CHUNKED SEND PATH ($16):
