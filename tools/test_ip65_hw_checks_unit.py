@@ -109,7 +109,7 @@ _spec.loader.exec_module(C)
 #: whichever branch it takes, so two runs are comparable and a case that
 #: silently stopped running is a hard error rather than a smaller
 #: denominator nobody notices. Update deliberately when adding a check.
-EXPECTED_CHECKS = 210
+EXPECTED_CHECKS = 213
 
 # Disjoint alphabets: an echo of a request can never satisfy a reply check.
 REQ_ALPHABET = string.ascii_uppercase + string.digits
@@ -1875,6 +1875,30 @@ def case13_bench_health(rng: random.Random, res: Result) -> None:
     v = C.check_bench_health(False, replies=0)
     res.check(not v.ok, "case13b/failed-control-gates-the-run",
               "a failed bench control did not fail the check")
+    # Issue #144 — the caveat cuts BOTH ways, and the failing direction is
+    # the one it was not being applied to. The FAIL text must scope itself
+    # to the stock-ip65 path it actually exercises. Asserted in both
+    # directions on purpose: presence of the scoping AND absence of the
+    # blanket claim, so neither deleting the scoping nor re-adding the
+    # overstatement survives.
+    res.check(C.BENCH_CONTROL_CAVEAT in v.reason
+              and v.evidence.get("caveat") == C.BENCH_CONTROL_CAVEAT,
+              "case13b2/caveat-travels-with-the-failure",
+              "the FAIL does not carry the driver-path caveat in its own "
+              "text, so a red control reads as an indictment of a driver "
+              "path it never exercised")
+    res.check("STOCK-IP65" in v.reason and "at this clock" in v.reason,
+              "case13b2/failure-is-scoped",
+              "the FAIL does not say WHICH path is unproven, nor that the "
+              "finding is clock-local; the run-level guard already aborts "
+              "only when the control fails at EVERY clock, so an unscoped "
+              "verdict disagrees with the harness's own control flow")
+    res.check("nothing about our build can be concluded" not in v.reason,
+              "case13b2/failure-claims-no-blanket-void",
+              "the FAIL still claims nothing about our build can be "
+              "concluded -- contradicted on 2026-09-07 by the same run, "
+              "which at the same 48 MHz on the same cable reached ACTIVE "
+              "in 18.9 s and content-verified transport byte-exact")
     v = C.check_bench_health(None)
     res.check(not v.ok, "case13c/control-not-run",
               "the control never having been run passed")

@@ -2805,8 +2805,14 @@ def main(argv: Optional[list[str]] = None) -> int:
 
         # 2. Bench health FIRST, at every requested clock, before our build
         #    is loaded at all. Stock ip65 on this silicon is the control: if
-        #    it cannot ping, the bench is wrong and nothing about our build
-        #    can be concluded from a later failure.
+        #    it cannot ping, the bench or the stock-ip65 CS8900a transmit
+        #    path is wrong AT THAT CLOCK, and any later result that rides
+        #    THAT path cannot be concluded (issue #144). It is not a blanket
+        #    void on our build: the control links c64rrnet.lib and our blob
+        #    links ip65_c64.lib's COMBO wrapper, so it exercises our driver
+        #    path in neither direction -- see BENCH_CONTROL_CAVEAT. That is
+        #    why the abort below fires only when the control fails at EVERY
+        #    requested clock.
         #
         #    Running it at BOTH clocks is what makes CPU speed a declared
         #    axis cheaply. The open question is whether the U64 times

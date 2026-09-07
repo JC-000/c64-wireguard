@@ -1542,9 +1542,26 @@ def check_bench_health(ping_ok: bool | None, *, replies: int = 0,
                        control: str = "pingstatic-1066.prg") -> Verdict:
     """The static-IP ping control succeeded, so the bench itself is sound.
 
-    Gates the whole run: if this fails, the cable, the NIC, the cartridge or
-    the rig is wrong and NOTHING about our build can be concluded from
-    anything downstream. Cartridge presence is part of what it proves --
+    SCOPE OF A FAILURE (issue #144). A failed control means the cable, the
+    NIC, the cartridge, the rig, or the stock-ip65 CS8900a transmit path is
+    wrong AT THIS CLOCK. It does NOT mean nothing about our build can be
+    concluded: BENCH_CONTROL_CAVEAT's stock-vs-COMBO distinction cuts in
+    both directions, and the failing direction is the one it was not being
+    applied to. The control links c64rrnet.lib and our blob links
+    ip65_c64.lib's COMBO wrapper, so it exercises our driver path in
+    neither direction -- a green control is not cover for our driver, and a
+    red one is not an indictment of it. Measured 2026-09-07: the control
+    failed at 48 MHz (ERROR CODE 82, TRANSMIT_FAILED, the known upstream
+    hazard of stock ip65 transmitting too soon after ip65_init) in a run
+    that, at that same 48 MHz on that same cable, took our build to a
+    WireGuard handshake in 18.9 s, content-verified transport byte-exact
+    both directions, and passed all nine wire assertions including
+    plaintext absence with its control.
+
+    What a failure DOES void is anything downstream that rides the stock
+    control's own path. The run-level guard in test_ip65_rrnet_hw.py is
+    already scoped this way: it aborts only when the control fails at EVERY
+    requested clock. Cartridge presence is part of what it proves --
     there is no valid host-side DMA test for that, because `Cartridge
     Preference = Auto`, `after run_prg`, and `no cartridge at all` all read
     $DE00 as zeros, so one observation covers four states and a checker
@@ -1558,9 +1575,13 @@ def check_bench_health(ping_ok: bool | None, *, replies: int = 0,
                               "attributed to our build at all", ev)
     if not ping_ok:
         return Verdict(False, f"the bench-health control {control} FAILED "
-                              f"({replies} replies): the bench is wrong, and "
-                              "nothing about our build can be concluded from this "
-                              "run", ev)
+                              f"({replies} replies) at this clock: the STOCK-IP65 "
+                              "CS8900a transmit path is unproven here, so any "
+                              "result that depends on THAT path specifically "
+                              "cannot be concluded. It does not by itself void "
+                              "results from our own driver path, which this "
+                              "control does not exercise in either direction -- "
+                              f"{BENCH_CONTROL_CAVEAT}", ev)
     if replies < 1:
         return Verdict(False, f"{control} reported success with {replies} replies; "
                               "a control that passes without an answer is not a "
