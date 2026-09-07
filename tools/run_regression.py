@@ -48,6 +48,10 @@ TESTS = [
     ("u64_firmware", ["tools/test_u64_firmware.py", "--verbose"]),
     ("session",    ["tools/test_session.py", "--seed", "51820", "--verbose"]),
     ("transport",  ["tools/test_transport.py", "--seed", "7539"]),
+    # chacha20poly1305 SPEC §14.1: aead_encrypt returns a status now, and
+    # the three consumer ENCRYPT sites ignored it, shipping the previous
+    # packet's poly1305_tag over cleartext. Default tree, so pooled.
+    ("aead_status", ["tools/test_aead_encrypt_status_checked.py", "--seed", "7539"]),
     ("blake2s",    ["tools/test_blake2s.py", "--seed", "7539"]),
     ("chacha",     ["tools/test_chacha20_poly1305.py", "--seed", "7539"]),
     ("fe25519",    ["tools/test_fe25519.py", "--seed", "7539"]),
