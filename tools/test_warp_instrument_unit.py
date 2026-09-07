@@ -84,7 +84,7 @@ from c64_test_harness.encoding.screen_codes import SCREEN_CODE_TABLE  # noqa: E4
 # branch that does not apply still emits its names as skips. Pinned so a
 # case that silently stops running is a hard error, not a smaller
 # denominator nobody notices.
-EXPECTED_CHECKS = 56
+EXPECTED_CHECKS = 67
 
 #: src/net/uci/uci_errors.inc:244. Retyped here ONLY as the value case 8
 #: pins the BUILT layout against; the tool itself always derives the
@@ -502,7 +502,7 @@ def load_tool():
 
 
 def drive(mod, labels: dict, trials: list[Trial], rng: random.Random,
-          seed: int, backend: str, prg: Path, **kw):
+          seed: int, backend: str, prg: Path, boundary_rung=None, **kw):
     """Run the tool's Stage C against the scripted device.
 
     Returns (result, device) — the device so a case can check its own
@@ -526,8 +526,11 @@ def drive(mod, labels: dict, trials: list[Trial], rng: random.Random,
     # record, which is the very fact #146 is about. The stub returns a
     # plausible over-boundary answer; select_boundary_rung's own refusal
     # behaviour is proved directly in case 17, not through drive().
-    mod.select_boundary_rung = lambda *a, **k: (
-        "namecheap.com", 1400, [("namecheap.com", 1400)])
+    # `boundary_rung` lets a case inject its own selector -- including one
+    # that RAISES, which is how the rung-scope refusal is proved not to
+    # abort the run.
+    mod.select_boundary_rung = boundary_rung or (lambda *a, **k: (
+        "namecheap.com", 1400, [("namecheap.com", 1400)]))
     try:
         r = mod.run_stage_c(dev, FakeClient(), labels,
                             bytes(32), bytes(32), bytes(32), seed,
@@ -1263,6 +1266,15 @@ def case9_boundary_rung(mod, labels, rng, seed, res: Result, ctx) -> None:
     #     `dig_measured` reported 1928 for a rung that received 39 B.
     r, _dev = drive(mod, labels, [Trial(), Trial()], rng, seed, **ctx,
                     large_repeats=1)
+    # NOT optional. With an empty query record `keys` is set() and both
+    # checks below pass vacuously -- "no field claims measurement" is
+    # trivially true when there are no fields, and all() over [] is True.
+    # A vacuous check is indistinguishable from a satisfied one, which is
+    # the whole subject of this suite.
+    res.check(len(r.get("queries") or []) >= 2, "case9d/queries-exist",
+              f"the run produced {len(r.get('queries') or [])} query records; "
+              "the two field checks below would pass vacuously on an empty "
+              "list, asserting nothing")
     keys = set().union(*(set(q) for q in r["queries"])) if r.get("queries") else set()
     res.check("dig_measured" not in keys, "case9d/no-field-claims-false-measurement",
               "`dig_measured` is back in the query record; it carried the "
@@ -1273,6 +1285,119 @@ def case9_boundary_rung(mod, labels, rng, seed, res: Result, ctx) -> None:
               "case9d/every-size-declares-its-source",
               "a query record does not say whether its expected size was "
               f"measured or read from the table: {sorted(keys)}")
+
+    # (h) A TRUNCATED answer is not a measurement of the record. 1.1.1.1
+    #     answers github.com TXT with TC=1 and no answer records at every
+    #     bufsize from 512 to 4096 (measured 2026-09-07), which is why #146's
+    #     rung received 39 B — the record did not shrink, the resolver is
+    #     demanding TCP, and the C64 speaks only UDP DNS. A TC reply that
+    #     happened to land over the boundary would be a length that measures
+    #     the refusal, so it must not be selected.
+    tc_big = mod._MeasuredReply(rng.randrange(boundary + 1, boundary + 200),
+                                truncated=True)
+    clean_big = mod._MeasuredReply(rng.randrange(boundary + 1, boundary + 200))
+    tc_sizes = {"tc.example": tc_big, "clean.example": clean_big}
+    nm, sz, obs = mod.select_boundary_rung(
+        candidates=("tc.example", "clean.example"),
+        measure=lambda n, **k: tc_sizes.get(n))
+    res.check(nm == "clean.example" and sz == clean_big,
+              "case9h/truncated-answer-not-selected",
+              f"selected {nm!r} at {int(sz)} B; tc.example measured "
+              f"{int(tc_big)} B with TC=1, which measures the resolver's "
+              "demand for TCP, not the record")
+    res.check(("tc.example", tc_big) in obs,
+              "case9h/truncated-answer-still-recorded",
+              "a truncated candidate vanished from the record instead of "
+              f"being reported as truncated: {obs}")
+    try:
+        mod.select_boundary_rung(candidates=("tc.example",),
+                                 measure=lambda n, **k: tc_sizes.get(n))
+    except mod.BoundaryRungUnavailable as exc:
+        res.check("TRUNCATED" in str(exc), "case9h/refusal-names-truncation",
+                  "the refusal does not say the candidate was truncated, so "
+                  f"a maintainer reads it as a small record: {exc}")
+    else:
+        res.check(False, "case9h/refusal-names-truncation",
+                  "a TC-only candidate list was accepted rather than refused")
+
+    # (e) SCOPE. The refusal must cost ONE RUNG, not the run. An earlier
+    #     revision returned from stage C, which spent the handshake and
+    #     every --multipart rung (the #70 chunked-send proof) on a
+    #     HOST-SIDE condition — an unreachable resolver on the lab machine
+    #     voiding a C64 hardware run.
+    def _refuse(*a, **k):
+        raise mod.BoundaryRungUnavailable(
+            "no candidate reaches the boundary (injected)",
+            observed=[("a.example", 100), ("b.example", None)])
+
+    baseline, _d = drive(mod, labels, [Trial(), Trial()], rng, seed, **ctx,
+                         large_repeats=1)
+    refused, _d = drive(mod, labels, [Trial(), Trial()], rng, seed, **ctx,
+                        large_repeats=1, boundary_rung=_refuse)
+    res.check(len(refused.get("queries") or []) == len(baseline["queries"]) - 1,
+              "case9e/refusal-costs-one-rung-not-the-run",
+              f"a refused boundary rung left "
+              f"{len(refused.get('queries') or [])} queries where the same "
+              f"run with a usable rung produced {len(baseline['queries'])}; "
+              "the refusal must drop ONE rung, not abort stage C and take "
+              "the handshake, the ladder and the multipart rungs with it")
+    res.check(all(q.get("expected_reply_len_source") == "table constant"
+                  for q in (refused.get("queries") or [])),
+              "case9e/no-rung-claims-the-measurement-that-failed",
+              "a rung is labelled host-measured in a run where the "
+              "measurement refused")
+    # (f) ...and it must still be LOUD. A rung-scope refusal that decays
+    #     into a silent skip is the defect we started from.
+    errs = mod.stage_errors({"stage_c": refused})
+    res.check(any("boundary" in e.lower() or "candidate" in e.lower()
+                  for e in errs),
+              "case9f/refusal-reaches-the-exit-code",
+              "stage_errors() does not surface the refused boundary rung, so "
+              "the run exits 0 claiming >1280 B coverage it never had: "
+              f"{errs}")
+    res.check(refused.get("boundary_rung", {}).get("candidates_measured"),
+              "case9f/refusal-records-what-it-measured",
+              "the refusal record does not carry the per-candidate "
+              "measurements, so a maintainer cannot see why it refused: "
+              f"{refused.get('boundary_rung')}")
+    res.check(not mod.stage_errors({"stage_c": baseline}),
+              "case9f/a-usable-rung-is-not-an-error",
+              "a run whose boundary rung WAS available is still reported as "
+              f"failing: {mod.stage_errors({'stage_c': baseline})}")
+
+    # (g) THE SEEDED STREAM MUST NOT MOVE. measure_txt_reply_len runs
+    #     between random.seed(seed) and the per-query txn_ids / multipart
+    #     QNAME tokens, and its draw count depends on how many candidates
+    #     answer and how many attempts each takes — i.e. on the network. If
+    #     it drew from the module-level `random`, two runs with the same
+    #     --seed would emit DIFFERENT bytes on the wire, breaking the
+    #     standing seeded-and-logged rule. Measured against an address that
+    #     will not answer, so this stays offline and fast.
+    import random as _r
+    _r.seed(20260907)
+    want = [_r.random() for _ in range(3)]
+    _r.seed(20260907)
+    mod.measure_txt_reply_len("a.example", resolver="127.0.0.1",
+                              timeout=0.05, attempts=3)
+    got = [_r.random() for _ in range(3)]
+    res.check(got == want, "case9g/measurement-does-not-move-the-seeded-stream",
+              "measure_txt_reply_len consumed the module-level RNG, so the "
+              "number of draws before the per-query txn_ids depends on the "
+              "network and --seed no longer reproduces the wire payloads")
+
+    _r.seed(20260907)
+    want = [_r.random() for _ in range(3)]
+    _r.seed(20260907)
+    try:
+        mod.select_boundary_rung(candidates=("a.example", "b.example"),
+                                 measure=lambda n, **k: 10)
+    except mod.BoundaryRungUnavailable:
+        pass
+    got = [_r.random() for _ in range(3)]
+    res.check(got == want, "case9g/selection-does-not-move-the-seeded-stream",
+              "select_boundary_rung consumed the module-level RNG; its draw "
+              "count varies with how many candidates answer, so the wire "
+              "payloads stop being reproducible from --seed")
 
 
 def case5_order_confound(mod, labels, rng, seed, res: Result, ctx) -> None:
