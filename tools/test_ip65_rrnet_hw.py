@@ -191,11 +191,15 @@ WHAT WE DO NOT ASSUME
   separates the connector's electrical timing from the core choosing to run
   those cycles at PHI2 rate. Do not spend an evening rediscovering that.
 
-  OPEN, and it affects only the UNIT: that the CIA pair counts PHI2 rather
-  than some other clock is assumed, not yet measured -- a frame-count
-  experiment is pending. If it fails, read every figure above as CIA ticks
-  per access; the 4.055x ratio is immune either way, since the timebase
-  cancels.
+  THE UNIT IS MEASURED, not assumed: the CIA pair counts video-derived
+  PHI2. 1,709,474 / 1,709,492 / 1,709,494 ticks over 100 video frames at CPU
+  indices 0, 5 and 15, against 17095 x 100 = 1,709,500 predicted for an NTSC
+  6567R8 -- within 0.0015%, and turbo-invariant to 0.001% across a 47x CPU
+  range. A 6567R56A would have read 1,676,800 and PAL 1,965,600, so the core
+  is a 6567R8. The residual (26, 8, 6 ticks at the three indices) is under
+  prediction and SHRINKS as the CPU speeds up, which is the signature of a
+  fixed-CPU-cycle $D012 poll latency at the frame edges -- right sign, right
+  magnitude, right dependence. So k = 1: nothing above rescales.
 
   Do NOT read the 1.7x and the 4.055x as a disagreement that drove the
   retraction. The 1.7x was withdrawn because NOTHING stood behind it, and
