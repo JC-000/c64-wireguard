@@ -23,18 +23,24 @@
 #
 # Segments (contract §4, adopted upstream in v0.7.0 — issue #48 CLOSED):
 # the library now emits LIB_CHACHA20_POLY1305_CODE / _DATA and puts ZERO
-# bytes in bare CODE / DATA (measured at v0.7.0: 8094 B of _CODE across
-# five members, 295 B of _DATA; the bare names appear in the segment table
-# at size 0, as ca65 always lists them).
+# bytes in bare CODE / DATA (measured off build/wireguard.map at the
+# v0.11.0 pin: 8448 B of _CODE, 295 B of _DATA, identical for both
+# backends and both REU settings; the bare names appear in the segment
+# table at size 0, as ca65 always lists them).
 #
 #   *** CT HAZARD — the align=$100 requirement MOVED WITH THE BYTES. ***
-#   The two page-aligned nibswap LUTs read on secret indexes now live in
-#   LIB_CHACHA20_POLY1305_CODE (data_lib.o contributes 512 B of it, and the
-#   object declares Alignment: 256). It is THAT segment the cfg must place
-#   with align = $100 — an align on the now-empty bare CODE protects
-#   nothing. ld65 only WARNS on an under-aligned segment, so getting this
-#   wrong loses constant-time silently. WG's cfgs still describe the old
-#   arrangement; see cfg/c64-wireguard-*.cfg.
+#   The page-aligned LUTs read on secret indexes (the two nibswap tables,
+#   and poly1305_core's poly_reduce_shl6_tab) live in
+#   LIB_CHACHA20_POLY1305_CODE. It is THAT segment the cfg must place with
+#   align = $100 — an align on the now-empty bare CODE protects nothing.
+#   ld65 itself still only WARNS on an under-aligned segment, but this is
+#   NO LONGER SILENT: since v0.9.0 the library carries its own
+#   `.assert (tab & $00FF) = 0, lderror` guards, so a consumer cfg that
+#   drops the align fails the link. MEASURED 2026-09-06 by deleting
+#   `align = $100` from cfg/c64-wireguard-uci.cfg — ld65 emitted the
+#   warning AND then "poly_reduce_shl6_tab must be page-aligned (CT
+#   invariant)" as an Error, and no PRG was produced. WG's cfgs DO declare
+#   the align on LIB_CHACHA20_POLY1305_CODE; see cfg/c64-wireguard-*.cfg.
 # =============================================================================
 set -euo pipefail
 
@@ -100,6 +106,14 @@ for sym in LIB_CHACHA20_POLY1305_REU_BANKS_USED LIB_CHACHA20_POLY1305_SHARED_PRI
     fi
     if (( 16#$hex != 0 )); then
         echo "ERROR: $sym = 0x$hex, expected 0 — deferral defines not in effect?" >&2
+        if [[ "$sym" == LIB_CHACHA20_POLY1305_SHARED_PRIMITIVES ]]; then
+            echo "  chacha now OWNS a §8 shared primitive, so deferral is no longer" >&2
+            echo "  one-directional (today it is chacha -> x25519 only). That shape is" >&2
+            echo "  what lets ONE extra scan of x25519.a fix the ld65 archive order: if" >&2
+            echo "  x25519 starts consuming from chacha, chacha20poly1305.a needs the" >&2
+            echo "  same treatment. Re-derive SIBLING_ARCHIVES in the Makefile and the" >&2
+            echo "  §6.6c presence import in src/contract_asserts.s before proceeding." >&2
+        fi
         exit 1
     fi
 done

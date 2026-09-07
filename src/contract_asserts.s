@@ -72,7 +72,14 @@
 .import LIB_CHACHA20_POLY1305_SHARED_CONSUMES
 .import LIB_CHACHA20_POLY1305_ABI_VERSION
 
-; §6.6 footprint pairs, od65-measured on each library's side.
+;  §6.6 footprint pairs, od65-measured on each library's side. Used by the
+; §6.6b declared-vs-linked checks below — but note the .import is itself
+; load-bearing even before any assert reads the value: an .import is a
+; link-time REQUIREMENT that the symbol exist, so a manifest TU that is
+; restructured, renamed or dropped upstream becomes an unresolved external
+; here rather than a silently absent guard. That is the same mechanism the
+; §8.1 presence check below relies on. Do not remove these imports on the
+; grounds that "nothing reads them" without removing the requirement too.
 .import LIB_X25519_RESIDENT_BYTES, LIB_X25519_COLD_BYTES
 .import LIB_CHACHA20_POLY1305_RESIDENT_BYTES, LIB_CHACHA20_POLY1305_COLD_BYTES
 
@@ -126,6 +133,17 @@ WG_REU_BANKS_USED = $00
 ; nothing and catches a malformed manifest at integration time.
 .assert (LIB_X25519_SHARED_PRIMITIVES & ~LIB_X25519_SHARED_CONSUMES) = 0, lderror, "x25519 manifest is malformed: owns a §8 primitive it does not declare as consumed"
 .assert (LIB_CHACHA20_POLY1305_SHARED_PRIMITIVES & ~LIB_CHACHA20_POLY1305_SHARED_CONSUMES) = 0, lderror, "chacha20poly1305 manifest is malformed: owns a §8 primitive it does not declare as consumed"
+
+; Deferral DIRECTION is NOT asserted here, deliberately. Today every
+; deferral runs chacha -> x25519 (chacha's SHARED_PRIMITIVES is $00,
+; MEASURED at the v0.11.0 pin), and that one-directional shape is what lets
+; a single §8.1 import close the archive-order problem below. A `.assert
+; LIB_CHACHA20_POLY1305_SHARED_PRIMITIVES = 0` was written for this spot and
+; then REMOVED: tools/integration/build_chacha20poly1305.sh already refuses
+; to produce the archive when that mask is non-zero, and MEASURED it fires
+; strictly earlier — at archive-build time, before ld65 runs at all, so the
+; link-time assert could never be reached. The link-order consequence is
+; recorded on that check's message instead.
 
 ; --- §8.4 shared-table shape agreement ---------------------------------------
 ;
@@ -181,34 +199,162 @@ WG_REU_BANKS_USED = $00
 ; Both bumps are codegen-neutral upstream — each library re-verified its
 ; test PRG byte-identical across the rename — so no perf, CT or hardware
 ; result carried in this repo's docs needs re-measuring.
-.assert LIB_X25519_ABI_VERSION = 3, lderror, "x25519 ABI generation != 3 — its exported surface changed; re-audit the integration before bumping this pin"
-.assert LIB_CHACHA20_POLY1305_ABI_VERSION = 3, lderror, "chacha20poly1305 ABI generation != 3 — its exported surface changed; re-audit the integration before bumping this pin"
+.assert LIB_X25519_ABI_VERSION = 4, lderror, "x25519 ABI generation != 4 — its exported surface changed; re-audit the integration before bumping this pin"
+.assert LIB_CHACHA20_POLY1305_ABI_VERSION = 4, lderror, "chacha20poly1305 ABI generation != 4 — its exported surface changed; re-audit the integration before bumping this pin"
 
-; --- §6.6 footprint fit ------------------------------------------------------
+; --- §6.6 linked-footprint ratchet ------------------------------------------
 ;
-; Both libraries publish RESIDENT + COLD byte counts, od65-measured on
-; their side. Assert the pair fits the regions WG gives them. The SPEC
-; form is single-line, `lderror`, RESIDENT and COLD together, `<=`.
+; WHAT THIS IS NOT. It is not a fit check. Fit is already owned, twice and
+; more precisely: ld65 errors on a segment overflowing its memory area, and
+; §6.7's `__MAIN_AREA_LO_LAST__ <= WG_SQTAB_BASE` below fires 944 B (uci
+; REU=0) into growth. Any "sum of these segments <= |MAIN_AREA_LO| +
+; |MAIN_AREA_HI|" check is a TAUTOLOGY — every segment counted is placed by
+; the cfg inside one of those two areas, so a successful placement implies
+; it. MEASURED: +1000 B into LIB_X25519_CODE leaves such a sum passing while
+; §6.7 fires; it only trips at about +14600 B, long after ld65 has warned.
+; The previous form of this block was that tautology, applied to the
+; libraries' archive-wide RESIDENT/COLD equates rather than to linked bytes.
+; It was removed rather than repaired.
 ;
-; WG splits each library across two areas — CODE/DATA into MAIN_AREA_LO,
-; x25519's reclaimable INIT_CODE into MAIN_AREA_HI — so the honest
-; consumer-side bound is the pair against the sum of the two areas. That
-; is looser than a per-region check would be, and deliberately so: a
-; tighter literal would have to encode WG's own code size, which changes
-; on every commit and would turn this into a maintenance tax that gets
-; disabled. What it does catch is the case it exists for — a sibling
-; bump growing the libraries past the space WG has to give them.
+; WHAT IT IS. A ratchet on the bytes ld65 ACTUALLY PULLED from each sibling
+; archive, read off the `define = yes` segment sizes. The property guarded
+; is "each library segment was really linked, at the size we measured when
+; we pinned this version" — the property the v0.16.0 bump broke. There, the
+; §8.1 group moved into a new archive member `sqtab_init.o` that nothing
+; extracted on ld65's single scan of x25519.a; the consumer-visible symptom
+; was an unresolved external, but the same class of upstream reorganisation
+; can just as easily drop a member SILENTLY and shrink the image.
 ;
-; Measured at the v0.11.2 / v0.9.0 pins: 8383 + 826 (x25519) + 16640 + 0
-; (chacha) = 25849 against $4D10 + $1C00 = 26896. 1047 bytes of headroom,
-; which looks tighter than it is: RESIDENT_BYTES describes the whole
-; archive, while ld65 pulls only the members actually referenced (chacha
-; contributes 8448 B of _CODE + 295 B of _DATA to this link, not 16640).
-; The assert is therefore conservative — it fails before the map does,
-; which is the safe direction for a fit check, but do not read the
-; headroom figure as WG's real remaining space.
-.import __MAIN_AREA_LO_SIZE__, __MAIN_AREA_HI_SIZE__
-.assert (LIB_X25519_RESIDENT_BYTES + LIB_X25519_COLD_BYTES + LIB_CHACHA20_POLY1305_RESIDENT_BYTES + LIB_CHACHA20_POLY1305_COLD_BYTES) <= (__MAIN_AREA_LO_SIZE__ + __MAIN_AREA_HI_SIZE__), lderror, "sibling libraries no longer fit MAIN_AREA_LO + MAIN_AREA_HI — a sibling bump grew past WG's budget; re-plan the memory map before re-pinning"
+; WHY EXACT, NOT A BAND. These four numbers are a function of exactly two
+; things: the pinned library versions and the REU profile. MEASURED across
+; the clean four-profile matrix, all four are byte-identical between
+; BACKEND=uci and BACKEND=ip65 — the libraries are built by their own
+; Makefiles and WG's CA65FLAGS (WG_MTU1440, UCI_CHUNKED_WRITE, the backend
+; source set) do not reach them. So there is no routine churn for a band to
+; absorb: any movement at all is either a pin bump or a change in which
+; members WG's code causes to be extracted, and BOTH are things a human
+; should look at. A band would only buy room to miss a small regression.
+;
+; RE-MEASURING. When a pin bump legitimately moves a number, do not widen
+; a tolerance — rebuild all four profiles and read the new values from the
+; `Segment list` of build/wireguard.map:
+;   for B in uci ip65; do for R in 0 1; do make clean; make BACKEND=$B REU=$R
+;     && grep -E '^LIB_(X25519|CHACHA20_POLY1305)_' build/wireguard.map; done; done
+; The two backends must agree; if they do not, that is itself the finding.
+;
+; BEFORE CONCLUDING A PIN BUMP MOVED A NUMBER, rule out the two things that
+; move all five at once and have nothing to do with the pins: a DIFFERENT
+; CC65 VERSION (measured with ca65/ld65 V2.18; README.md pins none), and a
+; DIRTY libs/ submodule tree, which force-rebuilds the archives from edited
+; sources. Both present as several of these asserts firing together with
+; messages that point at the pins — the wrong diagnosis. Check `cl65
+; --version` and `git -C libs/x25519 status` first.
+;
+; Values below MEASURED 2026-09-06 at the x25519 v0.16.0 / chacha v0.11.0
+; pins, all four profiles, one clean matrix run.
+.import __LIB_CHACHA20_POLY1305_CODE_SIZE__, __LIB_CHACHA20_POLY1305_DATA_SIZE__
+.import __LIB_X25519_CODE_SIZE__, __LIB_X25519_DATA_SIZE__, __LIB_X25519_INIT_CODE_SIZE__
+
+; chacha is REU-free on every path (its LIB_CHACHA20_POLY1305_REU_BANKS_USED
+; is $00), so its two segments do not vary with the profile.
+.assert __LIB_CHACHA20_POLY1305_CODE_SIZE__ = 8448, lderror, "LIB_CHACHA20_POLY1305_CODE is not the 8448 bytes measured at the v0.11.0 pin — the bytes ld65 pulled from chacha20poly1305.a changed; if a pin bump moved it, re-measure all four profiles off build/wireguard.map and update src/contract_asserts.s §6.6"
+.assert __LIB_CHACHA20_POLY1305_DATA_SIZE__ = 295, lderror, "LIB_CHACHA20_POLY1305_DATA is not the 295 bytes measured at the v0.11.0 pin — see §6.6 re-measuring note"
+
+; x25519's DATA segment is the mul tables; it loads into LOADER, not
+; MAIN_AREA_*, and is the same 3584 B in both profiles (the REU profile
+; moves table USE into REU banks, not the resident copy).
+.assert __LIB_X25519_DATA_SIZE__ = 3584, lderror, "LIB_X25519_DATA is not the 3584 bytes measured at the v0.16.0 pin — see §6.6 re-measuring note"
+
+.ifdef WG_NO_REU
+; X25519_ONCHIP_MUL profile.
+.assert __LIB_X25519_CODE_SIZE__ = 3474, lderror, "LIB_X25519_CODE is not the 3474 bytes measured for the onchip profile at the v0.16.0 pin — see §6.6 re-measuring note"
+.assert __LIB_X25519_INIT_CODE_SIZE__ = 160, lderror, "LIB_X25519_INIT_CODE is not the 160 bytes measured for the onchip profile at the v0.16.0 pin — at this profile sqtab_init.o is its ONLY contributor, so a value of 0 means that member was never extracted from x25519.a: check the ld65 archive order in the Makefile before anything else"
+.else
+; REU profile.
+.assert __LIB_X25519_CODE_SIZE__ = 3746, lderror, "LIB_X25519_CODE is not the 3746 bytes measured for the REU profile at the v0.16.0 pin — see §6.6 re-measuring note"
+.assert __LIB_X25519_INIT_CODE_SIZE__ = 947, lderror, "LIB_X25519_INIT_CODE is not the 947 bytes measured for the REU profile at the v0.16.0 pin — 787 specifically means sqtab_init.o (160 B) was not extracted from x25519.a while x25519_init.o was: check the ld65 archive order in the Makefile"
+.endif
+
+; --- §6.6b declared footprint vs linked footprint ----------------------------
+;
+; The §5 RESIDENT/COLD equates are the libraries' own od65-measured
+; declaration of their archive-wide footprint. Nothing in a link forces them
+; to be truthful, and upstream has shipped them wrong before — x25519's
+; v0.16.0 notes record RESIDENT_BYTES literals sitting 39-295 B BELOW the
+; real segment totals in earlier releases. A declaration that under-states
+; the archive is what makes a consumer's own planning arithmetic unsafe.
+;
+; So the equates get a real use rather than a dangling .import: whatever
+; ld65 pulled must fit inside what the library declared. This is a genuine
+; one-directional bound, not a tautology — the link does not compute these
+; equates, it reads them from the manifest TU.
+;
+; MEASURED at these pins (declared vs linked): x25519 8234 vs 7058 onchip,
+; 8506 vs 7330 REU; chacha 17664 vs 8743 both. x25519's COLD equate tracks
+; INIT_CODE exactly (160 / 947), so that leg is asserted `=`, not `>=`.
+.assert LIB_X25519_RESIDENT_BYTES >= (__LIB_X25519_CODE_SIZE__ + __LIB_X25519_DATA_SIZE__), lderror, "x25519 declares fewer RESIDENT_BYTES than its segments contribute to this link — the library's manifest under-states its own archive; do not plan memory against it"
+; EQUALITY HERE IS DELIBERATE, AND IT ASSERTS A WG PROPERTY, NOT A LIBRARY
+; ONE. COLD_BYTES is an archive-wide declaration; __LIB_X25519_INIT_CODE_SIZE__
+; is what THIS link pulled. `>=` is the relation that follows from linked
+; being a subset of archive — which is why chacha's leg above uses it. They
+; are equal here only because WG references every one of x25519's cold
+; members, and that invariant is itself worth knowing about: if upstream
+; adds a cold routine WG never calls, this fires, and the correct reading is
+; "WG no longer extracts all of x25519's cold init" — NOT "the manifest is
+; wrong". Relax to `>=` if that stops being interesting. (The one-byte
+; manifest mutation used to prove this leg fires would fire under `>=` too,
+; so it is evidence the leg is live, not evidence for equality.)
+.assert LIB_X25519_COLD_BYTES = __LIB_X25519_INIT_CODE_SIZE__, lderror, "x25519 declares more COLD_BYTES than LIB_X25519_INIT_CODE contributes to this link — most likely WG no longer references every one of x25519 cold members (upstream added cold code we do not call), not a malformed manifest; see the note above before editing the library"
+; INERT AT CURRENT PINS — READ THIS BEFORE COUNTING IT AS PROTECTION.
+; chacha declares 17664 RESIDENT_BYTES and contributes 8743 B to this link,
+; so this assert carries 8921 B of slack (MEASURED, all four profiles) and
+; cannot fire on any realistic movement. It is the mild form of the
+; tautology deleted above and is kept for ONE reason only: it gives
+; LIB_CHACHA20_POLY1305_RESIDENT_BYTES a reader, so the .import stays and
+; the equate is still REQUIRED to exist at link time. The guard that
+; actually protects chacha's linked size is the pair of exact asserts on
+; __LIB_CHACHA20_POLY1305_CODE_SIZE__ / _DATA_SIZE__ above. Do not treat
+; this line as a second layer; it is a hook for the import, nothing more.
+; (x25519's equivalent below is NOT inert in the same way — its COLD leg is
+; asserted `=` and MEASURED firing on a one-byte manifest error.)
+.assert LIB_CHACHA20_POLY1305_RESIDENT_BYTES >= (__LIB_CHACHA20_POLY1305_CODE_SIZE__ + __LIB_CHACHA20_POLY1305_DATA_SIZE__), lderror, "chacha20poly1305 declares fewer RESIDENT_BYTES than its segments contribute to this link — the library's manifest under-states its own archive"
+.assert LIB_CHACHA20_POLY1305_COLD_BYTES = 0, lderror, "chacha20poly1305 now declares a non-zero COLD_BYTES — it has gained a reclaimable cold region WG does not place; re-audit the memory map"
+
+; --- §6.6c §8.1 group presence, directly ------------------------------------
+;
+; UNREACHABLE WHILE THE RATCHET STANDS — do not count these two asserts as
+; protection. Any relocation of the 160 B §8.1 group moves two of the exactly
+; ratcheted sizes ~40 lines above, and ld65 reports only its first error, so
+; the ratchet fires first. MEASURED both ways: moving the group between
+; segments trips the ratchet at both REU settings, and trips §6.6b's COLD
+; leg even with the ratchet constants relaxed. They are kept because the
+; `.import` below IS load-bearing and these are what stop it being deleted
+; as unused.
+;
+; Both legs compare mul_tables_init, a RUN address, against
+; __LIB_X25519_INIT_CODE_LOAD__. That is only correct because the segment
+; has no `run =` in either cfg, so LOAD and RUN coincide. If one is ever
+; added, switch to __LIB_X25519_INIT_CODE_RUN__ or this fails bafflingly.
+;
+; `mul_tables_init` is the c64-lib-contract §8.1 canonical entry. It must
+; exist, and it must live inside LIB_X25519_INIT_CODE — if it ever resolved
+; to some other segment, boot.s's cold-init reclaim would be zeroing over a
+; live routine, or leaving a cold one resident.
+;
+; THE IMPORT IS THE POINT. contract_asserts.o is passed to ld65 BEFORE any
+; archive, so this .import is a pending undefined symbol when x25519.a is
+; first scanned — which FORCES sqtab_init.o to be extracted on that pass.
+; That is what makes the link order-independent. At the v0.16.0 pin the §8.1
+; group moved out of mul_8x8.o into its own archive member that nothing in
+; x25519's own pulled-in members references; ld65 scans an archive once, in
+; command-line order, so chacha's poly1305_lib.o then imported a symbol from
+; an archive already behind the read head. MEASURED: with this .import
+; present the link is clean both with and without the Makefile's defensive
+; re-listing of x25519.a.
+.import mul_tables_init
+.import __LIB_X25519_INIT_CODE_LOAD__
+.assert mul_tables_init >= __LIB_X25519_INIT_CODE_LOAD__, lderror, "mul_tables_init resolved below LIB_X25519_INIT_CODE — the §8.1 entry is not in x25519's cold-init segment; boot.s's reclaim would zero the wrong span"
+.assert mul_tables_init < (__LIB_X25519_INIT_CODE_LOAD__ + __LIB_X25519_INIT_CODE_SIZE__), lderror, "mul_tables_init resolved above LIB_X25519_INIT_CODE — the §8.1 entry is not in x25519's cold-init segment; boot.s's reclaim would leave it resident or zero a live routine"
 
 ; --- §6.7 sqtab window guard (consumer mirror) -------------------------------
 ;
@@ -342,3 +488,32 @@ WG_REU_BANKS_USED = $00
 .assert UDP_RECV_BUF_SIZE >= NET_UDP_RECV_MAX, error, "udp_recv_buf is smaller than the backend's NET_UDP_RECV_MAX — a full-size inbound datagram would overrun it"
 .assert WG_MTU + WG_DATA_OVERHEAD <= NET_UDP_SEND_MAX, error, "WG_MTU + WG_DATA_OVERHEAD exceeds the backend's NET_UDP_SEND_MAX — outbound datagrams would be torn"
 .assert WG_MTU + WG_DATA_OVERHEAD <= NET_UDP_RECV_MAX, error, "WG_MTU + WG_DATA_OVERHEAD exceeds the backend's NET_UDP_RECV_MAX — inbound datagrams would be truncated"
+
+; --- handshake AEAD write extent (issue: ignored aead_encrypt status) --------
+;
+; transport_encrypt checks aead_encrypt's status byte; handshake.s:507 and
+; :609 deliberately do not, and this records WHY that split is correct
+; rather than lucky. At handshake.s:493-501 and :595-602 all four AEAD
+; domain-guard operands are LINK-TIME CONSTANTS — aead_data_ptr is
+; hs_packet+40 / hs_packet+88, aead_data_len is an immediate #32 / #12, and
+; aead_aad_ptr / aead_aad_len are hs_h / #32. Nothing runtime-derived
+; reaches them, so the library's domain guard is statically decidable at
+; those two sites and cannot reject. transport.s was the only call site with
+; runtime-derived operands, which is why it is the only one that needed the
+; status check. (MEASURED: hs_packet resolves to $8930 in all four profiles.)
+;
+; WHAT THIS ASSERT DOES AND DOES NOT DO. It bounds the highest byte those two
+; sites write — the second tag lands at hs_packet+100..115 — against the 148
+; bytes data.s reserves, so growing an offset or shrinking the buffer becomes
+; a link error instead of a silent overwrite of hs_resp_packet. It does NOT
+; detect the change the paragraph above is really about: if someone replaces
+; `lda #12` with a runtime value, this assert is untouched and still passes.
+; No link-time expression can see that. The reasoning is welded here by the
+; COMMENT; the assert only guards the write extent. A `hs_packet + 100 <=
+; $10000` form was considered and rejected for exactly that reason — it can
+; never fire and would have implied protection it does not give.
+;
+; This one CAN fire: 32 bytes of slack, and MEASURED firing when data.s's
+; .res is shortened.
+.import hs_packet, hs_resp_packet
+.assert hs_packet + 116 <= hs_resp_packet, lderror, "the handshake initiation AEAD writes past the end of hs_packet — its second tag lands at hs_packet+100..115 and data.s reserves 148 bytes; an offset grew or the .res shrank, and the overflow would land in hs_resp_packet"

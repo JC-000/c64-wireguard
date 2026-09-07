@@ -246,6 +246,32 @@ SIBLING_ARCHIVES += $(X25519_ARCHIVE)
 endif
 ifeq ($(USE_CHACHA_SIBLING),1)
 SIBLING_ARCHIVES += $(CHACHA_ARCHIVE)
+# x25519.a is listed a SECOND time after chacha's archive — DEFENCE IN
+# DEPTH, not the primary mechanism. ld65 scans an archive once, in
+# command-line order: at x25519 v0.16.0 the §8.1 group moved out of
+# mul_8x8.o into its own member sqtab_init.o, which nothing in x25519's own
+# pulled-in members references, so it was never extracted on the first pass;
+# chacha's poly1305_lib.o then imported mul_tables_init and the link died
+# with an unresolved external.
+#
+# What actually fixes that is the `.import mul_tables_init` in
+# src/contract_asserts.s §6.6c: contract_asserts.o precedes every archive on
+# the ld65 line, so the symbol is already pending when x25519.a is first
+# scanned and the member is extracted there. MEASURED 2026-09-06: with that
+# import present, all four profiles link clean WITHOUT this re-listing, and
+# the four PRGs are byte-identical either way — so this line costs nothing
+# and is kept only so an unrelated future reordering cannot resurrect the
+# failure. (Duplicate members are not double-emitted.)
+#
+# THE COST OF KEEPING IT, stated so it is not discovered the hard way: these
+# two mechanisms MASK EACH OTHER. Deleting the §6.6c import alone leaves the
+# build green, because this line covers for it. If you remove either, remove
+# the other's comment too. The independent backstop for both is the §6.6
+# ratchet on __LIB_X25519_INIT_CODE_SIZE__, which fires at BOTH REU settings
+# when sqtab_init.o goes unextracted.
+ifeq ($(USE_X25519_SIBLING),1)
+SIBLING_ARCHIVES += $(X25519_ARCHIVE)
+endif
 endif
 
 # Per-backend source list.
