@@ -98,6 +98,16 @@ TESTS = [
     # from can be checked without hardware — and if it breaks, every one of
     # them breaks while this gate stays green. Import-only, milliseconds.
     ("live_seams",     ["tools/test_live_tool_seams.py"]),
+    # Issue #147. test_wire_encryption_live's four "plaintext is ABSENT
+    # from the wire" claims now run through one searcher paired with a
+    # positive control; this is the proof that the searcher CAN fire, that
+    # a cleartext datagram makes the absence arm fail, and that a broken
+    # searcher goes red at the control while the absence arm stays green.
+    # Entirely host-side (a real Noise session in process, no sockets, no
+    # device), seconds, and it is the only thing in this gate that could
+    # notice the live tool being rewired to a look-alike copy of the
+    # searcher — the hardware run itself would stay green either way.
+    ("wire_control",   ["tools/test_wire_encryption_control.py"]),
     # Issue #109. Enforcement for the cold-init trap that #107 created and
     # that has now caught three suites (type2_slow, hs_recovery, issue_94),
     # every one by copy-paste from a sibling that predated the reclaim.

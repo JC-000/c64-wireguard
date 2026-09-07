@@ -489,6 +489,12 @@ def _search_forms(hay: bytes, needle: bytes) -> list[tuple[str, int, int]]:
     return out
 
 
+#: Public alias. tools/wire_plaintext_search.py -- the searcher behind the
+#: live wire-encryption tool's absence claims (issue #147) -- calls THIS
+#: implementation rather than growing a second copy that could drift.
+search_forms = _search_forms
+
+
 def find_plaintext(datagrams: Sequence[Datagram],
                    frames: Sequence[Frame],
                    needles: dict[str, bytes],
