@@ -169,6 +169,11 @@ WHAT WE DO NOT ASSUME
       outright, not narrowed: it tracked the 27-cycle spacing of their own
       sparse loop divided by the clock, i.e. they measured their loop period
       and reported it as an access cost.
+  Do NOT read the two numbers as a disagreement that drove the retraction.
+  The 1.7x was withdrawn because NOTHING stood behind it -- its source could
+  not reproduce a derivation -- and it would have been withdrawn had the
+  measured figure landed anywhere at all. The 4.055x is not its refutation,
+  and re-measuring cannot reinstate it.
   What this establishes for OUR purposes is only the negative one: every
   real speedup is far above the retracted 1.7x, so the budgets below are
   more conservative than intended, not less.)
