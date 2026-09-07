@@ -56,6 +56,16 @@
 .assert UCI_CHUNK_PART_MAX <= 888, error, "UCI_CHUNK_PART_MAX above 888: a $16 part would be truncated at the 895-byte command buffer"
 .assert NET_UDP_SEND_MAX <= 1472, error, "NET_UDP_SEND_MAX above 1472: the firmware refuses a larger announced total (82,PARAMETER(S) OUT OF RANGE)"
 .export uci_send_part
+; Issue #149: publish the part cap as a BUILT value, so a host tool compares
+; its expectation against what the image actually carries instead of against a
+; constant it re-derived from the same 895 - 7 reasoning the image used (the
+; existing practice for WG_MTU / NET_UDP_SEND_MAX, src/exports.s). This export
+; cannot live in src/exports.s with those two: uci_errors.inc is reachable only
+; through the Makefile's `-I src/net/$(BACKEND)`, so exports.s including it
+; would break every BACKEND=ip65 build, and ca65 has no way to test for the
+; file. Inside this .ifdef it also stays paired with uci_send_part — labels.txt
+; carries the cap exactly when it carries the code that obeys it.
+.export UCI_CHUNK_PART_MAX
 .endif
 
 ; --- net_abi.inc contract ---

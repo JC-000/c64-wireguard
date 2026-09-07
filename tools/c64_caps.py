@@ -14,6 +14,8 @@ a regex that happened to take the first `.ifdef` branch would hide this one.
     NET_UDP_RECV_MAX   largest datagram the C64 can RECEIVE (labels.txt; src/net/uci/net_caps.inc)
     WG_DATA_OVERHEAD   Type-4 header (16) + Poly1305 tag (16) (labels.txt; src/constants.inc)
     WG_MTU             the built tunnel MTU (labels.txt only; cross-checks the derivation)
+    UCI_CHUNK_PART_MAX largest $16 part the adapter offers (labels.txt only,
+                       chunked UCI builds only; issue #149)
 
 Exports
     C64_SEND_MAX     = NET_UDP_SEND_MAX                    (892; 1472 chunked)
@@ -23,6 +25,12 @@ Exports
                        can accept inbound regardless of the send side)
     C64_CHUNKED      = True iff the build carries the chunked send path
                        (the `uci_send_part` label is present in labels.txt)
+    C64_CHUNK_PART_MAX = the built $16 part cap (888), or None when the build
+                       does not publish one -- a non-chunked or ip65 build, or
+                       a labels.txt from before issue #149. DELIBERATELY has no
+                       source fallback and no default: re-deriving 895 - 7 on
+                       the host is the exact thing #149 exists to stop, so a
+                       caller that gets None must report "unknown", never 888.
     FROM_LABELS      = True iff every value came from build/labels.txt
     FROM_SOURCE      = True iff every value came from a real file (labels or .inc)
 
@@ -70,6 +78,11 @@ _SOURCE_OF = {
 # it only under UCI_CHUNKED_WRITE). Structural, not textual: a PRG either
 # has the routine or it does not.
 CHUNK_LABEL = "uci_send_part"
+
+# The built $16 part cap (issue #149). src/net/uci/net.s exports it inside the
+# same .ifdef as uci_send_part, so labels.txt carries the cap exactly when it
+# carries the code that obeys it.
+PART_MAX_LABEL = "UCI_CHUNK_PART_MAX"
 
 _ASSIGN_RE = r"^\s*{name}\s*=\s*(\$[0-9A-Fa-f]+|[0-9]+)\b"
 # ld65 -Ln line: `al C:982D .msg_input_buf`
@@ -127,6 +140,7 @@ class Caps:
     from_source: bool
     labels_path: Path | None
     mtu_label: int | None = None    # WG_MTU as exported by the build, if any
+    chunk_part_max: int | None = None  # UCI_CHUNK_PART_MAX, chunked UCI builds
 
     @property
     def tunnel_mtu(self) -> int:
@@ -143,7 +157,13 @@ class Caps:
             src = "src/ (.inc files; describes the DEFAULT build)"
         else:
             src = "DEFAULTS (no build, source .inc missing)"
-        kind = "chunked $16 send" if self.chunked else "plain SOCKET_WRITE"
+        if self.chunked:
+            part = (f", parts <= {self.chunk_part_max} B"
+                    if self.chunk_part_max is not None
+                    else ", part cap NOT published by this build")
+            kind = f"chunked $16 send{part}"
+        else:
+            kind = "plain SOCKET_WRITE"
         return (f"C64 caps [{src}; {kind}]: send {self.send_max} B, recv "
                 f"{self.recv_max} B, overhead {self.overhead} B -> tunnel MTU "
                 f"{self.tunnel_mtu} (recv-side {self.recv_mtu})")
@@ -192,10 +212,12 @@ def load_caps(labels: Path | str | None = None, *, warn: bool = True) -> Caps:
 
     chunked = bool(table) and CHUNK_LABEL in table
     mtu_label = table.get("WG_MTU") if table else None
+    # No .inc fallback on purpose -- see C64_CHUNK_PART_MAX in the docstring.
+    chunk_part_max = table.get(PART_MAX_LABEL) if table else None
     caps = Caps(values["NET_UDP_SEND_MAX"], values["NET_UDP_RECV_MAX"],
                 values["WG_DATA_OVERHEAD"], chunked, from_labels,
                 from_source, labels_path if table is not None else None,
-                mtu_label)
+                mtu_label, chunk_part_max)
     if mtu_label is not None and mtu_label != caps.tunnel_mtu and warn:
         # The consumer may clamp below the backend caps (WG_DATAGRAM_CAP,
         # e.g. ip65: caps 1472/1472 but WG_MTU 860). Trust the build.
@@ -206,7 +228,7 @@ def load_caps(labels: Path | str | None = None, *, warn: bool = True) -> Caps:
             RuntimeWarning, stacklevel=2)
         caps = Caps(min(caps.send_max, mtu_label + caps.overhead),
                     caps.recv_max, caps.overhead, chunked, from_labels,
-                    from_source, caps.labels_path, mtu_label)
+                    from_source, caps.labels_path, mtu_label, chunk_part_max)
     return caps
 
 
@@ -218,15 +240,18 @@ WG_DATA_OVERHEAD = _CAPS.overhead
 C64_TUNNEL_MTU = _CAPS.tunnel_mtu
 C64_RECV_MTU = _CAPS.recv_mtu
 C64_CHUNKED = _CAPS.chunked
+C64_CHUNK_PART_MAX = _CAPS.chunk_part_max
 FROM_LABELS = _CAPS.from_labels
 FROM_SOURCE = _CAPS.from_source or _CAPS.from_labels
 LABELS_PATH = _CAPS.labels_path
 
 __all__ = [
     "C64_SEND_MAX", "C64_RECV_MAX", "C64_TUNNEL_MTU", "C64_RECV_MTU",
-    "C64_CHUNKED", "WG_DATA_OVERHEAD", "FROM_LABELS", "FROM_SOURCE",
+    "C64_CHUNKED", "C64_CHUNK_PART_MAX", "WG_DATA_OVERHEAD", "FROM_LABELS",
+    "FROM_SOURCE",
     "LABELS_PATH", "NET_CAPS_INC", "CONSTANTS_INC", "DEFAULT_LABELS",
-    "LABELS_ENV", "CHUNK_LABEL", "Caps", "load_caps", "describe",
+    "LABELS_ENV", "CHUNK_LABEL", "PART_MAX_LABEL", "Caps", "load_caps",
+    "describe",
 ]
 
 
