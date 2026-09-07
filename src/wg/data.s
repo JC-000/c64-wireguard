@@ -590,10 +590,24 @@ mul_dma_hi:
 ; failure: the cfg align removed, the `.align 256` above deleted, a field
 ; inserted between the two buffers, or a future segment reshuffle.
 ;
+; WHAT RUNS IT. The assert fires wherever this build is linked, but something
+; has to link it. .github/workflows/sibling-bump.yml gained cfg/** so a
+; cfg-only PR triggers the matrix, whose x25519=0 row is the only automated
+; build that reaches these lines -- and that row is `make BACKEND=uci`, so
+; cfg/c64-wireguard-ip65.cfg is covered by the assert but not by CI. It cannot
+; be: CI has no ip65 blob (see that workflow's paths: comment). Until the gate
+; carries a BACKEND=ip65 USE_X25519_SIBLING=0 link, an ip65-only align edit is
+; caught by this assert only when a human links that combination.
+;
 ; Colocated here rather than in src/contract_asserts.s deliberately: these
-; symbols do not exist under USE_X25519_SIBLING=1 (the sibling enforces its own
-; copy at libs/x25519/src/data.s:150-152), so a central assert would need its
-; own .ifndef plus .imports — a guard able to drift from the thing it guards.
+; symbols do not exist under USE_X25519_SIBLING=1 — the SHIPPED build, which
+; is guarded by the sibling's own asserts at libs/x25519/src/mul_stage.s:83-85
+; (three there: mul_dma_lo, mul_dma_hi and mul_dma_carry, which the in-tree
+; fallback does not have). They moved out of that library's src/data.s with the
+; buffers at its v0.14.0, so its data.s now carries only a "MOVED" note; check
+; the pinned tag before citing a line number here, and follow the buffers
+; rather than the file. So a central assert here would need its own .ifndef
+; plus .imports — a guard able to drift from the thing it guards.
 ; Inside the defining block it is automatically absent in sibling builds and
 ; automatically present in exactly the build that needs it.
 .assert (mul_dma_lo & $00FF) = 0, lderror, "mul_dma_lo must be page-aligned: CRYPTO_BSS lost align=$100 in cfg/c64-wireguard-*.cfg — the `.align 256` above is segment-relative, and `lda mul_dma_lo,y` in fe25519_mul indexes with secret Y, so a page cross is a data-dependent timing leak (ld65 only WARNS)"

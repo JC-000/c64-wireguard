@@ -41,6 +41,18 @@ on:
       # cfg-ONLY edit, and ld65 merely warns. The x25519=0 row is the build
       # that carries the .assert enforcing it (src/wg/data.s), so this path
       # entry is what makes that guard reachable from CI at all.
+      #
+      # COVERAGE BOUNDARY, stated rather than left to be discovered: every
+      # `expect: build` row below runs `make BACKEND=uci`, so this catches
+      # cfg/c64-wireguard-uci.cfg only. cfg/c64-wireguard-ip65.cfg is guarded
+      # by the same .assert (verified: dropping its align fails the link with
+      # the same lderror) but is not reachable from ANY CI job, because CI
+      # cannot build BACKEND=ip65 at all -- `ip65` is a symlink to the sibling
+      # c64-https checkout, not a submodule, and ip65-build/ip65-c64.bin is not
+      # committed, so the blob does not exist in an Actions checkout. Adding an
+      # ip65 row here would fail on the missing blob, not guard anything. The
+      # ip65 half belongs in tools/run_regression.py, which is where every ip65
+      # build in this project already lives.
       - 'cfg/**'
   schedule:
     # Mondays 06:17 UTC — probe upstream for new sibling releases.

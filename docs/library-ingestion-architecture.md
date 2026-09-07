@@ -255,9 +255,11 @@ Authoritative ledger: `src/crypto/shared/reu_layout.inc`.
    other; read the Makefile's `SIBLING_ARCHIVES` comment before touching
    either.
 4. `python3 tools/check_abi_drift.py` — must exit 0.
-5. `python3 tools/run_regression.py` — must pass (45 suites as of the
-   v0.16.0 / v0.11.0 bump, counted from `tools/run_regression.py`'s own
-   lists; it was 22 on 2026-08-14, when the list still covered only 13 of
+5. `python3 tools/run_regression.py` — must pass (46 suites as of issue
+   #113's `msg_port` suite, counted from `tools/run_regression.py`'s own
+   lists — `len(TESTS) + len(SERIAL_TESTS)`, 37 + 9, which is also the
+   number the gate prints on its last line; COUNT it rather than
+   incrementing this one, since a branch may add more than one; it was 22 on 2026-08-14, when the list still covered only 13 of
    the 27 `tools/test_*.py` scripts, so a suite passing locally was not
    necessarily a suite the gate ran). At a **pin bump** also run
    `tools/test_crypto_kat_bump_differential.py` by hand with

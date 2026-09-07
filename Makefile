@@ -186,9 +186,17 @@ endif
 # testing against a real peer where the message needs to land on a
 # specific real-world port (e.g. 53 for DNS). Default 9999 is NOT passed
 # through to ca65 at all — the -D flag is only emitted when MSG_PORT is
-# overridden away from the default — so an unadorned `make` keeps
-# data.s on its untouched `.ifndef MSG_PORT` .word $270f path and
-# produces a byte-identical PRG to a tree without this knob.
+# overridden away from the default — so an unadorned `make` produces a
+# byte-identical PRG to a tree without this knob.
+#
+# The default value therefore lives in data.s, not here: `.ifndef MSG_PORT /
+# MSG_PORT = 9999 / .endif`, and the SAME `.byte >MSG_PORT, <MSG_PORT` emits
+# it either way. Overriding this variable changes which of those two supplies
+# the number; it does not select a different emission. That single path is
+# issue #113's fix — until then the default had its own `.word $270f`, which
+# ca65 emits low-byte-first, so the untouched build's on-wire port was 3879
+# while this comment and the README said 9999. Keep the two in one form: the
+# byte order was wrong for two releases precisely because it was written twice.
 MSG_PORT ?= 9999
 ifneq ($(MSG_PORT),9999)
 CA65FLAGS += -D MSG_PORT=$(MSG_PORT)
