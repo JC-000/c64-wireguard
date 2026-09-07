@@ -158,6 +158,18 @@ TESTS = [
     # here — the payload, the codes and their positions are random per run
     # and the seed is on the first line of its output (reproduce with --seed).
     ("petscii_ctrl",   ["tools/test_issue_129_petscii_control.py"]),
+    # Issue #113. The default msg_port literal was `.word $270f`, which ca65
+    # emits low-byte-first, while ip_build.s copies byte 0 to the wire-FIRST
+    # byte of both inner UDP ports — so the untouched build's on-wire port was
+    # 3879 and every document said 9999. Invisible to phase7's test_udp_build,
+    # which OVERWRITES msg_port with a random big-endian port before every
+    # call: the copy was always faithful, the shipped value never checked.
+    # The oracle here is the DOCUMENTED number, not the image — asserting the
+    # wire matches whatever msg_port holds is the tautology the defect hid
+    # behind. Ordinary VICE suite, honours C64_SKIP_BUILD, seconds, no crypto.
+    # Deliberately UNSEEDED here; payloads and IPs are random per run and the
+    # seed is on the first line of its output (reproduce with --seed).
+    ("msg_port",       ["tools/test_msg_port_default.py"]),
     # Issue #128, the INSTRUMENT half. The "1049-1187 B band" was retracted
     # as an artifact of tools/test_warp_live.py, which had no assertion that
     # had ever been observed failing — so nothing in this gate could have

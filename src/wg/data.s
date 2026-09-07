@@ -333,29 +333,39 @@ ip_hdr_template:
         .byte $00,$00,$00,$00   ; src IP (filled per packet)
         .byte $00,$00,$00,$00   ; dst IP (filled per packet)
 
-; --- Messaging default UDP port ($270f = 9999, big-endian in memory) ---
+; --- Messaging default UDP port (9999, BIG-endian in memory) ---
 ; Initialised here because callers (ip_build) read msg_port directly without
 ; a runtime setup hook. ACME data.asm initialised it with !word $270f.
 ;
-; NOTE (test/warp-interop, issue #87 spike): the "big-endian in memory"
-; claim above does not hold for `.word` — ca65 emits `.word $270f` as
-; bytes $0f,$27 (low,high), while ip_build.s's src/dst-port copy
-; (msg_port -> ip_packet_buf+20/22, msg_port+1 -> +21/23) treats byte 0
-; as the WIRE-FIRST (high) byte, matching the UDP-length field's proven
-; high-byte-at-lower-offset convention a few lines below. So the actual
-; on-wire port for the untouched default is $0f27 = 3879, not 9999 —
-; never surfaced because prior tests only ever round-tripped this value
-; against itself. Not fixed here (out of scope / behavior-preserving);
-; the MSG_PORT override below is written in the CORRECT byte order so a
-; caller asking for a specific real-world port (e.g. 53 for DNS) gets
-; that port on the wire.
-.ifdef MSG_PORT
+; BIG-endian is the convention, and it is the CONSUMERS' — not a claim made
+; only by this comment. src/wg/ip_build.s copies byte 0 to the wire-FIRST
+; byte of both UDP ports (msg_port -> ip_packet_buf+20/+22, msg_port+1 ->
+; +21/+23, :296-305) and compares inbound the same way (:409-413), matching
+; the UDP-length field's high-byte-at-lower-offset handling beside it. Every
+; host tool that writes this word writes it big-endian too, and
+; tools/test_ip65_rrnet_hw.py:2195 reads it back as int.from_bytes(..., "big").
+;
+; Issue #113: the ONE thing that disagreed was the default literal. ca65 emits
+; `.word $270f` as $0F,$27 (low,high), so the untouched default reached the
+; wire as $0F27 = 3879 while every document said 9999. The defect was the
+; constant's byte order, NOT the copy — the copy agrees with the wire, with
+; the inbound filter, with the MSG_PORT override and with every host tool, and
+; is also the only side that would cost 6502 code to change.
+;
+; Fixed by giving the default the SAME `.byte >MSG_PORT, <MSG_PORT` form the
+; override already used, so there is one code path and the byte order is
+; written once. MSG_PORT reaches ca65 only when overridden (the Makefile omits
+; -D at the default so an unadorned build stays byte-identical to a tree
+; without the knob), so the default value is spelled here rather than made to
+; depend on the flag being passed.
+;
+; This changes the default build's on-wire port from 3879 to 9999. Anyone who
+; had configured a peer for 3879 BY OBSERVATION must move it to 9999.
+.ifndef MSG_PORT
+MSG_PORT = 9999
+.endif
 msg_port:
         .byte >MSG_PORT, <MSG_PORT
-.else
-msg_port:
-        .word $270f
-.endif
 
 ; --- Disk I/O ---
 config_filename:
