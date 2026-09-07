@@ -200,15 +200,33 @@ def selftest() -> list[tuple[bool, str, str]]:
     text = "MDCK BAMA AAKHMD DBD DIG END BMBGIKKL"
     needles = {"probe": text}
 
-    rec(len(find_plaintext(hdr + text.encode("ascii"), needles)) >= 1,
-        "selftest: the exact ASCII form is FOUND")
+    # EACH form is controlled separately, by its OWN label. A bare
+    # "something was found" would be satisfied by any one surviving branch:
+    # for our uppercase alphabets `petscii_form` is the identity, so a
+    # corrupted "exact" branch stays invisible behind the petscii hit at
+    # the same offset. MEASURED: appending one byte to the exact needle
+    # left a len()>=1 assertion green.
+    rec(any(h.form == "exact"
+            for h in find_plaintext(hdr + text.encode("ascii"), needles)),
+        "selftest: the exact ASCII form is FOUND, labelled `exact`")
+    # A LOWERCASE probe is what makes the petscii branch non-degenerate:
+    # the wire bytes then differ from the ASCII the host holds, which is
+    # the whole reason the branch exists.
+    lower = text.lower()
+    lower_hits = find_plaintext(hdr + petscii_form(lower.encode()),
+                                {"probe": lower})
+    rec(any(h.form == "petscii" for h in lower_hits)
+        and not any(h.form == "exact" for h in lower_hits),
+        "selftest: lowercase text folded to PETSCII is FOUND, and only "
+        "the `petscii` branch finds it")
     rec(any(h.form == "petscii-shifted"
             for h in find_plaintext(hdr + petscii_shifted_form(text.encode()),
                                     needles)),
-        "selftest: the shifted-PETSCII form is FOUND")
+        "selftest: the shifted-PETSCII form is FOUND, labelled "
+        "`petscii-shifted`")
     rec(any(h.form == "reversed"
             for h in find_plaintext(hdr + text.encode()[::-1], needles)),
-        "selftest: the reversed form is FOUND")
+        "selftest: the reversed form is FOUND, labelled `reversed`")
     rec(plaintext_absent(hdr + b"\xa7" * 200, needles)[0],
         "selftest: unrelated bytes are reported ABSENT")
 
