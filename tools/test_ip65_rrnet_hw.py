@@ -147,15 +147,31 @@ WHAT WE DO NOT ASSUME
   numbers instead of guesses.
   (An earlier "~1.7x from 1 MHz to 48 MHz" figure stood here. It was
   RETRACTED by its source on 2026-09-07 as unsupported -- no derivation
-  survived. The 1541ultimate lane then measured the port directly: accesses
-  are floored at exactly 1 per PHI2 cycle, reached at 6 MHz, 2 PHI2 for an
-  isolated access; a port-dense loop gains 4.055x from 1 to 48 MHz and a
-  sparse one 14.2x. Their control -- the identical sweep with Cartridge
-  Preference = Auto giving byte-identical medians while the identity read
-  returns $CCCC instead of $630E -- shows it is a property of the I/O-window
-  bus cycle, not of the RR-Net. Their measurement, not ours. Every real
-  speedup is well above the retracted figure, so the budgets below are more
-  conservative than intended, not less.)
+  survived.
+  What replaced it, after that lane's own adversarial review cut its first
+  two attempts: **READS in the C64 I/O1 window ($DE00 region) are floored at
+  one access per PHI2 cycle, reached at 6 MHz** -- 1.000 PHI2/access from
+  turbo index 11 upward, 1.0156 at index 5, so a read-dense loop gains
+  ~4.055x from 1 MHz to 48 MHz. Their measurement, not ours.
+  Three limits on that sentence, all of which they established by killing
+  their own earlier wording, and none of which should be dropped when
+  quoting it:
+    - NOT an "expansion port" or cartridge property. Their control ran the
+      identical sweep with Cartridge Preference = Auto (identity read
+      $CCCC, cartridge deselected) and got BYTE-IDENTICAL medians at all 16
+      speeds. By their own stated criterion that makes it the cost of the
+      I/O1 window, not of the external bus.
+    - READS ONLY. The sweep was `lda $DE00` throughout; writes are being
+      measured separately and may not share the floor, since a posted write
+      need not stall for data to return. Do not size a transmit path from
+      this until that lands.
+    - An earlier "2 PHI2 for an isolated access" figure is WITHDRAWN
+      outright, not narrowed: it tracked the 27-cycle spacing of their own
+      sparse loop divided by the clock, i.e. they measured their loop period
+      and reported it as an access cost.
+  What this establishes for OUR purposes is only the negative one: every
+  real speedup is far above the retracted 1.7x, so the budgets below are
+  more conservative than intended, not less.)
 * NOT the reason test_warp_live.py::_net_init_ip65 gives for running 'I'
   at 1 MHz. Its comment (:1697-1703) says ip65's DHCP and ARP "time out
   with CPU-counted delay loops calibrated for a 1 MHz 6510". THAT IS
