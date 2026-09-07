@@ -141,10 +141,21 @@ replays with --seed.
 WHAT WE DO NOT ASSUME
 =====================
 
-* NOT UCI timings. The user measured cartridge-port I/O throttling this
-  path to about 1.7x from 1 MHz to 48 MHz, against the 14.5x-51.7x the
-  UCI backend sees. Every budget here is generous and every duration is
-  MEASURED AND REPORTED, so the next run has numbers instead of guesses.
+* NOT UCI timings. This path does cartridge-port I/O and the UCI backend
+  does not, so UCI-derived durations do not transfer. Every budget here is
+  generous and every duration is MEASURED AND REPORTED, so the next run has
+  numbers instead of guesses.
+  (An earlier "~1.7x from 1 MHz to 48 MHz" figure stood here. It was
+  RETRACTED by its source on 2026-09-07 as unsupported -- no derivation
+  survived. The 1541ultimate lane then measured the port directly: accesses
+  are floored at exactly 1 per PHI2 cycle, reached at 6 MHz, 2 PHI2 for an
+  isolated access; a port-dense loop gains 4.055x from 1 to 48 MHz and a
+  sparse one 14.2x. Their control -- the identical sweep with Cartridge
+  Preference = Auto giving byte-identical medians while the identity read
+  returns $CCCC instead of $630E -- shows it is a property of the I/O-window
+  bus cycle, not of the RR-Net. Their measurement, not ours. Every real
+  speedup is well above the retracted figure, so the budgets below are more
+  conservative than intended, not less.)
 * NOT the reason test_warp_live.py::_net_init_ip65 gives for running 'I'
   at 1 MHz. Its comment (:1697-1703) says ip65's DHCP and ARP "time out
   with CPU-counted delay loops calibrated for a 1 MHz 6510". THAT IS
@@ -325,9 +336,13 @@ BLOB_VAR_CFG_GATEWAY = 36
 DRIVER_SIGNATURE = b"\x65\x74\x68\x01"
 DRIVER_MAC_OFFSET = len(DRIVER_SIGNATURE)
 
-# Budgets. Deliberately generous: cartridge-port I/O is measured at only
-# ~1.7x from 1 MHz to 48 MHz on this path, so UCI-derived numbers do not
-# transfer. Every one of these is reported as a MEASURED duration too.
+# Budgets. Deliberately generous: this path does cartridge-port I/O and the
+# UCI backend does not, so UCI-derived numbers do not transfer. Every one of
+# these is reported as a MEASURED duration too. (These were originally sized
+# against a "~1.7x" port figure that has since been RETRACTED as unsupported;
+# the measured floor is 1 access per PHI2 cycle, so the real speedup is far
+# higher and these budgets are more conservative than intended. See the
+# module docstring.)
 BOOT_BUDGET_S = float(os.environ.get("RRNET_BOOT_BUDGET_S", "90"))
 NET_INIT_BUDGET_S = float(os.environ.get("RRNET_NET_INIT_BUDGET_S", "180"))
 # NOTE: there is deliberately no flat HS_BUDGET_S constant. See
@@ -1819,11 +1834,13 @@ def stage_bench_health(tr, client, run: dict, mhz: int) -> bool:
 #
 # THE ASSUMPTION, STATED: that anchor is from the UCI backend, and it is
 # reused here because the handshake is overwhelmingly X25519, which is pure
-# CPU and never touches the cartridge port. The user's ~1.7x figure is a
-# cartridge-port I/O throttle, and it applies to a handful of ~150-byte
-# frames, not to the scalar multiplications. If that reasoning is wrong the
-# budget is wrong, so every run reports the duration it MEASURED alongside
-# the budget it was given.
+# CPU and never touches the cartridge port. Whatever the port's own scaling
+# is, it applies to a handful of ~150-byte frames, not to the scalar
+# multiplications. (This argument previously leaned on a "~1.7x" port figure
+# that has since been RETRACTED as unsupported. The argument does not depend
+# on it: it turns on WHICH work dominates, not on how fast the port scales.)
+# If that reasoning is wrong the budget is wrong, so every run reports the
+# duration it MEASURED alongside the budget it was given.
 #
 # Inheriting HS_POLL_TIMEOUT = 120.0 (a UCI number) would have made a 1 MHz
 # run a false FAIL reading as "ip65 is broken on hardware" — the worst
