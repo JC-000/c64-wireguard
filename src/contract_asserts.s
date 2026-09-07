@@ -458,9 +458,10 @@ WG_REU_BANKS_USED = $00
 ; the MAIN_AREA_HI figure stays put while this shrinks. Re-read the current
 ; margin rather than trusting a number written here — build, then
 ; $8800 minus (__APP_DATA_LOAD__ + __APP_DATA_SIZE__) from build/labels.txt.
-; Dated data points, not a live claim: 47 B at 001a0f3, 22 B at 6d17ede
-; (2026-09-07) — identical in uci and ip65, REU=0 and REU=1. The 25 B
-; between them was one ordinary string addition.
+; A dated data point, not a live claim: 47 B at 2380165 (2026-09-07) —
+; identical in uci and ip65, REU=0 and REU=1. The margin is small enough
+; that a single ordinary string addition can eat most of it, so re-read it
+; rather than assuming this number still holds.
 .assert __APP_DATA_LOAD__ + __APP_DATA_SIZE__ <= __APP_BSS_OVERLAY_START__, lderror, "live MAIN_AREA_HI file content (APP_EXTRA/APP_DATA) has grown past the APP_BSS_OVERLAY boundary — APP_BSS is laid over that RAM and boot.s's cold-segment zero-fill would erase part of it at boot; raise APP_BSS_OVERLAY's start in cfg/c64-wireguard-*.cfg (which costs APP_BSS the same number of bytes) or move data back to MAIN_AREA_LO"
 
 ; The overlay must be a SUBSET of MAIN_AREA_HI and must end with it. A gap at

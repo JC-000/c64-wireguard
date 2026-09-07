@@ -102,7 +102,7 @@ WG_DATA_OVERHEAD    = 32        ; 16 B Type-4 header + 16 B Poly1305 tag
 ; place inside ip_packet_buf (issue #70; there is no msg_input_buf — dropped in
 ; #112, which is what made a 1472-byte datagram fit: with a private text buffer
 ; the 1440 MTU overflowed APP_BSS by ~1 KB; measured after #112 the ip65 1472
-; build's APP_BSS spans $8800-$9E8B with 371 B of MAIN_AREA_HI free).
+; build's APP_BSS spans $8800-$9E8B with 372 B of MAIN_AREA_HI free).
 ;
 ; Two flags lift the cap from 892 to 1472; the default is 892 for BOTH
 ; backends and a default build is byte-identical to a tree without them:
