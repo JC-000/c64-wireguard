@@ -357,6 +357,29 @@ $(PRG): $(PRG_DEPS) | $(BUILD_DIR)
 	# They are manifest constants, not addresses, so nothing wants them in a
 	# label file. Filtering beats widening the match: there is no 24-bit target.
 	sed -i.bak '/^al 0*[1-9a-fA-F][0-9a-fA-F]*[0-9a-fA-F]\{4\} /d' $(LABELS)
+	#
+	# Drop ca65's synthesised names for `.local` symbols inside macro
+	# expansions. chacha20poly1305 v0.11.0's AEAD_DOMAIN_GUARD declares
+	# `.local ok` / `.local reject`, and ld65 emits one
+	# `.LOCAL-MACRO_SYMBOL-NNNN` per local per expansion — MEASURED 8 of
+	# them (4 expansions x 2 locals) in ALL FOUR profiles, uci and ip65,
+	# REU=0 and REU=1. Their ADDRESSES are real branch targets inside
+	# aead_encrypt/aead_decrypt, but their NAMES carry no identity: the
+	# NNNN is an expansion counter, so adding or removing any macro use
+	# anywhere renumbers them. Nothing can ask for one by name, and the
+	# name is not stable enough to be worth asking for — so this is the
+	# "meaningless to the consumer" case and they are dropped, exactly as
+	# the far `_SIZE` equates above are.
+	#
+	# The match is deliberately anchored to that exact synthesised prefix
+	# rather than to "any name with characters VICE would reject". A
+	# general filter would make tools/test_build_both_backends.py's format
+	# check unfalsifiable — it would silently swallow every future
+	# malformed line, trading one silent failure for a worse one. This
+	# also runs AFTER the far-symbol drop and BEFORE the address rewrite,
+	# and matches on the NAME field only, so it neither masks nor is
+	# masked by the 16-bit-only rewrite below.
+	sed -i.bak '/^al [0-9a-fA-F]* \.LOCAL-MACRO_SYMBOL-[0-9]*$$/d' $(LABELS)
 	sed -i.bak 's/^al 00\([0-9a-fA-F]\{4\}\) /al C:\1 /' $(LABELS)
 	rm -f $(LABELS).bak
 
