@@ -43,7 +43,10 @@ endif
 # REU=0: X25519_ONCHIP_MUL profile — zero REU anywhere in the PRG
 #   (chacha v0.7.0 issues no REU DMA on any path either — its
 #   LIB_CHACHA20_POLY1305_REU_BANKS_USED is $00); runs on a stock C64.
-#   ~1.7x slower scalarmult at 1 MHz.
+#   ~1.7x slower scalarmult at 1 MHz. (Unrelated to the RETRACTED ~1.7x
+#   cartridge-port figure — same number, different claim. This one is the
+#   onchip-vs-REU profile ratio and it holds: measured 2026-09-07 vs WARP,
+#   REU wins at 1 MHz while onchip wins at 48 MHz, 47.7 s against 89.0 s.)
 # Only meaningful with the siblings ON (the in-tree fe25519 is REU-only).
 REU ?= 1
 
