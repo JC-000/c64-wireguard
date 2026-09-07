@@ -29,6 +29,7 @@ Run::
 from __future__ import annotations
 
 import http.server
+import re
 import sys
 import time
 import threading
@@ -345,10 +346,42 @@ def main(argv) -> int:
     for h, (kind, detail) in KNOWN_BUILDS.items():
         chk(f"{h} records evidence", len(detail) > 40 and kind in VERDICTS,
             f"thin entry {detail!r}")
-        chk(f"{h} does not claim reassembly it did not measure",
-            "reassembl" not in detail.lower()
-            or "does NOT evidence" in detail or "rests on" in detail,
-            f"overclaim in {detail!r}")
+        # A reassembly claim must carry a STRUCTURED evidence token, not
+        # prose. Required form, anywhere in the detail:
+        #
+        #     REASSEMBLY-EVIDENCE: <bytes>B as <n> datagram(s) on <YYYY-MM-DD>
+        #
+        # and it is only evidence if <bytes> exceeds the $16 part cap (888,
+        # so the send MUST have been split) and <n> is 1 (so the firmware
+        # put it back together). At or under the cap, one datagram evidences
+        # dispatch, not reassembly.
+        #
+        # Two earlier versions of this check were wrong, both instructively:
+        #   - "reassembl" not in detail -- i.e. NO entry may claim it. True
+        #     while none had measured it; a false positive the moment one
+        #     did. A guard encoding the state of the world expires silently.
+        #   - a free-text scan for any number > 888. Satisfied by incidental
+        #     figures elsewhere in the prose (ECHO_PAYLOAD_LEN=888,1472),
+        #     so deleting the actual evidence left it green. Proven by
+        #     mutation, which is why the token is structured now.
+        d = detail.lower()
+        claims_reassembly = ("reassembl" in d
+                             and "does NOT evidence" not in detail
+                             and "rests on" not in detail)
+        if claims_reassembly:
+            m = re.search(r"REASSEMBLY-EVIDENCE:\s*(\d+)B as (\d+) datagram"
+                          r"[s]? on (\d{4}-\d{2}-\d{2})", detail)
+            chk(f"{h} reassembly claim carries a structured evidence token",
+                m is not None,
+                f"no REASSEMBLY-EVIDENCE token in {detail!r}")
+            if m:
+                nbytes, ndg = int(m.group(1)), int(m.group(2))
+                chk(f"{h} reassembly evidence exceeds the $16 part cap",
+                    nbytes > 888, f"{nbytes}B does not require splitting")
+                chk(f"{h} reassembly evidence is a single datagram",
+                    ndg == 1, f"observed {ndg} datagrams, not 1")
+        else:
+            chk(f"{h} does not claim reassembly it did not measure", True)
 
     # Counted, not hardcoded: a check that stops running must not keep
     # inflating the total it is reported against.

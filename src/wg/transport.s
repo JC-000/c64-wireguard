@@ -229,6 +229,12 @@ transport_build_nonce:
 ;   tp_packet_len — total packet length (16 + payload + 16)
 ;   tp_send_counter — incremented
 ;
+; Refusal convention, identical on BOTH refusal exits (counter exhausted,
+; AEAD out of domain): C=1 and tp_packet_len=0, so a caller that ignores
+; carry cannot send a stale tp_packet. On success C is clear.
+; tp_encrypt_error additionally distinguishes the two: 1 = counter
+; exhausted, 0 = AEAD refused.
+;
 ; Clobbers: A, X, Y
 ; =============================================================================
 transport_encrypt:
@@ -239,10 +245,23 @@ transport_encrypt:
         lda tp_send_counter+7   ; check highest byte of 64-bit counter
         cmp #REJECT_COUNTER_B7
         bcc @counter_ok         ; < $10, proceed
-        ; Counter exhausted — reject
+        ; Counter exhausted — reject through the SHARED refusal epilogue
+        ; below, so the two refusal exits are one piece of code rather
+        ; than two conventions kept in step by hand.
+        ;
+        ; The zeroed length matters here because we return at step 0,
+        ; before the type-4 header is written and before the plaintext is
+        ; copied — so tp_packet still holds the PREVIOUS fully-built packet
+        ; and tp_packet_len its length. A caller that reads the length
+        ; after a refusal reads a stale value with nothing to mark it
+        ; stale, and would put an exact byte replay of the last datagram
+        ; on the wire. The epilogue's `sec` matters because carry is
+        ; otherwise set only by the accident of the `cmp` two instructions
+        ; up: correct today, silently wrong the moment any flag-affecting
+        ; instruction is inserted here or a second branch reaches the exit.
         lda #1
         sta tp_encrypt_error
-        rts                     ; return without encrypting
+        jmp @refuse             ; return without encrypting
 
 @counter_ok:
         ; Check if approaching limit (rekey warning)
@@ -357,6 +376,12 @@ transport_encrypt:
         ; copied in, and present it as a finished packet. Fail closed:
         ; zero the length and return C set, the failure convention
         ; transport_send already uses for an over-MTU payload.
+        ;
+        ; SHARED with the counter-exhaustion exit at step 0 above, which
+        ; jmps here. tp_encrypt_error is what distinguishes the two (1 =
+        ; counter exhausted, 0 = AEAD refused); the caller-visible
+        ; postcondition is deliberately identical.
+@refuse:
         lda #0
         sta tp_packet_len
         sta tp_packet_len+1
