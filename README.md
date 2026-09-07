@@ -36,7 +36,6 @@ Still-open caveats:
 - [#69](https://github.com/JC-000/c64-wireguard/issues/69) — the REU build fails the handshake at 48 MHz on fw 3.15; use `REU=0` for hardware. The x25519 v0.16.0 pin carries the post-execute settle this needed, so it is now testable at `REU=1`; UNVERIFIED on hardware.
 - ~~[#121](https://github.com/JC-000/c64-wireguard/issues/121)~~ **CLOSED 2026-09-04** — a hardware-only suite sat dead at module load since a rename earlier in this release; repaired and since re-run on a U64E twice (see the closing comment). Listed here as an open caveat until now: "not yet re-run" is the shape that never gets revisited, because nothing prompts anyone to look again. Found by the new gate-wide import guard (`tools/test_suite_imports.py`), which imports every `tools/test_*.py` and fails on a missing name.
 - [#123](https://github.com/JC-000/c64-wireguard/issues/123) — `ip65_recv_dropped`'s increment path has never executed on any target; only its zero case is asserted.
-- [#104](https://github.com/JC-000/c64-wireguard/issues/104) — the constant-time invariant (`CRYPTO_BSS` alignment) is unenforced; nothing catches a regression.
 - [#106](https://github.com/JC-000/c64-wireguard/issues/106) — a forged cookie reply in `HS_SENT` still buys an attacker three X25519 scalarmults per 64-byte packet.
 - [#98](https://github.com/JC-000/c64-wireguard/issues/98) — `test_wire_encryption_live`'s default invocation is the exact REU + 48 MHz combination #69 says is broken; pass `REU=0` explicitly at turbo.
 

@@ -564,6 +564,31 @@ mul_dma_lo:
 mul_dma_hi:
         .res 256, 0            ; DMA target: hi bytes of a*b for current a
 
+; Issue #104: this is a CONSTANT-TIME invariant, not a performance hint, and
+; until now only a comment carried it. `.align 256` above is SEGMENT-RELATIVE,
+; so it yields a real page boundary only because cfg/c64-wireguard-*.cfg pins
+; CRYPTO_BSS with `align = $100`. Drop that one cfg word and the buffers land
+; mid-page; `lda mul_dma_lo,y` / `lda mul_dma_hi,y` in fe25519_mul
+; (src/crypto/fe25519.s:434-441, and the unrolled copy at :481-488) index with
+; Y = a byte of src2 — a Montgomery-ladder field element, i.e. SECRET — and an
+; abs,Y that crosses a page costs 5 cycles instead of 4. The execution time of
+; X25519 then depends on the secret. ld65 only WARNS about a dropped alignment
+; (docs/library-ingestion-architecture.md:156-158), the gate has no timing
+; oracle, and a misaligned build links and passes green.
+;
+; The asserts fire on the RESOLVED address, so they catch every route to the
+; failure: the cfg align removed, the `.align 256` above deleted, a field
+; inserted between the two buffers, or a future segment reshuffle.
+;
+; Colocated here rather than in src/contract_asserts.s deliberately: these
+; symbols do not exist under USE_X25519_SIBLING=1 (the sibling enforces its own
+; copy at libs/x25519/src/data.s:150-152), so a central assert would need its
+; own .ifndef plus .imports — a guard able to drift from the thing it guards.
+; Inside the defining block it is automatically absent in sibling builds and
+; automatically present in exactly the build that needs it.
+.assert (mul_dma_lo & $00FF) = 0, lderror, "mul_dma_lo must be page-aligned: CRYPTO_BSS lost align=$100 in cfg/c64-wireguard-*.cfg — the `.align 256` above is segment-relative, and `lda mul_dma_lo,y` in fe25519_mul indexes with secret Y, so a page cross is a data-dependent timing leak (ld65 only WARNS)"
+.assert (mul_dma_hi & $00FF) = 0, lderror, "mul_dma_hi must be page-aligned — same CT invariant as mul_dma_lo"
+
 ; --- X25519 state (mutable ladder working buffers) ---
 x25_scalar:
         .res 32, 0             ; clamped scalar
