@@ -323,7 +323,7 @@ def run_tests(transport, labels, seed):
 
 
 def main():
-    global VERBOSE
+    global VERBOSE, SLOW
     os.chdir(PROJECT_ROOT)
 
     seed = random.randint(0, 2**32 - 1)
@@ -372,7 +372,8 @@ def main():
     print(f"Labels loaded: {len(required)} required labels verified")
 
     # Launch VICE
-    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
+    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
+                        extra_args=["-reu", "-reusize", "512"])
 
     with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
