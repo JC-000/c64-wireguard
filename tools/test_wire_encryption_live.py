@@ -31,6 +31,16 @@ any interpretation. No pcap or elevated privileges are needed to inspect the
 real thing; a capture would only add visibility of OTHER ports, which matters
 for the disclosure below rather than for the encryption claim.
 
+A NULL WITH NO CONTROL IS NOT A RESULT (issue #147): every "the marker is
+ABSENT" assertion below is produced by wire_plaintext_search together with a
+POSITIVE CONTROL from the same searcher, over the counterfactual datagram --
+this datagram's own header with its own cleartext body -- which the searcher
+must FIND. If the search is blind, encodes the needle the way the host holds
+it rather than the way the wire carries it, or examines an empty buffer, the
+control goes red while the absence claims stay green, and that divergence is
+the evidence. The searcher also selftests before the device is touched; a
+failing selftest aborts the run rather than emitting absence PASSes.
+
 DISCLOSED CONTROL-PLANE LEAK, so nobody reads a PASS here as more than it is:
 this test types the C64's line by writing its KERNAL keyboard queue over the
 Ultimate's REST/DMA interface, which is plain HTTP. That text therefore does
@@ -51,6 +61,35 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import wg_c64_input                                          # noqa: E402
+import wire_plaintext_search as wps                          # noqa: E402
+
+# Issue #147: every absence claim below goes through wps.absence_and_control,
+# which pairs it with a positive control run by the SAME searcher over the
+# counterfactual cleartext datagram. Re-exported so the offline suite can
+# assert identity rather than a look-alike copy.
+absence_and_control = wps.absence_and_control
+
+
+def _absence_pair(datagram, body, needles, prefix, **kw):
+    """wps.absence_and_control, with a refusal turned into scored FAILs.
+
+    The searcher REFUSES a search it cannot perform -- a torn or
+    header-only datagram, a needle longer than the bytes captured -- and
+    that refusal must not end a hardware session in a traceback. It is a
+    real failure (something was expected on the wire and was not there in
+    a searchable form), so it lands as two FAILs whose labels say the
+    absence was NOT ASSERTED, rather than as an absence PASS or a crash.
+    """
+    try:
+        return wps.absence_and_control(datagram, body, needles, prefix, **kw)
+    except (wps.VacuousSearchError, TypeError) as exc:
+        why = f"{type(exc).__name__}: {exc}"
+        return [
+            (False, f"{prefix}the plaintext search was possible at all", why),
+            (False, f"{prefix}marker ABSENT from the datagram on the wire",
+             "NOT ASSERTED: the search refused as vacuous, so this run "
+             "makes no claim either way"),
+        ]
 
 # Distinct per direction so a hit can never be attributed to the wrong one.
 import os as _os
@@ -122,14 +161,22 @@ def _random_filler(rng: random.Random, alphabet: str, length: int) -> str:
     return "".join(out[:length])
 
 
-def _sized(marker: str, tail: str) -> str:
+def _sized(marker: str, tail: str, alphabet: str, rng: random.Random) -> str:
     """WIRE_MSG_LEN pads a marker with filler to that many chars (832 =
-    MSG_TEXT_MAX drives the full-size tunnel path); unset keeps it short."""
+    MSG_TEXT_MAX drives the full-size tunnel path); unset keeps it short.
+
+    The filler is drawn from *alphabet*, not from the whole A-Z. It used to
+    be the fixed string "ABCDEFGHIJKLMNOPQRSTUVWXY " -- whose first thirteen
+    letters ARE REQUEST_ALPHABET -- so under WIRE_MSG_LEN the host->C64
+    marker carried the C64's own alphabet and the disjointness this file
+    claims (an echo can never satisfy a reply check) did not hold in exactly
+    the full-size configuration the knob exists for. It is also seeded now,
+    like every other byte this tool puts on the wire.
+    """
     n = int(_os.environ.get("WIRE_MSG_LEN", "0"))
     if n <= len(marker) + len(tail) + 1:
         return marker
-    filler = "ABCDEFGHIJKLMNOPQRSTUVWXY "
-    body = (filler * (n // len(filler) + 1))[: n - len(marker) - len(tail) - 2]
+    body = _random_filler(rng, alphabet, n - len(marker) - len(tail) - 2)
     return f"{marker} {body} {tail}"
 
 
@@ -155,8 +202,35 @@ def _build_marker_c64(seed: int) -> str:
 # build_probe()'s inner `probe()` reads this as a module global at call
 # time, which is after main() has set it.
 MARKER_C64: str | None = None
-MARKER_HOST = _sized("QUASAR EIGHT NINE SIXTY", "END QUASAR")
-MARKER_TAMPER = "MUTANT PACKET SHOULD NOT APPEAR"
+
+
+def _build_marker_host(seed: int) -> str:
+    """Section 2/3's host->C64 message: seeded, like MARKER_C64, so the
+    fixed `QUASAR...` string of earlier revisions cannot be satisfied by
+    whatever a previous run left on the screen. REPLY_ALPHABET keeps it
+    disjoint from anything the C64 sends, so an echo can never pass it.
+    """
+    words = random_words(seed + 4, REPLY_ALPHABET)
+    return _sized(f"{words} END {random_suffix(seed + 5, REPLY_ALPHABET)}",
+                  f"END {random_suffix(seed + 6, REPLY_ALPHABET)}",
+                  REPLY_ALPHABET, random.Random(seed + 11))
+
+
+def _build_marker_tamper(seed: int) -> str:
+    """Section 4's forged-packet payload; must not appear on the screen."""
+    return (f"{random_words(seed + 7, REPLY_ALPHABET)} END "
+            f"{random_suffix(seed + 8, REPLY_ALPHABET)}")
+
+
+def _build_marker_alive(seed: int) -> str:
+    """Section 4's post-forgery liveness message; MUST appear."""
+    return (f"{random_words(seed + 9, REPLY_ALPHABET)} END "
+            f"{random_suffix(seed + 10, REPLY_ALPHABET)}")
+
+
+MARKER_HOST: str | None = None
+MARKER_TAMPER: str | None = None
+MARKER_ALIVE: str | None = None
 
 T4_HDR_LEN = 16     # type(1) + reserved(3) + receiver_idx(4) + counter(8)
 IP_UDP_HDR_LEN = 28 # inner IPv4 + UDP framing that udp_tunnel_build adds
@@ -307,7 +381,6 @@ def build_probe():
         if not wg_c64_input.send_message(tr, MARKER_C64):
             return check(False, "C64 accepted the keystrokes") and 1
 
-        marker_bytes = MARKER_C64.encode("ascii")
         pair = None
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline and pair is None:
@@ -323,10 +396,15 @@ def build_probe():
                   f"{len(seen)} Type-4s seen, none containing the marker")
         else:
             raw, plain, shown = pair
-            check(marker_bytes not in raw,
-                  "marker ABSENT from the datagram on the wire",
-                  f"datagram {len(raw)}B, ciphertext starts "
-                  f"{raw[T4_HDR_LEN:T4_HDR_LEN+16].hex(' ')}")
+            print(f"  datagram {len(raw)}B, ciphertext starts "
+                  f"{raw[T4_HDR_LEN:T4_HDR_LEN+16].hex(' ')}", flush=True)
+            # `plain` is what this very datagram decrypted to: the bytes a
+            # C64 that skipped transport_send's encrypt would have put on
+            # the wire behind the same header. The control requires the
+            # absence check to FAIL there.
+            for ok, label, detail in _absence_pair(
+                    raw, plain, {"marker_c64": MARKER_C64}, ""):
+                check(ok, label, detail)
             check(MARKER_C64 in shown,
                   "same datagram DECRYPTS to the marker",
                   f"decrypted: {shown.strip()!r}")
@@ -371,7 +449,7 @@ def build_probe():
                 for raw, plain in seen[base_s:]:
                     shown = petscii_to_ascii(strip_tunnel_headers(plain))
                     if tail in shown:
-                        pair = (raw, shown)
+                        pair = (raw, shown, plain)
                         break
             time.sleep(1.0)
             wire = tap.datagrams[base_w:]
@@ -384,9 +462,20 @@ def build_probe():
             check(len(raw) == expect_dgram,
                   f"[out {n}] datagram is {expect_dgram} B (text + 60)",
                   f"got {len(raw)} B")
-            check(tail.encode("ascii") not in raw
-                  and text[:64].encode("ascii") not in raw,
-                  f"[out {n}] marker ABSENT from the datagram")
+            # Same two needles as before (tail AND head), now through the
+            # controlled searcher. Counterfactual body: this message's own
+            # decrypted bytes when we caught them, else the PETSCII the
+            # C64 would have emitted for this exact text.
+            if pair is not None:
+                body, body_src = pair[2], "this datagram's decrypted bytes"
+            else:
+                body, body_src = (ascii_to_petscii(text),
+                                  "host-side PETSCII of the staged text "
+                                  "(no decrypt captured)")
+            for ok, label, detail in _absence_pair(
+                    raw, body, {"tail": tail, "head": text[:64]},
+                    f"[out {n}] ", body_source=body_src):
+                check(ok, label, detail)
             if pair is None:
                 check(False, f"[out {n}] the datagram DECRYPTS to the text",
                       f"{len(seen) - base_s} Type-4(s) decrypted, none "
@@ -403,10 +492,13 @@ def build_probe():
               flush=True)
         pkt1 = responder.encrypt_transport(ascii_to_petscii(MARKER_HOST))
         rt.send_raw(pkt1)
-        check(MARKER_HOST.encode("ascii") not in pkt1,
-              "marker ABSENT from the datagram we transmit",
-              f"datagram {len(pkt1)}B, ciphertext starts "
-              f"{pkt1[T4_HDR_LEN:T4_HDR_LEN+16].hex(' ')}")
+        print(f"  datagram {len(pkt1)}B, ciphertext starts "
+              f"{pkt1[T4_HDR_LEN:T4_HDR_LEN+16].hex(' ')}", flush=True)
+        for ok, label, detail in _absence_pair(
+                pkt1, ascii_to_petscii(MARKER_HOST),
+                {"marker_host": MARKER_HOST}, "[host->C64] ",
+                body_source="the exact bytes handed to encrypt_transport"):
+            check(ok, label, detail)
         time.sleep(4.0)
         check(MARKER_HOST in _screen_text(tr),
               "the C64 DECRYPTED it (text present in its screen RAM)")
@@ -438,7 +530,7 @@ def build_probe():
               "C64 REJECTED a packet with one flipped ciphertext bit")
 
         # And prove the rejection did not wedge the session.
-        alive = "STILL ALIVE AFTER TAMPER"
+        alive = MARKER_ALIVE
         rt.send_raw(responder.encrypt_transport(ascii_to_petscii(alive)))
         time.sleep(4.0)
         check(alive in _screen_text(tr),
@@ -460,8 +552,11 @@ def build_probe():
             check(len(pkt) == n + T4_HDR_LEN + 16,
                   f"[in {n}] datagram we transmit is {n + T4_HDR_LEN + 16} B",
                   f"got {len(pkt)} B")
-            check(tail.encode("ascii") not in pkt,
-                  f"[in {n}] marker ABSENT from the datagram we transmit")
+            for ok, label, detail in _absence_pair(
+                    pkt, ascii_to_petscii(text), {"tail": tail},
+                    f"[in {n}] ",
+                    body_source="the exact bytes handed to encrypt_transport"):
+                check(ok, label, detail)
             rt.send_raw(pkt)
             got_len, deadline = -1, time.monotonic() + INBOUND_WINDOW
             while time.monotonic() < deadline:
@@ -519,11 +614,32 @@ def main() -> int:
         print("ERROR: pass --host <ip> or set U64_HOST", file=sys.stderr)
         return 2
 
-    global SEED, MARKER_C64
+    global SEED, MARKER_C64, MARKER_HOST, MARKER_TAMPER, MARKER_ALIVE
     SEED = resolve_seed(args.seed)
     print(f"Random seed: {SEED} (reproduce with --seed {SEED} or "
           f"TEST_SEED={SEED})", flush=True)
     MARKER_C64 = _build_marker_c64(SEED)
+    MARKER_HOST = _build_marker_host(SEED)
+    MARKER_TAMPER = _build_marker_tamper(SEED)
+    MARKER_ALIVE = _build_marker_alive(SEED)
+
+    # A null with no control is not a result (issue #147). The searcher
+    # every absence claim below runs through is proven able to FIND
+    # plaintext, and to REFUSE a vacuous search, BEFORE the device is
+    # touched -- a blind searcher would otherwise report a clean tunnel.
+    print("\n=== 0. searcher selftest (before the device is touched) ===",
+          flush=True)
+    rows = wps.selftest()
+    for ok, label, detail in rows:
+        print(f"  {'PASS' if ok else 'FAIL'}  {label}"
+              + (f"\n          {detail}" if detail else ""), flush=True)
+    bad = [label for ok, label, _ in rows if not ok]
+    if bad:
+        print(f"ABORT: the plaintext searcher failed its own selftest "
+              f"({len(bad)} check(s): {bad}); every absence assertion in "
+              f"this tool would be meaningless. Device NOT touched.",
+              file=sys.stderr)
+        return 2
 
     os.environ.setdefault("U64_ALLOW_MUTATE", "1")
     import test_uci_handshake_live as live
