@@ -43,7 +43,10 @@ endif
 # REU=0: X25519_ONCHIP_MUL profile — zero REU anywhere in the PRG
 #   (chacha v0.7.0 issues no REU DMA on any path either — its
 #   LIB_CHACHA20_POLY1305_REU_BANKS_USED is $00); runs on a stock C64.
-#   ~1.7x slower scalarmult at 1 MHz.
+#   ~1.7x slower scalarmult at 1 MHz. (Unrelated to the RETRACTED ~1.7x
+#   cartridge-port figure — same number, different claim. This one is the
+#   onchip-vs-REU profile ratio and it holds: measured 2026-09-07 vs WARP,
+#   REU wins at 1 MHz while onchip wins at 48 MHz, 47.7 s against 89.0 s.)
 # Only meaningful with the siblings ON (the in-tree fe25519 is REU-only).
 REU ?= 1
 
@@ -246,6 +249,32 @@ SIBLING_ARCHIVES += $(X25519_ARCHIVE)
 endif
 ifeq ($(USE_CHACHA_SIBLING),1)
 SIBLING_ARCHIVES += $(CHACHA_ARCHIVE)
+# x25519.a is listed a SECOND time after chacha's archive — DEFENCE IN
+# DEPTH, not the primary mechanism. ld65 scans an archive once, in
+# command-line order: at x25519 v0.16.0 the §8.1 group moved out of
+# mul_8x8.o into its own member sqtab_init.o, which nothing in x25519's own
+# pulled-in members references, so it was never extracted on the first pass;
+# chacha's poly1305_lib.o then imported mul_tables_init and the link died
+# with an unresolved external.
+#
+# What actually fixes that is the `.import mul_tables_init` in
+# src/contract_asserts.s §6.6c: contract_asserts.o precedes every archive on
+# the ld65 line, so the symbol is already pending when x25519.a is first
+# scanned and the member is extracted there. MEASURED 2026-09-06: with that
+# import present, all four profiles link clean WITHOUT this re-listing, and
+# the four PRGs are byte-identical either way — so this line costs nothing
+# and is kept only so an unrelated future reordering cannot resurrect the
+# failure. (Duplicate members are not double-emitted.)
+#
+# THE COST OF KEEPING IT, stated so it is not discovered the hard way: these
+# two mechanisms MASK EACH OTHER. Deleting the §6.6c import alone leaves the
+# build green, because this line covers for it. If you remove either, remove
+# the other's comment too. The independent backstop for both is the §6.6
+# ratchet on __LIB_X25519_INIT_CODE_SIZE__, which fires at BOTH REU settings
+# when sqtab_init.o goes unextracted.
+ifeq ($(USE_X25519_SIBLING),1)
+SIBLING_ARCHIVES += $(X25519_ARCHIVE)
+endif
 endif
 
 # Per-backend source list.
@@ -331,6 +360,29 @@ $(PRG): $(PRG_DEPS) | $(BUILD_DIR)
 	# They are manifest constants, not addresses, so nothing wants them in a
 	# label file. Filtering beats widening the match: there is no 24-bit target.
 	sed -i.bak '/^al 0*[1-9a-fA-F][0-9a-fA-F]*[0-9a-fA-F]\{4\} /d' $(LABELS)
+	#
+	# Drop ca65's synthesised names for `.local` symbols inside macro
+	# expansions. chacha20poly1305 v0.11.0's AEAD_DOMAIN_GUARD declares
+	# `.local ok` / `.local reject`, and ld65 emits one
+	# `.LOCAL-MACRO_SYMBOL-NNNN` per local per expansion — MEASURED 8 of
+	# them (4 expansions x 2 locals) in ALL FOUR profiles, uci and ip65,
+	# REU=0 and REU=1. Their ADDRESSES are real branch targets inside
+	# aead_encrypt/aead_decrypt, but their NAMES carry no identity: the
+	# NNNN is an expansion counter, so adding or removing any macro use
+	# anywhere renumbers them. Nothing can ask for one by name, and the
+	# name is not stable enough to be worth asking for — so this is the
+	# "meaningless to the consumer" case and they are dropped, exactly as
+	# the far `_SIZE` equates above are.
+	#
+	# The match is deliberately anchored to that exact synthesised prefix
+	# rather than to "any name with characters VICE would reject". A
+	# general filter would make tools/test_build_both_backends.py's format
+	# check unfalsifiable — it would silently swallow every future
+	# malformed line, trading one silent failure for a worse one. This
+	# also runs AFTER the far-symbol drop and BEFORE the address rewrite,
+	# and matches on the NAME field only, so it neither masks nor is
+	# masked by the 16-bit-only rewrite below.
+	sed -i.bak '/^al [0-9a-fA-F]* \.LOCAL-MACRO_SYMBOL-[0-9]*$$/d' $(LABELS)
 	sed -i.bak 's/^al 00\([0-9a-fA-F]\{4\}\) /al C:\1 /' $(LABELS)
 	rm -f $(LABELS).bak
 

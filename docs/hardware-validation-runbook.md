@@ -96,7 +96,7 @@ python3 tools/c64_caps.py                          # reads build/labels.txt, nev
 ```
 
 Free space is **per-MTU, not per-backend** — as of 2026-09-05 an MTU-1440
-build leaves 371 B under `$9FFF` and an MTU-860 build 951 B, on either
+build leaves 372 B under `$9FFF` and an MTU-860 build 952 B, on either
 backend. The one structural fact worth keeping from the old text: that
 headroom is `BACKEND=uci` slack **only**. Under `BACKEND=ip65` the span
 from `$A000` is `IP65_BSS`, the blob's private BSS (issue #80, closed by

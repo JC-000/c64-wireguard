@@ -141,10 +141,89 @@ replays with --seed.
 WHAT WE DO NOT ASSUME
 =====================
 
-* NOT UCI timings. The user measured cartridge-port I/O throttling this
-  path to about 1.7x from 1 MHz to 48 MHz, against the 14.5x-51.7x the
-  UCI backend sees. Every budget here is generous and every duration is
-  MEASURED AND REPORTED, so the next run has numbers instead of guesses.
+* NOT UCI timings. This path does cartridge-port I/O and the UCI backend
+  does not, so UCI-derived durations do not transfer. Every budget here is
+  generous and every duration is MEASURED AND REPORTED, so the next run has
+  numbers instead of guesses.
+  (An earlier "~1.7x from 1 MHz to 48 MHz" figure stood here. It was
+  RETRACTED by its source on 2026-09-07 as unsupported -- no derivation
+  survived. What replaced it, after that lane's adversarial review cut
+  three successive attempts at the wording:
+
+    Accesses in the cartridge I/O range $DE00-$DFFF are floored at one
+    access per PHI2 cycle, reached at 6 MHz -- READS AND WRITES ALIKE.
+    RAM and internal VIC I/O show no such floor, so it is specific to the
+    address range the core routes to the expansion connector, not to I/O
+    decoding generally.
+
+  Their measurement, not ours. 1.000 PHI2/access from turbo index 11 up,
+  1.0156 at index 5, so an access-dense loop gains ~4.055x from 1 to 48 MHz.
+
+  The controls that make it portable, each killing a reading we nearly
+  published:
+    - Reads vs writes: `lda $DE02` and `sta $DE02` -- SAME address, same
+      128-unrolled body, opcode the only difference -- both 32640 ticks,
+      bit-identical, in two independent runs. Independently confirmed at
+      the address the transmit path actually uses: W measured
+      assumption-free as (T256-T192)/32 gives 0.997 PHI2 per access at
+      RTDATA $DE08/$DE09 at index 15, so the TX data phase reaches the
+      floor too. RAM at $CF00 was likewise
+      measured with lda AND sta at one address and shows zero excess both
+      ways. (The VIC row is the loose one: $D012 read vs $D020 write, since
+      $D012 cannot meaningfully be written. It does not bear on the
+      cartridge-range result.)
+    - Not I/O decoding in general: VIC internal I/O is unfloored in both
+      directions, while I/O2 at $DF00 is floored identically to I/O1 --
+      which is why the range is $DE00-$DFFF and not "the $DE00 window".
+    - Not the RR-Net: $DF00 (I/O2) is floored identically with no card
+      there at all, so the floor belongs to the range and not to the
+      cartridge in it. NOTE a Cartridge Preference = Auto sweep giving
+      byte-identical medians was ALSO offered as evidence here and is NOT
+      cited: it cannot discriminate, because both settings still drive a
+      real bus cycle. Internal-vs-external ADDRESS is the control that
+      separates them; presence-vs-absence is not.
+    - Spacing never buys a cheaper access. At index 15, spacings of 0, 1,
+      2, 3, 4 and 6 nops all give exactly 1.000 PHI2/access; the per-access
+      PERIOD is quantised to whole PHI2 cycles, so spreading accounts out
+      rounds the period UP to 2, 3 or 4. An earlier "2 PHI2 for an isolated
+      access" figure is withdrawn on that basis -- 2.000 is what one
+      particular loop period rounds to, not an access cost. Saturation sets
+      in around 0.5-0.6 PHI2 of CPU work per access.
+      The behaviour is now MODELLED and the model CONFIRMED, on six
+      spacings it was not fitted to: period(gap) = max(1, ceil(A + w)),
+      w = gap_cycles/M in PHI2, A in [0.4687, 0.4870]. At index 15 the
+      registered pair n=10 -> 1.0623 and n=11 -> 1.9998 landed as predicted
+      -- one nop apart, a factor-of-two step nothing smooth produces. The
+      same run EXCLUDED the previously quoted A = 0.451, which fitted the
+      original 128 cells and predicts 1.0625 where 1.9998 was measured.
+      IT PREDICTS, IT DOES NOT EXPLAIN. A ~ 0.478 sits measurably below one
+      half (0.5000 is excluded by ~0.013 PHI2), so the obvious "a request
+      must arrive before the halfway point to catch the current slot"
+      reading is wrong, and no account of the difference is offered. Do not
+      read the formula as a mechanism.
+
+  STATED LIMIT, not an open question: nothing available on this hardware
+  separates the connector's electrical timing from the core choosing to run
+  those cycles at PHI2 rate. Do not spend an evening rediscovering that.
+
+  THE UNIT IS MEASURED, not assumed: the CIA pair counts video-derived
+  PHI2. 1,709,474 / 1,709,492 / 1,709,494 ticks over 100 video frames at CPU
+  indices 0, 5 and 15, against 17095 x 100 = 1,709,500 predicted for an NTSC
+  6567R8 -- within 0.0015%, and turbo-invariant to 0.001% across a 47x CPU
+  range. A 6567R56A would have read 1,676,800 and PAL 1,965,600, so the core
+  is a 6567R8. The residual (26, 8, 6 ticks at the three indices) is under
+  prediction and SHRINKS as the CPU speeds up, which is the signature of a
+  fixed-CPU-cycle $D012 poll latency at the frame edges -- right sign, right
+  magnitude, right dependence. So k = 1: nothing above rescales.
+
+  Do NOT read the 1.7x and the 4.055x as a disagreement that drove the
+  retraction. The 1.7x was withdrawn because NOTHING stood behind it, and
+  would have been withdrawn wherever the measurement landed. The 4.055x is
+  not its refutation, and re-measuring cannot reinstate it.
+
+  What this establishes for OUR purposes is only the negative one: every
+  real speedup is far above the retracted 1.7x, so the budgets below are
+  more conservative than intended, not less.)
 * NOT the reason test_warp_live.py::_net_init_ip65 gives for running 'I'
   at 1 MHz. Its comment (:1697-1703) says ip65's DHCP and ARP "time out
   with CPU-counted delay loops calibrated for a 1 MHz 6510". THAT IS
@@ -325,9 +404,13 @@ BLOB_VAR_CFG_GATEWAY = 36
 DRIVER_SIGNATURE = b"\x65\x74\x68\x01"
 DRIVER_MAC_OFFSET = len(DRIVER_SIGNATURE)
 
-# Budgets. Deliberately generous: cartridge-port I/O is measured at only
-# ~1.7x from 1 MHz to 48 MHz on this path, so UCI-derived numbers do not
-# transfer. Every one of these is reported as a MEASURED duration too.
+# Budgets. Deliberately generous: this path does cartridge-port I/O and the
+# UCI backend does not, so UCI-derived numbers do not transfer. Every one of
+# these is reported as a MEASURED duration too. (These were originally sized
+# against a "~1.7x" port figure that has since been RETRACTED as unsupported;
+# the measured floor is 1 access per PHI2 cycle, so the real speedup is far
+# higher and these budgets are more conservative than intended. See the
+# module docstring.)
 BOOT_BUDGET_S = float(os.environ.get("RRNET_BOOT_BUDGET_S", "90"))
 NET_INIT_BUDGET_S = float(os.environ.get("RRNET_NET_INIT_BUDGET_S", "180"))
 # NOTE: there is deliberately no flat HS_BUDGET_S constant. See
@@ -1819,11 +1902,13 @@ def stage_bench_health(tr, client, run: dict, mhz: int) -> bool:
 #
 # THE ASSUMPTION, STATED: that anchor is from the UCI backend, and it is
 # reused here because the handshake is overwhelmingly X25519, which is pure
-# CPU and never touches the cartridge port. The user's ~1.7x figure is a
-# cartridge-port I/O throttle, and it applies to a handful of ~150-byte
-# frames, not to the scalar multiplications. If that reasoning is wrong the
-# budget is wrong, so every run reports the duration it MEASURED alongside
-# the budget it was given.
+# CPU and never touches the cartridge port. Whatever the port's own scaling
+# is, it applies to a handful of ~150-byte frames, not to the scalar
+# multiplications. (This argument previously leaned on a "~1.7x" port figure
+# that has since been RETRACTED as unsupported. The argument does not depend
+# on it: it turns on WHICH work dominates, not on how fast the port scales.)
+# If that reasoning is wrong the budget is wrong, so every run reports the
+# duration it MEASURED alongside the budget it was given.
 #
 # Inheriting HS_POLL_TIMEOUT = 120.0 (a UCI number) would have made a 1 MHz
 # run a false FAIL reading as "ip65 is broken on hardware" — the worst

@@ -14,7 +14,9 @@
 # Profile selection (WG Makefile REU knob):
 #   X25519_PROFILE=default  REU profile (banks 0,1,3,4,5; fastest at 1 MHz)
 #   X25519_PROFILE=onchip   X25519_ONCHIP_MUL=1 — zero REU, runs on a
-#                           stock C64; ~1.7x slower scalarmult at 1 MHz
+#                           stock C64; ~1.7x slower scalarmult at 1 MHz.
+#                           NOT the retracted ~1.7x cartridge-port figure —
+#                           same number, unrelated claim; this one holds.
 #
 # Defines passed to every library TU:
 #   -D LIB_SHARED_SQTAB_BASE=<derived>  WG's sqtab window (the cfg's
