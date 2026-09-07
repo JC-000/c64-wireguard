@@ -119,6 +119,266 @@ def prg_image_byte(addr):
     return data[offset]
 
 
+def prg_image_bytes(addr, length):
+    """`prg_image_byte` for a run of bytes; None if the image is short."""
+    with open(PRG_PATH, "rb") as fh:
+        data = fh.read()
+    load = data[0] | (data[1] << 8)
+    offset = 2 + addr - load
+    if offset < 2 or offset + length > len(data):
+        return None
+    return data[offset:offset + length]
+
+
+SID_V3_CTRL = 0xD412            # voice-3 control register
+CTRL_SCAN_LIMIT = 256           # sanity cap on the decode walk
+
+# --- a 6502 instruction-length table, documented opcodes only -------------
+#
+# An opcode NOT in here stops the walk with a failure. That is deliberate:
+# the alternative to knowing an instruction's length is guessing it, and a
+# guess desynchronises the decoder so that operand bytes get read as
+# opcodes — which is the exact failure mode of the byte-pattern scan this
+# replaces, just moved one level down.
+_LEN1 = [0x00, 0x08, 0x0A, 0x18, 0x28, 0x2A, 0x38, 0x40, 0x48, 0x4A, 0x58,
+         0x60, 0x68, 0x6A, 0x78, 0x88, 0x8A, 0x98, 0x9A, 0xA8, 0xAA, 0xB8,
+         0xBA, 0xC8, 0xCA, 0xD8, 0xE8, 0xEA, 0xF8]
+_LEN2 = ([0x09, 0x29, 0x49, 0x69, 0xA0, 0xA2, 0xA9, 0xC0, 0xC9, 0xE0, 0xE9]
+         + [0x05, 0x06, 0x24, 0x25, 0x26, 0x45, 0x46, 0x65, 0x66, 0x84,
+            0x85, 0x86, 0xA4, 0xA5, 0xA6, 0xC4, 0xC5, 0xC6, 0xE4, 0xE5, 0xE6]
+         + [0x15, 0x16, 0x35, 0x36, 0x55, 0x56, 0x75, 0x76, 0x94, 0x95,
+            0xB4, 0xB5, 0xD5, 0xD6, 0xF5, 0xF6]
+         + [0x96, 0xB6]
+         + [0x01, 0x21, 0x41, 0x61, 0x81, 0xA1, 0xC1, 0xE1]
+         + [0x11, 0x31, 0x51, 0x71, 0x91, 0xB1, 0xD1, 0xF1]
+         + [0x10, 0x30, 0x50, 0x70, 0x90, 0xB0, 0xD0, 0xF0])
+_LEN3 = ([0x0D, 0x0E, 0x1D, 0x1E, 0x19, 0x20, 0x2C, 0x2D, 0x2E, 0x39, 0x3D,
+          0x3E, 0x4C, 0x4D, 0x4E, 0x59, 0x5D, 0x5E, 0x6C, 0x6D, 0x6E, 0x79,
+          0x7D, 0x7E, 0x8C, 0x8D, 0x8E, 0x99, 0x9D, 0xAC, 0xAD, 0xAE, 0xB9,
+          0xBC, 0xBD, 0xBE, 0xCC, 0xCD, 0xCE, 0xD9, 0xDD, 0xDE, 0xEC, 0xED,
+          0xEE, 0xF9, 0xFD, 0xFE])
+OPLEN = {}
+for _grp, _n in ((_LEN1, 1), (_LEN2, 2), (_LEN3, 3)):
+    for _op in _grp:
+        assert _op not in OPLEN, f"duplicate opcode ${_op:02X} in the length table"
+        OPLEN[_op] = _n
+assert len(OPLEN) == 151, f"expected 151 documented opcodes, have {len(OPLEN)}"
+
+# Stores whose target address is IN the instruction, so it can be read.
+ABS_STORES = {0x8D: ("STA", 0xA9, "LDA"),
+              0x8E: ("STX", 0xA2, "LDX"),
+              0x8C: ("STY", 0xA0, "LDY")}
+# Stores whose target is base+index: not readable statically.
+INDEXED_ABS_STORES = {0x9D: "STA abs,X", 0x99: "STA abs,Y"}
+# Stores through a zero-page pointer: not readable statically at all.
+INDIRECT_STORES = {0x81: "STA (zp,X)", 0x91: "STA (zp),Y"}
+# entropy_fill's `sta (zp_ptr1),y` is the ONE indirect store this module is
+# supposed to contain. Pinned as a count so a NEW one has to be justified.
+EXPECTED_INDIRECT_STORES = 1
+RTS = 0x60
+
+
+def decode_entropy_region(labels):
+    """Linear-decode entropy_init..end-of-entropy_fill from the built image.
+
+    Returns (instructions, error). Each instruction is
+    (addr, opcode, operand_bytes). *error* is a string when the walk could
+    not complete, in which case nothing downstream may be trusted.
+
+    WHY A DECODER AND NOT A BYTE SEARCH, third time around. The .assert in
+    entropy.s pins the CONSTANT, and the instruction can stop using it. The
+    first version of this function pinned the ENCODING -- it searched for
+    the literal bytes `8D 12 D4` -- and the instruction can stop using that
+    too. Review built two clean images shipping $88 (NOISE + TEST) to
+    $D412, and both scored 4/4 PASS against it:
+
+        ldx #$00 / lda #$88 / sta sid_v3_ctrl,x      ; opcode $9D
+        ldx #$88 / stx sid_v3_ctrl                   ; opcode $8E
+
+    plus $99 (,Y), $8C (STY) and $91 ((zp),Y) equally invisible. Each fix
+    had moved the guard closer to the value that reaches the chip without
+    arriving at it; a search for one encoding is a guard against one
+    spelling.
+
+    So: walk instructions, and treat every store form as in scope. The rule
+    that makes this hold up is not "know every way to write to $D412" --
+    that list is open-ended -- but "FAIL on any form whose target or value
+    cannot be read here". Unknown opcode, unreadable target, unreadable
+    value: all failures, none silent passes.
+    """
+    ei = labels["entropy_init"]
+    ef = labels["entropy_fill"]
+    blob = prg_image_bytes(ei, CTRL_SCAN_LIMIT)
+    if blob is None:
+        return [], f"the PRG image does not cover entropy_init (${ei:04X})"
+
+    out = []
+    off = 0
+    while off < len(blob):
+        addr = ei + off
+        op = blob[off]
+        n = OPLEN.get(op)
+        if n is None:
+            return out, (f"undecodable opcode ${op:02X} at ${addr:04X}. The "
+                         f"walk cannot continue without guessing an "
+                         f"instruction length, and a wrong guess reads "
+                         f"operands as opcodes — which is how the previous "
+                         f"version of this check was defeated.")
+        if off + n > len(blob):
+            return out, (f"instruction at ${addr:04X} runs past the "
+                         f"{CTRL_SCAN_LIMIT}-byte window")
+        out.append((addr, op, blob[off + 1:off + n]))
+        off += n
+        # entropy_fill is the last of the three routines (source order, and
+        # the link preserves it), so its rts ends the region. Bounding on a
+        # decoded instruction rather than a byte count means the window
+        # cannot silently include or exclude a neighbouring routine.
+        if op == RTS and addr >= ef:
+            return out, None
+    return out, (f"walked {CTRL_SCAN_LIMIT} bytes from entropy_init without "
+                 f"reaching an rts at or after entropy_fill (${ef:04X})")
+
+
+def check_sid_ctrl_in_image(labels):
+    """#101: assert the byte that actually REACHES $D412, in the built image.
+
+    The .assert pair in entropy.s pins `SID_V3_CTRL_NOISE`; the instruction
+    is free to abandon the symbol (`lda #$88` builds rc=0 with both asserts
+    green). This decodes the shipped image instead.
+
+    Bit 1 (SYNC) is deliberately NOT pinned; see the note in entropy.s.
+    """
+    results = []
+    insns, err = decode_entropy_region(labels)
+    if err:
+        results.append((False, "the entropy region decodes", err))
+        return results
+    results.append((True,
+                    f"the entropy region decodes cleanly "
+                    f"({len(insns)} instructions)", ""))
+
+    sid_writes = 0
+    indirect = 0
+    for i, (addr, op, operand) in enumerate(insns):
+        if op in INDIRECT_STORES:
+            indirect += 1
+            continue
+
+        if op in INDEXED_ABS_STORES:
+            base = operand[0] | (operand[1] << 8)
+            # An index is 0..255, so any base in this span can land on
+            # $D412. The target is not knowable from the image, so this is
+            # a failure by construction rather than something to reason
+            # about -- review's `sta sid_v3_ctrl,x` mutant lives here.
+            if SID_V3_CTRL - 0xFF <= base <= SID_V3_CTRL:
+                results.append((False,
+                                f"{INDEXED_ABS_STORES[op]} ${base:04X} at "
+                                f"${addr:04X} can reach $D412",
+                                "the target is base+index and cannot be "
+                                "read statically, so the value arriving at "
+                                "the SID is unverifiable here. Write the "
+                                "voice-3 control with an absolute store, or "
+                                "re-derive this guard."))
+            continue
+
+        if op not in ABS_STORES:
+            continue
+        target = operand[0] | (operand[1] << 8)
+        if target != SID_V3_CTRL:
+            continue
+
+        sid_writes += 1
+        mnem, want_load, load_name = ABS_STORES[op]
+        if i == 0:
+            results.append((False,
+                            f"{mnem} $D412 at ${addr:04X} has a preceding "
+                            f"instruction", "it is the first instruction in "
+                            "the region, so the value is unreadable"))
+            continue
+        paddr, pop, poperand = insns[i - 1]
+        if pop != want_load:
+            results.append((False,
+                            f"{mnem} $D412 at ${addr:04X} is fed by "
+                            f"{load_name} #imm",
+                            f"preceded by opcode ${pop:02X} at ${paddr:04X}, "
+                            f"not {load_name} #imm — the value is computed "
+                            f"or loaded from memory, so it cannot be read "
+                            f"statically. This branch is the point of the "
+                            f"check: an unreadable value FAILS."))
+            continue
+        imm = poperand[0]
+        results.append((bool(imm & 0x80),
+                        f"the byte written to $D412 (${imm:02X}, via {mnem} "
+                        f"at ${addr:04X}) has bit 7 NOISE set",
+                        "without the noise waveform $D41B is not an LFSR "
+                        "tap and entropy_byte's non-affinity argument, and "
+                        "the 0/6144 hardware result, do not apply"))
+        results.append((not (imm & 0x08),
+                        f"the byte written to $D412 (${imm:02X}, via {mnem} "
+                        f"at ${addr:04X}) has bit 3 TEST clear",
+                        "TEST holds the oscillator in reset and freezes "
+                        "$D41B to a constant — the exact degeneracy #101 "
+                        "is about. VICE cannot catch this: it does not "
+                        "clock reSID at all"))
+
+    # At least one, or a build that dropped the SID setup satisfies every
+    # all-quantifier above vacuously.
+    results.append((sid_writes >= 1,
+                    f"the entropy region writes $D412 at all "
+                    f"({sid_writes} absolute store(s))",
+                    "no store to $D412 found — the SID voice-3 setup is "
+                    "gone, and every claim entropy_byte makes about $D41B "
+                    "not being clock-affine rests on it"))
+
+    # Set equality, not membership: entropy_fill's `sta (zp_ptr1),y` is the
+    # one indirect store this module should contain, and an indirect store
+    # can target anything. A NEW one has to be justified rather than
+    # absorbed.
+    results.append((indirect == EXPECTED_INDIRECT_STORES,
+                    f"the entropy region has exactly "
+                    f"{EXPECTED_INDIRECT_STORES} indirect store "
+                    f"(entropy_fill's), found {indirect}",
+                    "an indirect store's target is a zero-page pointer and "
+                    "cannot be read from the image, so a new one makes the "
+                    "$D412 claim above conditional on something this check "
+                    "cannot see"))
+
+    # Byte-pattern sweep OUTSIDE the decoded region. Say what it is: the
+    # rest of the image is code mixed with data and cannot be linearly
+    # decoded, so this is a search for store ENCODINGS carrying the literal
+    # operand $D412 — a strictly weaker check than the one above, kept
+    # because it is nearly free. It is NOT a proof that nothing else writes
+    # the register. The previous version of this line claimed "no code
+    # outside entropy_init writes $D412", which was both too strong (it is
+    # a byte search) and mislabelled (the window was the first 64 bytes of
+    # entropy_init, which already overlapped entropy_byte).
+    with open(PRG_PATH, "rb") as fh:
+        data = fh.read()
+    load = data[0] | (data[1] << 8)
+    body = data[2:]
+    lo, hi = SID_V3_CTRL & 0xFF, SID_V3_CTRL >> 8
+    region_lo = insns[0][0]
+    region_hi = insns[-1][0]
+    others = []
+    for op in list(ABS_STORES) + list(INDEXED_ABS_STORES):
+        pat = bytes([op, lo, hi])
+        j = body.find(pat)
+        while j >= 0:
+            a = load + j
+            if not (region_lo <= a <= region_hi):
+                others.append((a, op))
+            j = body.find(pat, j + 1)
+    results.append((not others,
+                    f"no store-opcode byte pattern targeting $D412 appears "
+                    f"outside the decoded region (byte search, not a "
+                    f"decode — see the comment)",
+                    "found at " + ", ".join(f"${a:04X} (op ${o:02X})"
+                                            for a, o in others)
+                    + " — entropy_init's value may not be the one the chip "
+                      "ends up holding"))
+    return results
+
+
 def collect_run(labels, run_index):
     """Boot one fresh VICE instance and sample the entropy state.
 
@@ -355,9 +615,22 @@ def main():
             print(f"FATAL: label '{name}' not found")
             sys.exit(1)
 
+    # Image-level and emulator-free, so it runs first and costs nothing.
+    print("\n--- #101: the SID voice-3 control byte IN THE BUILT IMAGE ---")
+    passed = failed = 0
+    for ok, label, detail in check_sid_ctrl_in_image(labels):
+        if ok:
+            passed += 1
+            print(f"  PASS  {label}")
+        else:
+            failed += 1
+            print(f"  FAIL  {label}\n        {detail}")
+
     print(f"\n--- #89: entropy_state must not start from a fixed constant "
           f"({RUNS} independent boots) ---")
-    passed, failed = run_tests(labels)
+    p2, f2 = run_tests(labels)
+    passed += p2
+    failed += f2
 
     print(f"\n{'=' * 60}")
     print(f"RESULTS: {passed} passed, {failed} failed")

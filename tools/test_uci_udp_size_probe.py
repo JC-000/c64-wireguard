@@ -783,9 +783,14 @@ def main() -> int:
                 if not cyc.is_cpu: continue
                 f.write(f"{i:08d} {cyc.address:04X} "
                         f"rw={'R' if cyc.is_read else 'W'} data={cyc.data:02X}\n")
-        if orig_mhz is not None: _safe(set_turbo_mhz, client, orig_mhz)
         if orig_mode: _safe(set_debug_stream_mode, client, orig_mode)
         responder.stop(); responder.join(timeout=1.0)
+        # Clock + REU + a VERIFIED reset (issue #134). This probe attaches
+        # the REU and opens a UDP socket per size; without the reset it
+        # strands one per run. We hold the lock, so pass the client.
+        from device_session import teardown_device
+        teardown_device(host, client=client,
+                        idle_mhz=orig_mhz if orig_mhz else 1, logger=log)
         lock.release()
 
     _print_summary(results)

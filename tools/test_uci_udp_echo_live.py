@@ -865,10 +865,19 @@ def main() -> int:
                 print(f"Debug trace (partial): {trace_path}")
             except Exception as exc:
                 log.warning("failed to persist trace: %s", exc)
-        _safe(set_turbo_mhz, client, orig_mhz)
         if orig_mode:
             _safe(set_debug_stream_mode, client, orig_mode)
         _safe(listener.stop)
+        # Clock + REU + a VERIFIED reset, the shared contract (issue #134).
+        # This tool used to restore only the clock, so every run it made
+        # abandoned its UDP sockets: the network target closes them from
+        # the C64 reset ISR and nothing else does, so without the reset the
+        # next lane inherits them and eventually sees $85 ERROR OPENING
+        # SOCKET — reading as a regression in whatever it changed.
+        # We hold the lock here, so the client is passed in.
+        from device_session import teardown_device
+        teardown_device(host, client=client,
+                        idle_mhz=orig_mhz if orig_mhz else 1, logger=log)
         lock.release()
 
 

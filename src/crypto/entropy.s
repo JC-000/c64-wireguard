@@ -20,6 +20,57 @@
 ; §6.7 image-overrun assert in contract_asserts.s, MAIN_AREA_HI on a plain
 ; ld65 area overflow — so the budget is something to be told by a build, never
 ; something to be remembered.
+; The voice-3 control value, named so it can be asserted. Zero bytes of
+; code: these are link-time checks on a constant, not runtime guards.
+SID_V3_CTRL_NOISE = $80
+
+; Assert BOTH directions, not just the one whose failure was imagined.
+; "noise is on" alone passes for $88, which is the value the comment
+; wrongly claimed and which would freeze the oscillator; "TEST is off"
+; alone passes for $00, which is silence.
+;
+; WHAT THESE TWO LINES DO NOT COVER, stated because the first version of
+; this guard was shipped believing they did. They pin the CONSTANT. The
+; instruction below is free to stop using it: edit `lda #SID_V3_CTRL_NOISE`
+; to `lda #$88` and the symbol is merely unused, both asserts stay green,
+; ca65 exits 0, and a TEST-set SID ships. Abandoning the symbol is exactly
+; the edit shape this module's own history documents, so a guard that only
+; watches the symbol is guarding the wrong thing.
+;
+; The byte that actually reaches $D412 is asserted where it can be:
+; tools/test_entropy_seed.py LINEAR-DECODES the built PRG across
+; entropy_init..entropy_fill's rts and checks every store that targets the
+; register, whatever its form — plus that at least one exists, so a build
+; that dropped the SID setup cannot satisfy an all-quantifier vacuously.
+;
+; IT DECODES, it does not search for bytes, and that distinction was
+; learned the hard way: the first version searched for the literal encoding
+; `8D 12 D4`, and two clean images shipping $88 to $D412 scored 4/4 PASS
+; against it — `ldx #$00 / lda #$88 / sta sid_v3_ctrl,x` ($9D) and
+; `ldx #$88 / stx sid_v3_ctrl` ($8E). $99, $8C and $91 were equally
+; invisible. The .assert pair pins a SYMBOL the instruction can abandon;
+; a byte search pins an ENCODING the instruction can abandon. What holds up
+; is not enumerating every way to write this register — that list is
+; open-ended — but FAILING on any form whose target or value cannot be read
+; statically: an unknown opcode, an indexed store that could land here, a
+; value loaded from memory. All failures, none silent passes.
+;
+; Keep both layers: this pair catches the edit at assembly time with a
+; message at the point of the mistake, the image check catches the edits
+; this pair cannot see.
+;
+; BIT 1 (SYNC) IS DELIBERATELY UNPINNED, and $82 would pass both asserts.
+; SYNC hard-syncs voice 3 to voice 2, so with a non-zero voice-2 frequency
+; it does perturb how the noise LFSR is clocked. It is left open because
+; nothing in this program ever writes a voice-2 frequency, so the effect is
+; unreachable here, and because a third assert would pin a bit whose
+; correct value is "whatever the rest of the SID is doing" rather than a
+; property of this routine. If this program ever drives voice 2, revisit.
+; $81 (GATE) also passes and SHOULD: GATE drives the envelope generator,
+; not the oscillator, and $D41B is an oscillator readout.
+.assert (SID_V3_CTRL_NOISE & $80) <> 0, error, "SID voice 3 must select the NOISE waveform: $D41B is only a noise-LFSR tap with bit 7 set, and entropy_byte's non-affinity argument (and the 0/6144 hardware result) rests on that. See src/crypto/entropy.s."
+.assert (SID_V3_CTRL_NOISE & $08) = 0, error, "SID voice 3 TEST bit (bit 3) must be CLEAR: TEST holds the oscillator in reset and freezes $D41B to a constant, which is exactly the degeneracy entropy_byte documents. VICE will not catch this -- it does not clock reSID. See src/crypto/entropy.s."
+
 .segment "APP_EXTRA"
 
 ; =============================================================================
@@ -37,8 +88,19 @@ entropy_init:
         lda #$ff
         sta sid_v3_freq_lo
         sta sid_v3_freq_hi
-        ; noise waveform (bit 7 = 1)
-        lda #$80
+        ; Noise waveform, TEST CLEAR. Both halves are load-bearing and both
+        ; are asserted below rather than left to this comment, because the
+        ; comment DID go wrong here: it claimed for a while that the value
+        ; was $88 (noise + TEST), and the hardware result that closed the
+        ; #101 exposure was attributed to that non-existent TEST bit.
+        ;
+        ; bit 7 (noise) makes $D41B a tap off the 23-bit noise LFSR, which
+        ; is what stops it being affine in the CPU clock. bit 3 (TEST) would
+        ; hold the oscillator in reset, freezing $D41B to a constant — the
+        ; exact degeneracy entropy_byte's note is about. A one-bit edit here
+        ; silently guts the generator on hardware while every VICE test
+        ; keeps passing, because VICE does not clock reSID at all.
+        lda #SID_V3_CTRL_NOISE
         sta sid_v3_ctrl
         ; CIA1 timer A: free-running, continuous
         ; Start timer (bit 0 = 1), continuous mode (bit 3 = 0)
@@ -111,9 +173,17 @@ entropy_init:
 ; Returns: A = random byte
 ; Preserves: X, Y
 ;
-; WHY THE PERSISTENT STATE. The two hardware reads alone are NOT independent:
-; $D41B (SID OSC3) and $DC04 (CIA1 timer A low) are both affine in the CPU
-; clock with OPPOSITE slopes — OSC3 counts up, TA counts down — so their sum
+; READ THE SCOPE LINE BEFORE THE ARGUMENT. The next three paragraphs
+; describe VICE and ONLY VICE. They used to open by asserting, flatly and
+; unconditionally, that "$D41B and $DC04 are both affine in the CPU clock" —
+; and then retracted it four paragraphs later. A reader who stopped early
+; got the wrong picture of the shipped generator, which is the failure mode
+; a comment exists to prevent. The hardware picture is further down and it
+; is the one that describes what runs on a C64.
+;
+; UNDER VICE the two hardware reads are not independent: $D41B (SID OSC3)
+; and $DC04 (CIA1 timer A low) are there both affine in the CPU clock with
+; OPPOSITE slopes — OSC3 counts up, TA counts down — so their sum
 ; S = (osc + cia) & $FF is invariant in elapsed time; the clock cancels, and S
 ; only steps when TA underflows. For a value derived as x EOR (S - x), there
 ; are exactly two S at which the result is the same for every x:
@@ -134,10 +204,30 @@ entropy_init:
 ; the failure is not total -- but two operands that are affine in the same
 ; clock still carry far less entropy than they appear to". That was a guess,
 ; and it has since been measured and is wrong in both halves. On a real 6581/
-; 8580 the two operands are NOT both affine in the CPU clock -- voice-3 ctrl
-; $88 (noise + TEST) freezes OSC3 to a single value, so $D41B is an LFSR --
-; and the sum does not cancel at any phase. The measurements are with
-; entropy_state below; read them before acting on anything in this block.
+; 8580 the two operands are NOT both affine in the CPU clock, and the sum
+; does not cancel at any phase. The measurements are with entropy_state
+; below; read them before acting on anything in this block.
+;
+; WHAT THE MECHANISM IS NOT. This block used to attribute that to "voice-3
+; ctrl $88 (noise + TEST)". entropy_init forty lines above writes #$80 --
+; noise with TEST CLEAR -- so $88 is not a value this program ever writes,
+; and the sentence was self-refuting besides: freezing the oscillator to a
+; single value and being an LFSR are opposite claims about the same
+; register.
+;
+; The account that fits both the code and the measurement: with TEST clear
+; and freq $FFFF, the noise waveform's 23-bit LFSR is clocked by the
+; oscillator, and $D41B presents eight bits tapped off it. An LFSR's output
+; is a pseudo-random function of how many times it has shifted, not an
+; affine function of elapsed time, so osc + ta does not stay invariant --
+; which is what "105 of 128 distinct S" below is measuring. VICE with sound
+; disabled does not clock reSID at all, so nothing there advances that LFSR,
+; and that is the only reason $D41B ever looked like a ramp.
+;
+; MARK THE STATUS OF THAT PARAGRAPH HONESTLY, because the sentence it
+; replaces was confidently wrong: the NUMBERS below are measured, the
+; mechanism above is the best available account of them and is not itself
+; measured. Do not let it become the next thing quoted as established.
 ;
 ; Stirring a persistent byte in makes consecutive outputs stop being a
 ; function of S alone. DO NOT READ THAT AS "THE STIRRING FIXED THE
@@ -268,10 +358,13 @@ entropy_fill:
 ;
 ; S is statistically indistinguishable from uniform on metal; the 95% upper
 ; bound on the degenerate rate is 0.049%, which excludes VICE's 1-2% at about
-; 1e-27. The cause is that voice-3 ctrl $88 (noise + TEST) freezes OSC3 to a
-; single value, so $D41B is an LFSR and is NOT affine in the CPU clock. VICE
-; with sound disabled does not clock reSID, which is the only reason it ever
-; looked affine. The null result is trustworthy because the same run forced
+; 1e-27. The cause is that voice-3 ctrl $80 -- noise, TEST CLEAR, which is
+; what entropy_init writes -- makes $D41B a tap off the noise LFSR rather
+; than a clock ramp, so it is NOT affine in the CPU clock. An earlier
+; version of this sentence said $88 (noise + TEST); that value is never
+; written here and freezing the oscillator would be the opposite of what
+; makes this work. VICE with sound disabled does not clock reSID, which is
+; the only reason it ever looked affine. The null result is trustworthy because the same run forced
 ; the condition -- a byte-identical entropy_fill with its two reads replaced
 ; by immediates XORing to a constant K -- and got 8/8 exact predicted
 ; universal keys, so the detector was proven to fire before the 0/6144 was
@@ -284,4 +377,30 @@ entropy_fill:
 ; stays open on design grounds (two sources that CAN cancel in principle,
 ; and only one of them is real entropy), not as a live exposure. Anyone
 ; reaching for it should read the hardware numbers above first.
+;
+; THE THIRD SOURCE, COSTED. #101 asks for a source that is not affine in the
+; CPU clock at all, so that no phase can cancel even in principle. CIA1 TOD
+; is the candidate. The obstacle is NOT the space budget, which is the thing
+; everyone assumes and it was measured rather than assumed: adding
+; `eor $dc08` to entropy_byte and to entropy_fill is +6 bytes in APP_EXTRA
+; and ALL SIX release variants still link (2026-09-07, APP_EXTRA $166 ->
+; $16C; APP_CODE is the area with one byte left, and this module is not in
+; it).
+;
+; The obstacle is that under BACKEND=ip65 THE TOD IS NEVER STARTED.
+; uci_tod_start lives in src/net/uci/ and is not linked into the ip65
+; builds, and src/net/ip65/net.s spells out that giving that backend a TOD
+; means duplicating a ~90-byte start-and-verify routine for a clock nothing
+; else in the build uses. A stopped TOD reads a fixed value, so in the two
+; shipped rrnet variants `eor $dc08` would XOR in a CONSTANT while looking
+; from the source like a third independent source. That is worse than
+; leaving it out: it is the same shape as every other trap in this repo,
+; where the wrong answer looks like a right one, and a reader auditing the
+; generator would count three sources and find two.
+;
+; So the honest form of the change is: start the TOD under ip65 too, then
+; mix it in both backends, then verify on hardware that the mixed byte
+; actually moves. The first and third of those are the work; the +6 bytes
+; are not. Nobody should land the cheap two thirds on the grounds that they
+; fit.
 entropy_state:  .res 1

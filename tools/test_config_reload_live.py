@@ -544,11 +544,19 @@ def run_soak(args) -> int:
 # ── entry point ───────────────────────────────────────────────────────────
 
 def _turbo_down(host: str) -> None:
-    """Leave the bench at 1 MHz for whoever has it next."""
-    try:
-        set_turbo_mhz(Ultimate64Client(host), 1)
-    except Exception:                                         # noqa: BLE001
-        pass
+    """Leave the bench at 1 MHz, REU off and RESET for whoever has it next.
+
+    The name is now narrower than the job, kept because both call sites
+    below read as an exit path. It used to be exactly what it says — a bare
+    set_turbo_mhz, unlocked, with a bare `except: pass` — so this tool left
+    its UDP sockets open on every run (issue #134) AND wrote to a shared
+    device without queueing for it.
+
+    live.main() has released the lock by the time this runs, so the helper
+    takes its own.
+    """
+    from device_session import teardown_device
+    teardown_device(host, idle_mhz=1, logger=log)
 
 
 def main() -> int:
@@ -571,10 +579,20 @@ def main() -> int:
     if os.environ.get("U64_ALLOW_MUTATE") != "1":
         live._skip("U64_ALLOW_MUTATE != 1 — this test mutates the device")
 
-    # The REU build is broken at 48 MHz on fw 3.15 (#69), and _build_uci()
-    # runs unconditionally at tool start unless C64_SKIP_BUILD is set — so
-    # without this it would happily replace a correct REU=0 binary with the
-    # REU one. C64_SKIP_BUILD=1 still wins if the caller wants the tree as-is.
+    # #69 is FIRMWARE-CONDITIONAL, so state the condition rather than the
+    # blanket claim this comment used to make ("the REU build is broken at
+    # 48 MHz on fw 3.15"). It failed on fw 3.15; it does not reproduce on
+    # fw 4011c97c (measured 2026-09-07, two handshakes at 48 MHz, zero
+    # decrypt_failed), and a pre-settle separating run was 6/6 green there,
+    # which attributes the difference to the firmware. 6/6 bounds an
+    # intermittent fault loosely rather than excluding one.
+    #
+    # REU=0 stays pinned here for a reason that does not depend on any of
+    # that: it is ~1.9x faster at turbo (47.7 s vs 89.0 s to SESSION_ACTIVE,
+    # same-day A/B), and _build_uci() runs unconditionally at tool start
+    # unless C64_SKIP_BUILD is set — so without this it would happily
+    # replace a correct REU=0 binary with the REU one. C64_SKIP_BUILD=1
+    # still wins if the caller wants the tree as-is.
     os.environ.setdefault("C64_REU", "0")
 
     if args.soak:

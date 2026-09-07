@@ -535,18 +535,38 @@ def main() -> int:
     except Exception as exc:                                      # noqa: BLE001
         check("test_warp_live exposes hs_timestamp_gt", False, repr(exc))
 
-    # Stage D restore (turbo 1MHz / REU off) must sit inside main()'s
-    # `finally`, so a raise anywhere above it — notably the rekey stage's
-    # asserts, expected to raise on unfixed firmware — still restores the
-    # device (today's failure mode before this fix: only lock.release()
-    # was in finally, so the device was left at 48 MHz / turbo stuck).
+    # Stage D teardown (turbo 1 MHz / REU off / verified reset) must sit
+    # inside main()'s `finally`, so a raise anywhere above it — notably the
+    # rekey stage's asserts, expected to raise on unfixed firmware — still
+    # restores the device (the failure mode before that fix: only
+    # lock.release() was in finally, so the device was left at 48 MHz).
+    #
+    # THE CALL NAME CHANGED, AND THAT IS WORTH A NOTE. This check used to
+    # look for `set_turbo_mhz`, which was the whole restore when it was
+    # written. #134 replaced the hand-written Stage D block with
+    # device_session.teardown_device, which does clock AND REU AND a
+    # read-back-verified reset — and this check went red on the refactor,
+    # correctly: it could no longer see the restore it was guarding. Keying
+    # on the helper is the stronger form, because the helper is the whole
+    # contract rather than one third of it.
     try:
         import test_warp_live as warp
-        check("test_warp_live.main(): Stage D restore call is inside "
+        check("test_warp_live.main(): Stage D teardown call is inside "
               "the outer try/finally's `finally:` block",
-              _restore_in_finally(warp),
-              "set_turbo_mhz(client, 1) must be reachable even when an "
+              _restore_in_finally(warp, restore_call="teardown_device"),
+              "teardown_device(...) must be reachable even when an "
               "earlier stage (e.g. rekey) raises")
+        # The restore must not have quietly gone back to being partial. A
+        # bare set_turbo_mhz in the finally would satisfy the check above's
+        # OLD form while abandoning the UDP sockets again, so assert the
+        # helper specifically and assert the hand-written block is GONE.
+        warp_src = inspect.getsource(warp.main)
+        check("test_warp_live.main(): Stage D goes through the shared "
+              "teardown helper, not a hand-written copy of it",
+              "teardown_device" in warp_src
+              and "client.reset()" not in warp_src,
+              "the point of #134 is one teardown contract; a local "
+              "reimplementation is how the seven tools drifted apart")
 
         # Alarm-proof: parse two synthetic ASTs directly (bypassing
         # inspect.getsource, which needs a real backing file) with
@@ -559,13 +579,14 @@ def main() -> int:
         bad_src = (
             "def main():\n"
             "    try:\n"
-            "        set_turbo_mhz(client, 1)\n"
+            "        teardown_device(host, client=client)\n"
             "    finally:\n"
             "        lock.release()\n"
         )
         check("alarm-proof: restore-in-try-body (not finally) is "
               "correctly flagged as NOT restored-in-finally",
-              _restore_in_finally_ast(ast.parse(bad_src)) is False,
+              _restore_in_finally_ast(ast.parse(bad_src),
+                                      restore_call="teardown_device") is False,
               "the detector must distinguish this from the real fix, or "
               "it would pass vacuously on the pre-fix code")
 
@@ -574,11 +595,12 @@ def main() -> int:
             "    try:\n"
             "        pass\n"
             "    finally:\n"
-            "        set_turbo_mhz(client, 1)\n"
+            "        teardown_device(host, client=client)\n"
             "        lock.release()\n"
         )
         check("alarm-proof: restore-in-finally IS detected",
-              _restore_in_finally_ast(ast.parse(good_src)) is True)
+              _restore_in_finally_ast(ast.parse(good_src),
+                                      restore_call="teardown_device") is True)
     except Exception as exc:                                      # noqa: BLE001
         check("test_warp_live.main() restore-in-finally check runs", False,
               repr(exc))

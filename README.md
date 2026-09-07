@@ -32,11 +32,11 @@ The shipped build links the sibling crypto libraries [c64-x25519](https://github
 
 Still-open caveats:
 
-- [#69](https://github.com/JC-000/c64-wireguard/issues/69) — the REU build fails the handshake at 48 MHz on fw 3.15; use `REU=0` for hardware. The x25519 v0.16.0 pin carries the post-execute settle this needed, so it is now testable at `REU=1`; UNVERIFIED on hardware.
+- [#69](https://github.com/JC-000/c64-wireguard/issues/69) — **the fault is firmware-conditional, and the firmware is the variable.** The REU build failed the handshake at 48 MHz on fw 3.15. It does **not** reproduce on fw `4011c97c` (measured 2026-09-07): two full handshakes against Cloudflare WARP at 48 MHz, 20/20 DNS queries decrypted, zero `decrypt_failed`, `x25519_reu_fault` `$00` at both clocks — and a separating run with the *pre-settle* library pins was 3/3 green, 6/6 handshakes, zero `InvalidTag` on the same firmware, which is what attributes the fix to the firmware rather than to the settle. 6/6 bounds an intermittent fault loosely; it does not exclude one, and #69's original signature was intermittent. **On fw 3.15, use `REU=0`.** `REU=0` is the better default everywhere regardless, on speed: 47.7 s to SESSION_ACTIVE against 89.0 s for `REU=1` in a same-day controlled A/B, because the REU's DMA does not scale with the CPU clock.
 - ~~[#121](https://github.com/JC-000/c64-wireguard/issues/121)~~ **CLOSED 2026-09-04** — a hardware-only suite sat dead at module load since a rename earlier in this release; repaired and since re-run on a U64E twice (see the closing comment). Listed here as an open caveat until now: "not yet re-run" is the shape that never gets revisited, because nothing prompts anyone to look again. Found by the new gate-wide import guard (`tools/test_suite_imports.py`), which imports every `tools/test_*.py` and fails on a missing name.
 - [#123](https://github.com/JC-000/c64-wireguard/issues/123) — `ip65_recv_dropped`'s increment path has never executed on any target; only its zero case is asserted.
 - [#106](https://github.com/JC-000/c64-wireguard/issues/106) — a forged cookie reply in `HS_SENT` still buys an attacker three X25519 scalarmults per 64-byte packet.
-- [#98](https://github.com/JC-000/c64-wireguard/issues/98) — `test_wire_encryption_live`'s default invocation is the exact REU + 48 MHz combination #69 says is broken; pass `REU=0` explicitly at turbo.
+- [#98](https://github.com/JC-000/c64-wireguard/issues/98) — **addressed:** `test_wire_encryption_live` now pins and prints its own arm (`C64_REU=0`, `--reu off`, 48 MHz) instead of inheriting `REU=1` from the tools it composes, so its default invocation is the arm its greens were measured on. Asking for `REU=1` still works and now warns, naming #69 and the firmware the null was measured on.
 
 Development-phase history (per-suite test counts have drifted since; `tools/run_regression.py` reports current totals):
 
@@ -201,7 +201,7 @@ Tests use the [c64-test-harness](https://github.com/JC-000/c64-test-harness) pac
 ```bash
 pip install c64-test-harness
 
-# All 46 suites — the canonical run, and the gate for any change.
+# All 49 suites — the canonical run, and the gate for any change.
 # Most run in a staggered parallel pool against a single build; the NINE that
 # rebuild the tree themselves (x25519, write_bytes, uci_stub, both_backends,
 # chunked_send, multipart_split, build_mtu1440, ip65_bss_guard,
@@ -361,7 +361,17 @@ them.
 ## Verifying encryption on the wire
 
 [`tools/test_wire_encryption_live.py`](tools/test_wire_encryption_live.py) —
-9/9 on hardware (U64E fw 3.14d, 48 MHz). It asserts on real datagrams:
+9/9 on hardware. Which hardware arm matters and is easy to lose, so it is
+stated: the original 9/9 was **fw 3.14d, 48 MHz, REU build**; it was
+re-measured 9/9 on **fw 3.15 at 48 MHz with a REU=0 build** on 2026-08-30.
+Those are different arms and neither result carries to the other.
+
+Since #98 the tool **pins its own arm** — `C64_REU=0`, `--reu off`, 48 MHz —
+and prints it, so a run's output records the configuration it was measured
+under instead of leaving it to whatever the operator exported. REU=0 is the
+default on speed, not on correctness: a controlled A/B on 2026-09-07 reached
+SESSION_ACTIVE in 47.7 s with REU=0 against 89.0 s with REU=1, because the
+REU's DMA does not scale with the CPU clock. It asserts on real datagrams:
 
 - the plaintext marker is **absent** from the wire in **both** directions,
   while the same datagram decrypts to it;

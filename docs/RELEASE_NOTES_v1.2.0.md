@@ -186,6 +186,13 @@ findings, all fixed here:
 - **`REU=1` still fails the handshake at 48 MHz**
   ([#69](https://github.com/JC-000/c64-wireguard/issues/69)). Use `REU=0` on
   hardware.
+  > **Errata, added 2026-09-07.** The line above records the state at v1.2.0
+  > and is left standing as that record. It is no longer true of current
+  > firmware: #69 does not reproduce on fw `4011c97c` (two handshakes at
+  > 48 MHz against Cloudflare WARP, 20/20 DNS queries decrypted, zero
+  > `decrypt_failed`). The fault is firmware-conditional; on the fw 3.15 this
+  > release was tested against, `REU=0` remains the right advice. `REU=0` is
+  > also ~1.9x faster at turbo, which is the reason it is now the default.
 - Firmware requirements are unchanged from v1.1.0 — see the warning in the
   README and `FIRMWARE-WARNING.txt` on each disk image.
 
