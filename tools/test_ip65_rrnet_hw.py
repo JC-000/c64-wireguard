@@ -147,33 +147,57 @@ WHAT WE DO NOT ASSUME
   numbers instead of guesses.
   (An earlier "~1.7x from 1 MHz to 48 MHz" figure stood here. It was
   RETRACTED by its source on 2026-09-07 as unsupported -- no derivation
-  survived.
-  What replaced it, after that lane's own adversarial review cut its first
-  two attempts: **READS in the C64 I/O1 window ($DE00 region) are floored at
-  one access per PHI2 cycle, reached at 6 MHz** -- 1.000 PHI2/access from
-  turbo index 11 upward, 1.0156 at index 5, so a read-dense loop gains
-  ~4.055x from 1 MHz to 48 MHz. Their measurement, not ours.
-  Three limits on that sentence, all of which they established by killing
-  their own earlier wording, and none of which should be dropped when
-  quoting it:
-    - NOT an "expansion port" or cartridge property. Their control ran the
-      identical sweep with Cartridge Preference = Auto (identity read
-      $CCCC, cartridge deselected) and got BYTE-IDENTICAL medians at all 16
-      speeds. By their own stated criterion that makes it the cost of the
-      I/O1 window, not of the external bus.
-    - READS ONLY. The sweep was `lda $DE00` throughout; writes are being
-      measured separately and may not share the floor, since a posted write
-      need not stall for data to return. Do not size a transmit path from
-      this until that lands.
-    - An earlier "2 PHI2 for an isolated access" figure is WITHDRAWN
-      outright, not narrowed: it tracked the 27-cycle spacing of their own
-      sparse loop divided by the clock, i.e. they measured their loop period
-      and reported it as an access cost.
-  Do NOT read the two numbers as a disagreement that drove the retraction.
-  The 1.7x was withdrawn because NOTHING stood behind it -- its source could
-  not reproduce a derivation -- and it would have been withdrawn had the
-  measured figure landed anywhere at all. The 4.055x is not its refutation,
-  and re-measuring cannot reinstate it.
+  survived. What replaced it, after that lane's adversarial review cut
+  three successive attempts at the wording:
+
+    Accesses in the cartridge I/O range $DE00-$DFFF are floored at one
+    access per PHI2 cycle, reached at 6 MHz -- READS AND WRITES ALIKE.
+    RAM and internal VIC I/O show no such floor, so it is specific to the
+    address range the core routes to the expansion connector, not to I/O
+    decoding generally.
+
+  Their measurement, not ours. 1.000 PHI2/access from turbo index 11 up,
+  1.0156 at index 5, so an access-dense loop gains ~4.055x from 1 to 48 MHz.
+
+  The controls that make it portable, each killing a reading we nearly
+  published:
+    - Reads vs writes: `lda $DE02` and `sta $DE02` -- SAME address, same
+      128-unrolled body, opcode the only difference -- both 32640 ticks,
+      bit-identical, in two independent runs. RAM at $CF00 was likewise
+      measured with lda AND sta at one address and shows zero excess both
+      ways. (The VIC row is the loose one: $D012 read vs $D020 write, since
+      $D012 cannot meaningfully be written. It does not bear on the
+      cartridge-range result.)
+    - Not I/O decoding in general: VIC internal I/O is unfloored in both
+      directions, while I/O2 at $DF00 is floored identically to I/O1 --
+      which is why the range is $DE00-$DFFF and not "the $DE00 window".
+    - Not the RR-Net: the identical sweep with Cartridge Preference = Auto
+      (identity read $CCCC, cartridge deselected) gave byte-identical
+      medians at all 16 speeds.
+    - Spacing never buys a cheaper access. At index 15, spacings of 0, 1,
+      2, 3, 4 and 6 nops all give exactly 1.000 PHI2/access; the per-access
+      PERIOD is quantised to whole PHI2 cycles, so spreading accounts out
+      rounds the period UP to 2, 3 or 4. An earlier "2 PHI2 for an isolated
+      access" figure is withdrawn on that basis -- 2.000 is what one
+      particular loop period rounds to, not an access cost. Saturation sets
+      in around 0.5-0.6 PHI2 of CPU work per access. No closed-form model is
+      offered: theirs matched 94 of 128 cells and was withheld, correctly.
+
+  STATED LIMIT, not an open question: nothing available on this hardware
+  separates the connector's electrical timing from the core choosing to run
+  those cycles at PHI2 rate. Do not spend an evening rediscovering that.
+
+  OPEN, and it affects only the UNIT: that the CIA pair counts PHI2 rather
+  than some other clock is assumed, not yet measured -- a frame-count
+  experiment is pending. If it fails, read every figure above as CIA ticks
+  per access; the 4.055x ratio is immune either way, since the timebase
+  cancels.
+
+  Do NOT read the 1.7x and the 4.055x as a disagreement that drove the
+  retraction. The 1.7x was withdrawn because NOTHING stood behind it, and
+  would have been withdrawn wherever the measurement landed. The 4.055x is
+  not its refutation, and re-measuring cannot reinstate it.
+
   What this establishes for OUR purposes is only the negative one: every
   real speedup is far above the retracted 1.7x, so the budgets below are
   more conservative than intended, not less.)
