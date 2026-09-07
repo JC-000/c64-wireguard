@@ -139,15 +139,30 @@ def leg_b(seed: int) -> None:
           absence3[2])
     check(ctrl3[0], "MUTANT: its control still fires", ctrl3[2])
 
-    # A one-byte corruption of the ciphertext must not resurrect a hit,
-    # and must not silence the control either.
-    bent = bytearray(raw)
-    bent[wps.T4_HDR_LEN + 4] ^= 0x01
-    ctrl4, absence4 = wps.absence_and_control(bytes(bent), plain,
-                                              {"marker": ctext}, "[bitflip] ")
-    check(absence4[0] and ctrl4[0],
-          "a one-bit-corrupted datagram: absence holds AND the control fires",
-          f"{absence4[2]}")
+    # The control must depend on the payload it is handed, not merely on
+    # the shape of the buffer. Flip ONE byte in the middle of the marker
+    # inside the counterfactual body and the control has to go red -- a
+    # control that stays green here is reporting the header, or nothing.
+    bent_body = bytearray(plain)
+    bent_body[len(bent_body) // 2] ^= 0x01
+    ctrl_bent, _ = wps.absence_and_control(raw, bytes(bent_body),
+                                           {"marker": ctext}, "[bent] ")
+    check(not ctrl_bent[0],
+          "the control is payload-sensitive: one flipped byte inside the "
+          "counterfactual marker turns it RED",
+          f"byte {len(bent_body) // 2} of {len(bent_body)}; {ctrl_bent[2]}")
+
+    # The screen-code encoding, end to end through the pair: a datagram
+    # carrying the marker as $01-$1A must NOT pass the absence arm. Before
+    # screen_code_form existed this was reported absent with both arms
+    # green -- the encoding a C64 leak is most likely to be copied from.
+    screen_dgram = raw[:wps.T4_HDR_LEN] + wps.screen_code_form(cbody)
+    _c, screen_absence = wps.absence_and_control(screen_dgram, plain,
+                                                 {"marker": ctext},
+                                                 "[screen] ")
+    check(not screen_absence[0],
+          "a datagram carrying the marker in SCREEN CODES fails the "
+          "absence arm", screen_absence[2])
 
 
 class _Mutation:
@@ -196,27 +211,42 @@ def leg_c(seed: int) -> None:
     # M2 -- wrong needle encoding: the needle is encoded the way the host
     # holds it rather than the way the wire carries it (the 2026-09-07
     # false null, in miniature).
-    def utf16_forms(t):
-        raw = t.encode("utf-16-le") if isinstance(t, str) else bytes(t)
-        return {"exact": raw}
+    # Same LENGTH, wrong bytes -- a length change would trip the
+    # needle-fits guard and raise, which is loud; this is the quiet form of
+    # the defect, where the search runs to completion looking for bytes the
+    # wire never carries.
+    def miscoded_forms(t):
+        raw = t.encode("ascii") if isinstance(t, str) else bytes(t)
+        return {"exact": bytes(b ^ 0x20 for b in raw)}
 
-    with _Mutation("utf16", "needle_forms", utf16_forms):
+    with _Mutation("miscoded", "needle_forms", miscoded_forms):
         ok_ctrl, ok_abs, detail = arms()
         check(not ok_ctrl and ok_abs,
               "M2 wrong needle encoding: CONTROL red, absence still green",
               f"control_ok={ok_ctrl} absence_ok={ok_abs}; {detail}")
 
-    # M3 -- mismatched types: str against bytes. This one must be LOUD,
-    # not merely red: a searcher that silently returns "no hits" for a
-    # type error is the same class of defect one level down.
-    with _Mutation("str-needle", "needle_forms",
-                   lambda t: {"exact": t if isinstance(t, str) else t}):
+    # M3 -- mismatched types, and specifically the silent kind. An int
+    # haystack is the one CPython does NOT catch: bytes(64) is 64 zero
+    # bytes, so without _as_haystack's isinstance check the search reports
+    # a CLEAN ABSENCE over a buffer that never existed. Both arms of this
+    # are failable: the guard must raise, and its removal must produce
+    # exactly that silent pass (otherwise the guard is not load-bearing).
+    try:
+        wps.plaintext_absent(64, needles)
+        check(False, "M3 an int haystack is REFUSED",
+              "returned a verdict instead of raising")
+    except TypeError as exc:
+        check("bytes-like" in str(exc), "M3 an int haystack is REFUSED",
+              str(exc))
+    with _Mutation("no-type-guard", "_as_haystack", lambda buf: bytes(buf)):
         try:
-            wps.absence_and_control(pkt, body, needles, "")
-            check(False, "M3 mismatched types: the search REFUSES",
-                  "returned a verdict instead of raising")
-        except TypeError as exc:
-            check(True, "M3 mismatched types: the search REFUSES", str(exc))
+            ok, detail = wps.plaintext_absent(64, needles)
+        except Exception as exc:                              # noqa: BLE001
+            ok, detail = None, f"{type(exc).__name__}: {exc}"
+        check(ok is True,
+              "M3 the type guard is load-bearing: without it an int "
+              "haystack reports a CLEAN ABSENCE",
+              f"absent={ok}; {detail}")
 
     # M4 -- an empty buffer. Absence over nothing is the purest vacuous
     # pass and must raise rather than report clean.
@@ -259,12 +289,44 @@ def leg_d(seed: int) -> None:
         check(x != y and fn(seed) == x,
               f"{name} is seeded: different per seed, reproducible per seed",
               f"{x[:24]!r} vs {y[:24]!r}")
-    allowed = set(live.REPLY_ALPHABET) | set(" END0123456789")
+    # The property is "every letter a host->C64 marker carries comes from
+    # REPLY_ALPHABET", so the only thing exempted is the literal ` END `
+    # separator -- not the characters E, N and D wherever they occur. The
+    # loose version (allowed = REPLY_ALPHABET | set(" END")) admitted E and
+    # D, which are REQUEST_ALPHABET letters, anywhere in the string, and
+    # would not have noticed a builder switching alphabets.
     live_fns = [fn for fn in builders.values() if fn is not None]
-    check(bool(live_fns) and all(set(fn(seed)) <= allowed for fn in live_fns),
-          "host->C64 markers stay in REPLY_ALPHABET",
-          "disjoint from REQUEST_ALPHABET, so an echo of the C64's own "
-          "message can never satisfy them")
+    for wire_len in (None, "832"):
+        # BOTH configurations: WIRE_MSG_LEN is the full-size-tunnel knob,
+        # and it is where _sized's filler used to reintroduce A-M. A suite
+        # that only ever runs in the default configuration is how that got
+        # in.
+        prior = os.environ.get("WIRE_MSG_LEN")
+        if wire_len is None:
+            os.environ.pop("WIRE_MSG_LEN", None)
+        else:
+            os.environ["WIRE_MSG_LEN"] = wire_len
+        try:
+            stray = {}
+            for fn in live_fns:
+                text = fn(seed)
+                rest = " ".join(t for t in text.split(" ") if t != "END")
+                bad = set(rest) - set(live.REPLY_ALPHABET) - {" "}
+                if bad:
+                    stray[fn.__name__] = (sorted(bad), len(text))
+            check(bool(live_fns) and not stray,
+                  f"host->C64 markers use ONLY REPLY_ALPHABET "
+                  f"(WIRE_MSG_LEN={wire_len or 'unset'})",
+                  f"stray characters: {stray}" if stray else
+                  f"{len(live_fns)} builder(s), "
+                  f"{len(live_fns and live_fns[0](seed))} chars; disjoint "
+                  f"from REQUEST_ALPHABET, so an echo of the C64's own "
+                  f"message can never satisfy them")
+        finally:
+            if prior is None:
+                os.environ.pop("WIRE_MSG_LEN", None)
+            else:
+                os.environ["WIRE_MSG_LEN"] = prior
 
 
 def leg_e() -> None:

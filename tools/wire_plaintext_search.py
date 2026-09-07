@@ -27,13 +27,16 @@ hex-encoded in a URL query string, ten characters per request. The needle
 must match the TRANSPORT encoding, not the one the host happens to hold, so
 `needle_forms` enumerates the forms the C64's own send path can emit and the
 counterfactual is built from the REAL post-encoding bytes wherever the
-caller has them (the responder's decrypt output), never from a re-encoding
-of the host's string.
+caller has them (the responder's decrypt output). Where a caller has no
+decrypt for that datagram it may fall back to a host-side re-encoding, and
+`body_source` says so in the check's detail line -- that is a weaker
+control, disclosed, not the normal path.
 
 Vacuity is refused rather than reported: an empty buffer, an empty needle
-set, an empty needle, or a needle/haystack of the wrong type raises instead
-of returning "absent". Those are the four ways the search examines nothing,
-and every one of them passes silently if it is allowed to return a verdict.
+set, an empty needle, a needle/haystack of the wrong type, or a needle
+LONGER than the buffer raises instead of returning "absent". Those are the
+ways the search examines nothing, and every one of them passes silently if
+it is allowed to return a verdict.
 """
 from __future__ import annotations
 
@@ -54,6 +57,31 @@ from ip65_hw_checks import (                                  # noqa: E402
 T4_HDR_LEN = 16     # type(1) + reserved(3) + receiver_idx(4) + counter(8)
 
 
+def screen_code_form(needle: bytes) -> bytes:
+    """The bytes this text occupies in the C64's SCREEN RAM.
+
+    A fifth encoding, and not a hypothetical one: `_screen_text` in the
+    live tool decodes exactly this mapping to read $0400, so a buffer that
+    was copied from (or shares a routine with) screen RAM carries letters
+    as $01-$1A, not $41-$5A. None of exact/petscii/petscii-shifted/reversed
+    can see that, and screen RAM is the single most plausible place a C64
+    leak would be copied FROM. MEASURED before it was added: a screen-code
+    copy of the marker in a datagram was reported ABSENT with both arms of
+    the pair green.
+
+    Letters (either case) fold to 1-26; $20-$3F -- space, digits and
+    punctuation -- are the same code in both, which is the inverse of what
+    `_screen_text` decodes.
+    """
+    out = bytearray(needle)
+    for i, b in enumerate(out):
+        if 0x41 <= b <= 0x5A:
+            out[i] = b - 0x40
+        elif 0x61 <= b <= 0x7A:
+            out[i] = b - 0x60
+    return bytes(out)
+
+
 class VacuousSearchError(ValueError):
     """The search would have examined nothing. Never a clean absence."""
 
@@ -61,7 +89,8 @@ class VacuousSearchError(ValueError):
 @dataclass(frozen=True)
 class Hit:
     label: str          # which named plaintext
-    form: str           # exact | petscii | petscii-shifted | reversed
+    form: str           # exact | petscii | petscii-shifted |
+                        # screen-code | reversed
     offset: int
     length: int
 
@@ -75,7 +104,9 @@ def needle_forms(text: str | bytes) -> dict[str, bytes]:
     exact/petscii/petscii-shifted because the 6510 emits letters in either
     PETSCII block depending on the case mode in force, and our uppercase
     alphabets make `petscii_form` a no-op -- the shifted block is the form
-    an ASCII-only needle would look straight past. Reversed because a
+    an ASCII-only needle would look straight past. screen-code because
+    that is what sits in $0400 and what this repo's own `_screen_text`
+    reads back. Reversed because a
     descending-index copy loop is ordinary 6502 code and reversed plaintext
     on the wire is just as readable to whoever holds the capture.
     """
@@ -91,6 +122,7 @@ def needle_forms(text: str | bytes) -> dict[str, bytes]:
         "exact": raw,
         "petscii": petscii_form(raw),
         "petscii-shifted": petscii_shifted_form(raw),
+        "screen-code": screen_code_form(raw),
         "reversed": raw[::-1],
     }
 
@@ -117,7 +149,18 @@ def find_plaintext(buf, needles: dict[str, str]) -> list[Hit]:
         raise VacuousSearchError("no needles: nothing was looked for")
     hits: list[Hit] = []
     for label, text in needles.items():
-        for form, pat in needle_forms(text).items():
+        forms = needle_forms(text)
+        # A fifth vacuity class, and the one that hides best: a needle
+        # LONGER than what is being searched cannot appear no matter what
+        # the sender did, so "absent" is arithmetic, not evidence. An
+        # all-header datagram against a 36-byte marker used to come back
+        # clean this way.
+        need = len(forms["exact"])
+        if need > len(hay):
+            raise VacuousSearchError(
+                f"needle {label!r} is {need} B but only {len(hay)} B were "
+                f"searched: it could not have appeared at any offset")
+        for form, pat in forms.items():
             for got_form, at, ln in search_forms(hay, pat):
                 # search_forms re-derives forms of what it is handed; we
                 # already enumerated ours, so only its own "exact" branch
@@ -140,17 +183,20 @@ def plaintext_absent(buf, needles: dict[str, str]) -> tuple[bool, str]:
     if hits:
         return False, (f"{len(hits)} hit(s) in {n} B: "
                        + ", ".join(str(h) for h in hits[:6]))
+    forms = len(needle_forms(next(iter(needles.values()))))
     return True, (f"{n} B searched for {len(needles)} needle(s) "
-                  f"[{', '.join(needles)}] in 4 encodings each; no hit")
+                  f"[{', '.join(needles)}] in {forms} encodings each; no hit")
 
 
 def cleartext_counterfactual(datagram, body, *, hdr_len: int = T4_HDR_LEN) -> bytes:
     """The datagram this sender would have emitted had it NOT encrypted.
 
-    *body* is the real post-encoding plaintext (the responder's decrypt
-    output for an inbound datagram, or the exact bytes handed to
-    encrypt_transport for an outbound one) -- never a re-encoding of the
-    host's string, which is how the pcap control returned a false null.
+    *body* should be the real post-encoding plaintext (the responder's
+    decrypt output for an inbound datagram, or the exact bytes handed to
+    encrypt_transport for an outbound one). A host-side re-encoding is a
+    weaker control -- it can only prove the searcher finds what the HOST
+    thinks the wire carries, which is how the pcap control returned a false
+    null -- so callers that must fall back to one say so via *body_source*.
     The header is the datagram's own, so the control's buffer differs from
     the asserted one only in the property under test.
     """
@@ -227,6 +273,15 @@ def selftest() -> list[tuple[bool, str, str]]:
     rec(any(h.form == "reversed"
             for h in find_plaintext(hdr + text.encode()[::-1], needles)),
         "selftest: the reversed form is FOUND, labelled `reversed`")
+    # Screen codes: the letters land in $01-$1A, which no other branch
+    # searches for. Asserted by its own label for the same reason as the
+    # rest -- a sibling branch matching at the same offset would otherwise
+    # keep a dead branch looking alive.
+    screen_hits = find_plaintext(hdr + screen_code_form(text.encode()), needles)
+    rec(any(h.form == "screen-code" for h in screen_hits)
+        and not any(h.form in ("exact", "petscii") for h in screen_hits),
+        "selftest: the screen-code form is FOUND, labelled `screen-code`, "
+        "and no ASCII/PETSCII branch sees it")
     rec(plaintext_absent(hdr + b"\xa7" * 200, needles)[0],
         "selftest: unrelated bytes are reported ABSENT")
 
@@ -240,25 +295,52 @@ def selftest() -> list[tuple[bool, str, str]]:
     rec(plaintext_absent(hdr + text.encode().hex().upper().encode(), needles)[0],
         "selftest: a hex-encoded needle is not an ASCII hit")
 
-    for label, thunk in (
-        ("empty haystack", lambda: plaintext_absent(b"", needles)),
-        ("empty needle", lambda: plaintext_absent(hdr, {"probe": ""})),
-        ("no needles", lambda: plaintext_absent(hdr, {})),
+    # Each refusal is pinned to ITS OWN message, not merely to
+    # VacuousSearchError: the guards overlap (an empty haystack also trips
+    # the needle-fits guard), so a bare `except VacuousSearchError` stays
+    # green with one of them deleted and stops distinguishing them.
+    for label, want, thunk in (
+        ("empty haystack", "nothing was searched",
+         lambda: plaintext_absent(b"", needles)),
+        ("empty needle", "a search for nothing",
+         lambda: plaintext_absent(hdr, {"probe": ""})),
+        ("no needles", "nothing was looked for",
+         lambda: plaintext_absent(hdr, {})),
+        # 16 B of Type-4 header against a 37-byte marker: the shape a torn
+        # or header-only datagram takes, where "absent" is arithmetic
+        # rather than evidence.
+        ("a needle longer than the buffer (all-header datagram)",
+         "could not have appeared at any offset",
+         lambda: plaintext_absent(hdr, needles)),
     ):
         try:
             thunk()
             rec(False, f"selftest: {label} is REFUSED", "returned a verdict")
-        except VacuousSearchError as exc:
-            rec(True, f"selftest: {label} is REFUSED", str(exc))
-    for label, thunk in (
-        ("str haystack", lambda: plaintext_absent(text, needles)),
-        ("int needle", lambda: plaintext_absent(hdr, {"probe": 17})),
+        except Exception as exc:                              # noqa: BLE001
+            rec(isinstance(exc, VacuousSearchError) and want in str(exc),
+                f"selftest: {label} is REFUSED",
+                f"{type(exc).__name__}: {exc} (wanted {want!r})")
+    # The expected substring pins each refusal to THIS module's guard.
+    # `bytes("...")` and `hay.find(str)` raise TypeError on their own, so a
+    # bare `except TypeError` here would stay green with the guards deleted
+    # and would be testing CPython. `bytes(17)`, by contrast, silently
+    # yields 17 zero bytes -- that guard is the only thing between an int
+    # and a clean absence over a buffer that never existed.
+    for label, want, thunk in (
+        ("str haystack", "bytes were expected",
+         lambda: plaintext_absent(text, needles)),
+        ("int needle", "needle must be str or bytes",
+         lambda: plaintext_absent(hdr, {"probe": 17})),
+        ("int haystack", "must be bytes-like",
+         lambda: plaintext_absent(17, needles)),
     ):
         try:
             thunk()
             rec(False, f"selftest: {label} is REFUSED", "returned a verdict")
-        except TypeError as exc:
-            rec(True, f"selftest: {label} is REFUSED", str(exc))
+        except Exception as exc:                              # noqa: BLE001
+            rec(want in str(exc), f"selftest: {label} is REFUSED by this "
+                f"module's own guard",
+                f"{type(exc).__name__}: {exc} (wanted {want!r})")
 
     # And the pairing itself: ciphertext-shaped noise absent, its own
     # cleartext counterfactual found.

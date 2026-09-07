@@ -139,14 +139,22 @@ def _random_filler(rng: random.Random, alphabet: str, length: int) -> str:
     return "".join(out[:length])
 
 
-def _sized(marker: str, tail: str) -> str:
+def _sized(marker: str, tail: str, alphabet: str, rng: random.Random) -> str:
     """WIRE_MSG_LEN pads a marker with filler to that many chars (832 =
-    MSG_TEXT_MAX drives the full-size tunnel path); unset keeps it short."""
+    MSG_TEXT_MAX drives the full-size tunnel path); unset keeps it short.
+
+    The filler is drawn from *alphabet*, not from the whole A-Z. It used to
+    be the fixed string "ABCDEFGHIJKLMNOPQRSTUVWXY " -- whose first thirteen
+    letters ARE REQUEST_ALPHABET -- so under WIRE_MSG_LEN the host->C64
+    marker carried the C64's own alphabet and the disjointness this file
+    claims (an echo can never satisfy a reply check) did not hold in exactly
+    the full-size configuration the knob exists for. It is also seeded now,
+    like every other byte this tool puts on the wire.
+    """
     n = int(_os.environ.get("WIRE_MSG_LEN", "0"))
     if n <= len(marker) + len(tail) + 1:
         return marker
-    filler = "ABCDEFGHIJKLMNOPQRSTUVWXY "
-    body = (filler * (n // len(filler) + 1))[: n - len(marker) - len(tail) - 2]
+    body = _random_filler(rng, alphabet, n - len(marker) - len(tail) - 2)
     return f"{marker} {body} {tail}"
 
 
@@ -182,7 +190,8 @@ def _build_marker_host(seed: int) -> str:
     """
     words = random_words(seed + 4, REPLY_ALPHABET)
     return _sized(f"{words} END {random_suffix(seed + 5, REPLY_ALPHABET)}",
-                  f"END {random_suffix(seed + 6, REPLY_ALPHABET)}")
+                  f"END {random_suffix(seed + 6, REPLY_ALPHABET)}",
+                  REPLY_ALPHABET, random.Random(seed + 11))
 
 
 def _build_marker_tamper(seed: int) -> str:
