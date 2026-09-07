@@ -52,6 +52,13 @@ TESTS = [
     # the three consumer ENCRYPT sites ignored it, shipping the previous
     # packet's poly1305_tag over cleartext. Default tree, so pooled.
     ("aead_status", ["tools/test_aead_encrypt_status_checked.py", "--seed", "7539"]),
+    # transport_encrypt's two refusal exits (counter exhausted, AEAD out of
+    # domain) must be one convention: C=1 and tp_packet_len=0. Default tree,
+    # writes only RAM the running PRG already owns, so pooled. Poking the
+    # send counter and stubbing aead_encrypt's entry are both undone within
+    # the suite's own VICE instance, so it mutates nothing for its neighbours.
+    ("tp_refusal", ["tools/test_transport_refusal_convention.py",
+                    "--seed", "424242"]),
     ("blake2s",    ["tools/test_blake2s.py", "--seed", "7539"]),
     ("chacha",     ["tools/test_chacha20_poly1305.py", "--seed", "7539"]),
     ("fe25519",    ["tools/test_fe25519.py", "--seed", "7539"]),
