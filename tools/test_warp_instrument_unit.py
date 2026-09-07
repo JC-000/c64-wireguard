@@ -84,7 +84,7 @@ from c64_test_harness.encoding.screen_codes import SCREEN_CODE_TABLE  # noqa: E4
 # branch that does not apply still emits its names as skips. Pinned so a
 # case that silently stops running is a hard error, not a smaller
 # denominator nobody notices.
-EXPECTED_CHECKS = 47
+EXPECTED_CHECKS = 56
 
 #: src/net/uci/uci_errors.inc:244. Retyped here ONLY as the value case 8
 #: pins the BUILT layout against; the tool itself always derives the
@@ -511,7 +511,8 @@ def drive(mod, labels: dict, trials: list[Trial], rng: random.Random,
     """
     dev = FakeDevice(labels, trials, rng)
     saved = (mod.PRG_C, mod.DNS_TIMEOUT, mod.BOOT_TIMEOUT,
-             mod.HS_POLL_TIMEOUT, mod._net_init_ip65)
+             mod.HS_POLL_TIMEOUT, mod._net_init_ip65,
+             mod.select_boundary_rung)
     mod.PRG_C = prg
     mod.DNS_TIMEOUT = 0.4        # nothing arrives late in the simulator
     mod.BOOT_TIMEOUT = 2.0
@@ -519,6 +520,14 @@ def drive(mod, labels: dict, trials: list[Trial], rng: random.Random,
     # DHCP + turbo are a device concern and not what is under test here;
     # stubbing them is what lets an ip65 tree drive the same query loop.
     mod._net_init_ip65 = lambda tr, client, L, turbo, result: True
+    # Issue #146: the boundary rung is sized by a REAL host-side DNS lookup
+    # at run start. Stubbed here so this suite stays offline and
+    # deterministic — the gate must not depend on a third party's TXT
+    # record, which is the very fact #146 is about. The stub returns a
+    # plausible over-boundary answer; select_boundary_rung's own refusal
+    # behaviour is proved directly in case 17, not through drive().
+    mod.select_boundary_rung = lambda *a, **k: (
+        "namecheap.com", 1400, [("namecheap.com", 1400)])
     try:
         r = mod.run_stage_c(dev, FakeClient(), labels,
                             bytes(32), bytes(32), bytes(32), seed,
@@ -526,7 +535,8 @@ def drive(mod, labels: dict, trials: list[Trial], rng: random.Random,
         return r, dev
     finally:
         (mod.PRG_C, mod.DNS_TIMEOUT, mod.BOOT_TIMEOUT,
-         mod.HS_POLL_TIMEOUT, mod._net_init_ip65) = saved
+         mod.HS_POLL_TIMEOUT, mod._net_init_ip65,
+         mod.select_boundary_rung) = saved
 
 
 def rand_body(rng: random.Random, n: int, suffix: bytes = b"") -> bytes:
@@ -847,8 +857,9 @@ def case3_unmeasured_size(mod, labels, rng, seed, res: Result, ctx) -> None:
     res.check(silent.get("reply_observed") is False, "case3/no-size-on-failure",
               "on a trial where nothing arrived the record must state so "
               f"explicitly; reply_observed={silent.get('reply_observed')!r} "
-              f"while dig_measured={silent.get('dig_measured')!r} is still "
-              "reported — a hardcoded constant standing in for a measurement")
+              f"while expected_reply_len={silent.get('expected_reply_len')!r} "
+              f"({silent.get('expected_reply_len_source')!r}) is still "
+              "reported — a constant standing in for a measurement")
 
 
 def case6_unscored_absorption(mod, labels, rng, seed, res: Result,
@@ -1177,6 +1188,93 @@ def case8_status_splice(mod, labels, rng, seed, res: Result, ctx) -> None:
               f"{sorted(got)}")
 
 
+def case9_boundary_rung(mod, labels, rng, seed, res: Result, ctx) -> None:
+    """The >1280 rung must be MEASURED, and must refuse when it cannot reach
+    the boundary it is named for (issue #146).
+
+    Offline: `measure` is injected, so nothing here depends on a third
+    party's TXT record — which is the fact the defect was made of. The
+    measurements are drawn from the seeded RNG so the case is not tuned to
+    one pair of numbers.
+    """
+    print("\n[case 9] the >1280 B rung is sized by measurement, or refused")
+    boundary = mod.WARP_MTU_BOUNDARY
+    res.check(boundary == 1280, "case9/boundary-is-the-warp-mtu",
+              f"WARP_MTU_BOUNDARY is {boundary}, not Cloudflare WARP's 1280")
+
+    # (a) a candidate that still clears the boundary is selected, and the
+    #     size used is the MEASURED one, not any table constant.
+    big = rng.randrange(boundary + 1, boundary + 400)
+    small = rng.randrange(20, 200)
+    sizes = {"namecheap.com": small, "google.com": big}
+    name, got, observed = mod.select_boundary_rung(
+        candidates=("namecheap.com", "google.com"),
+        measure=lambda n, **k: sizes.get(n))
+    res.check(name == "google.com" and got == big,
+              "case9a/selects-a-candidate-over-the-boundary",
+              f"selected {name!r} at {got} B; the only candidate above "
+              f"{boundary} was google.com at {big}")
+    res.check(got > boundary, "case9a/selected-size-clears-the-boundary",
+              f"selected size {got} does not exceed {boundary}")
+    res.check(("namecheap.com", small) in observed,
+              "case9a/rejected-candidates-recorded",
+              "the candidate that measured under the boundary is not in the "
+              "record, so a reader cannot see what was rejected or why")
+
+    # (b) THE DEFECT. Every candidate has shrunk below the boundary — the
+    #     2026-09-07 state, where a rung labelled ">1280" received 39 B and
+    #     was still counted. It must REFUSE, not fall back to the largest
+    #     available answer: a ">1280" rung carrying 900 B tests something
+    #     other than its name.
+    shrunk = {n: rng.randrange(20, boundary) for n in ("a.example", "b.example")}
+    try:
+        picked = mod.select_boundary_rung(
+            candidates=tuple(shrunk), measure=lambda n, **k: shrunk.get(n))
+    except mod.BoundaryRungUnavailable as exc:
+        res.check(str(boundary) in str(exc)
+                  and all(str(v) in str(exc) for v in shrunk.values()),
+                  "case9b/refusal-names-the-numbers",
+                  f"the refusal does not carry the boundary and the "
+                  f"measurements a maintainer needs: {exc}")
+        res.check(True, "case9b/refuses-a-diminished-rung", "")
+    else:
+        res.check(False, "case9b/refuses-a-diminished-rung",
+                  f"every candidate measured under {boundary} "
+                  f"({shrunk}) and the rung was still built as "
+                  f"{picked[0]!r} at {picked[1]} B — a rung labelled "
+                  f'">{boundary}" that cannot reach {boundary}, counted as '
+                  "coverage. This is issue #146 exactly.")
+        res.check(False, "case9b/refusal-names-the-numbers", "not reached")
+
+    # (c) an unanswered candidate is not silently treated as zero-and-move-on
+    #     in a way that hides it: it must appear in the record as None.
+    try:
+        _n, _g, obs = mod.select_boundary_rung(
+            candidates=("dead.example", "google.com"),
+            measure=lambda n, **k: None if n == "dead.example" else big)
+        res.check(("dead.example", None) in obs,
+                  "case9c/unanswered-candidate-recorded",
+                  f"a candidate that did not answer is not recorded as None: {obs}")
+    except mod.BoundaryRungUnavailable as exc:
+        res.check(False, "case9c/unanswered-candidate-recorded",
+                  f"refused even though google.com answered at {big}: {exc}")
+
+    # (d) no field may claim measurement while holding a constant. The old
+    #     `dig_measured` reported 1928 for a rung that received 39 B.
+    r, _dev = drive(mod, labels, [Trial(), Trial()], rng, seed, **ctx,
+                    large_repeats=1)
+    keys = set().union(*(set(q) for q in r["queries"])) if r.get("queries") else set()
+    res.check("dig_measured" not in keys, "case9d/no-field-claims-false-measurement",
+              "`dig_measured` is back in the query record; it carried the "
+              "table constant under a name that promises a measurement")
+    res.check(all(q.get("expected_reply_len_source") in
+                  ("host-measured at run start", "table constant")
+                  for q in r["queries"]),
+              "case9d/every-size-declares-its-source",
+              "a query record does not say whether its expected size was "
+              f"measured or read from the table: {sorted(keys)}")
+
+
 def case5_order_confound(mod, labels, rng, seed, res: Result, ctx) -> None:
     """Sweep position is perfectly confounded with reply size."""
     print("\n[case 5] sweep ladder ordering")
@@ -1276,6 +1374,7 @@ def main(argv=None) -> int:
         "7": case7_poison_stop,
         "7b": case7b_poison_collision,
         "8": case8_status_splice,
+        "9": case9_boundary_rung,
     }
     for key, fn in cases.items():
         if args.only and args.only != key:
