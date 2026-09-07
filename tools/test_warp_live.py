@@ -420,9 +420,24 @@ def measure_txt_reply_len(name: str, resolver: str = PING_TARGET_IP,
     # rung appends one query, and every later draw -- the per-query txn_ids
     # and the multipart QNAME tokens -- shifts by one. So the same --seed on
     # a day when a candidate answers over the boundary produces different
-    # multipart payloads from a day when none does. Closing it means
-    # partitioning the RNG per rung, which is its own change with its own
-    # proof; recorded here rather than left for the next reader to discover.
+    # multipart payloads from a day when none does.
+    #
+    # WHAT A REAL FIX COSTS, so the next reader can judge it rather than
+    # redo this analysis. Closing it means giving each rung its own
+    # random.Random seeded from (seed, rung identity) instead of drawing
+    # from one shared stream. Three consequences, none of them free:
+    #   * Rung identity has to become STABLE — name + repeat number + role
+    #     — because the current identity is the INDEX, and the index is
+    #     precisely what shifts when the boundary rung appears or does not.
+    #   * shuffle_ladder draws from the same stream, so it needs its own
+    #     partition too, or the ladder ORDER stays coupled to the outcome.
+    #   * Every seed recorded in an existing run artifact stops reproducing
+    #     that run: the payloads and the shuffle both change. That is the
+    #     real price — our run records cite seeds as the reproduction
+    #     handle, and this would silently retire all of them.
+    # So it is worth doing deliberately, with a red/green proof that two
+    # runs at one seed and different boundary availability emit identical
+    # ladder payloads — not folded into an instrument fix.
     rnd = random.Random()
     for _ in range(max(1, attempts)):
         txn_id = rnd.randint(0, 0xFFFF)
