@@ -368,15 +368,26 @@ def main(argv=None) -> int:
         print(f"VICE PID={inst.pid}, port={inst.port}")
         tr = inst.transport
         # Issue #143: gate on the boot_ready BYTE, not on title_msg's
-        # "Q=QUIT" text. boot.s prints the title at :158-159 but only sets
-        # boot_ready at :278, after the crypto table build and after the
-        # x25519_reu_fault refuse-and-halt at :199-205 — so a machine that
-        # halts in that window still shows "Q=QUIT" and the old text wait
-        # reported a healthy boot against a dead C64 (observed: this suite
-        # passed 5/5 in a gate run where eight other suites died on
-        # "Main menu did not appear"). The other 31 gate VICE suites adopted
+        # "Q=QUIT" text. boot.s prints the title at :158-159 and only sets
+        # boot_ready at :278. Between the two lie vic_boost_begin (:167),
+        # the crypto table build (poly1305_lib_init/sqtab_init :174-176,
+        # reu_mul_init :181), the APP_BSS overlay fill that reclaims
+        # LIB_X25519_INIT_CODE (issue #103), and vic_boost_end (:269) —
+        # the longest uninterrupted stretch of compute in the program, run
+        # with the display blanked. A machine that faults or hangs anywhere
+        # in that span still shows "Q=QUIT", so the old text wait reported
+        # a healthy boot against a dead C64: this suite passed 5/5 in a
+        # gate run where eight other suites died on "Main menu did not
+        # appear". The other 31 gate VICE suites adopted
         # binary_wait_for_boot_ready for issue #55; this file was added
         # afterwards and reintroduced the class.
+        #
+        # (An earlier draft of this comment cited an `x25519_reu_fault`
+        # refuse-and-halt in boot.s. There is no such code: `grep -rn
+        # x25519_reu_fault src/` returns nothing — the label lives in
+        # libs/x25519 and this repo only ever READS it from a tool. That
+        # commit was dropped before merge, and the prose written while it
+        # existed outlived it, because prose is not compiled.)
         #
         # The text wait is NOT kept as a secondary check: boot_ready is set
         # strictly after title_msg prints, so a set boot_ready already

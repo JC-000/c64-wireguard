@@ -414,6 +414,15 @@ def measure_txt_reply_len(name: str, resolver: str = PING_TARGET_IP,
     # DIFFERENT wire payloads, breaking the standing seeded-and-logged rule
     # for anything crossing the wire. Nothing here goes over the tunnel, so
     # this stream needs no reproducibility of its own.
+    #
+    # NARROWED, NOT CLOSED (F8). The measurement no longer moves the shared
+    # stream, but the SELECTION OUTCOME still does: an available boundary
+    # rung appends one query, and every later draw -- the per-query txn_ids
+    # and the multipart QNAME tokens -- shifts by one. So the same --seed on
+    # a day when a candidate answers over the boundary produces different
+    # multipart payloads from a day when none does. Closing it means
+    # partitioning the RNG per rung, which is its own change with its own
+    # proof; recorded here rather than left for the next reader to discover.
     rnd = random.Random()
     for _ in range(max(1, attempts)):
         txn_id = rnd.randint(0, 0xFFFF)
@@ -423,7 +432,13 @@ def measure_txt_reply_len(name: str, resolver: str = PING_TARGET_IP,
         try:
             sock.settimeout(timeout)
             sock.sendto(wire, (resolver, 53))
-            while True:
+            # BOUNDED. `while True` reset the recvfrom timeout on every
+            # non-matching datagram, so a host receiving unrelated traffic
+            # on this ephemeral port could spin indefinitely. One deadline
+            # for the whole attempt, not one per packet.
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                sock.settimeout(max(0.01, deadline - time.monotonic()))
                 reply, _addr = sock.recvfrom(65535)
                 if len(reply) >= 2 and reply[:2] == wire[:2]:
                     # TC (RFC 1035 4.1.1, flags bit 9) says the resolver cut
@@ -2195,16 +2210,36 @@ def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
         result["boundary_rung"] = {
             "selected": None, "error": str(exc),
             "boundary": WARP_MTU_BOUNDARY, "resolver": PING_TARGET_IP,
-            "candidates_measured": [{"name": n, "host_measured_reply_len": g}
-                                    for n, g in exc.observed],
+            # F6: `answer_truncated` must be here too, NOT only on the
+            # success path. The refusal path is the one every live run takes
+            # today, so this is the artifact a reader actually gets — and a
+            # bare "github.com: 39" is precisely the record that produced
+            # the wrong root cause ("the record shrank") in the first place.
+            # _MeasuredReply degrades to a plain int through int() and a
+            # JSON round-trip, so `.truncated` survives only where it is
+            # explicitly captured, as here.
+            "candidates_measured": [
+                {"name": n,
+                 "host_measured_reply_len": None if g is None else int(g),
+                 "answer_truncated": bool(getattr(g, "truncated", False))}
+                for n, g in exc.observed],
         }
         result["boundary_rung_error"] = str(exc)
-        log.error("BOUNDARY RUNG REFUSED (the other %d rungs still run): %s",
-                  len(queries), exc)
+        # Deliberately does NOT count the surviving rungs: --multipart
+        # appends up to 3 x MULTIPART_REPEATS more AFTER this point, so any
+        # number quoted here undercounts. Saying "the run continues" is the
+        # true statement available at this line.
+        log.error("BOUNDARY RUNG REFUSED — this costs ONE rung; the ladder, "
+                  "the sweep and any multipart rungs still run: %s", exc)
     else:
         result["boundary_rung"] = {
             "selected": b_name, "host_measured_reply_len": int(b_len),
-            "answer_truncated": bool(getattr(b_len, "truncated", False)),
+            # NO top-level `answer_truncated` here. select_boundary_rung
+            # never selects a truncated answer (see its TC branch), so the
+            # field would be False by construction — a field that cannot
+            # take its other value carries no information while looking as
+            # if it does, which is the defect class of this whole issue.
+            # Per-candidate truncation, which IS variable, is below.
             "boundary": WARP_MTU_BOUNDARY, "resolver": PING_TARGET_IP,
             "candidates_measured": [
                 {"name": n, "host_measured_reply_len":
@@ -2212,11 +2247,6 @@ def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
                  "answer_truncated": bool(getattr(g, "truncated", False))}
                 for n, g in b_observed],
         }
-        if getattr(b_len, "truncated", False):
-            log.warning("boundary rung %s answered %d B with TC set: the "
-                        "datagram genuinely exceeds %d B through the tunnel, "
-                        "but this is NOT the record's full size", b_name,
-                        int(b_len), WARP_MTU_BOUNDARY)
         log.info("boundary rung sized host-side: %s answers %d B (> %d) "
                  "[candidates: %s]", b_name, int(b_len), WARP_MTU_BOUNDARY,
                  ", ".join(f"{n}={'no answer' if g is None else int(g)}"

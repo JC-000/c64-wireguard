@@ -84,7 +84,7 @@ from c64_test_harness.encoding.screen_codes import SCREEN_CODE_TABLE  # noqa: E4
 # branch that does not apply still emits its names as skips. Pinned so a
 # case that silently stops running is a hard error, not a smaller
 # denominator nobody notices.
-EXPECTED_CHECKS = 67
+EXPECTED_CHECKS = 72
 
 #: src/net/uci/uci_errors.inc:244. Retyped here ONLY as the value case 8
 #: pins the BUILT layout against; the tool itself always derives the
@@ -1360,6 +1360,67 @@ def case9_boundary_rung(mod, labels, rng, seed, res: Result, ctx) -> None:
               "the refusal record does not carry the per-candidate "
               "measurements, so a maintainer cannot see why it refused: "
               f"{refused.get('boundary_rung')}")
+
+    # (i) THE ARTIFACT MUST CARRY TRUNCATION, AND CARRY IT CORRECTLY.
+    #     The JSON record outlives the log, and `_MeasuredReply` degrades to
+    #     a plain int through int() and a JSON round-trip, so `.truncated`
+    #     survives only where it is explicitly captured. A record showing
+    #     "github.com: 39" with no TC marker is the exact artifact that
+    #     produced the wrong root cause ("the record shrank") for this very
+    #     issue. Asserted by VALUE against injected ground truth on BOTH
+    #     paths — a check that only tests the field is present would pass
+    #     against a hardcoded False, which is how this got through once.
+    truth = {"tc.example": mod._MeasuredReply(900, truncated=True),
+             "plain.example": mod._MeasuredReply(700),
+             "big.example": mod._MeasuredReply(boundary + 90)}
+
+    def _by_name(rec):
+        return {c["name"]: c for c in rec.get("candidates_measured", [])}
+
+    # refusal path — the one every live run takes today
+    ref, _d = drive(mod, labels, [Trial()], rng, seed, **ctx, large_repeats=1,
+                    boundary_rung=lambda *a, **k: (_ for _ in ()).throw(
+                        mod.BoundaryRungUnavailable(
+                            "injected", observed=[
+                                ("tc.example", truth["tc.example"]),
+                                ("plain.example", truth["plain.example"])])))
+    got = _by_name(ref.get("boundary_rung", {}))
+    res.check(got.get("tc.example", {}).get("answer_truncated") is True
+              and got.get("plain.example", {}).get("answer_truncated") is False,
+              "case9i/refusal-artifact-carries-truncation-correctly",
+              "the REFUSAL record's per-candidate truncation is wrong or "
+              "missing. tc.example was measured with TC=1 and plain.example "
+              f"without; the record says {got}. This is the artifact a "
+              "reader gets, and a 39 B entry with no TC marker is what made "
+              "us conclude 'the record shrank'")
+    res.check(all(c.get("host_measured_reply_len") == int(truth[c["name"]])
+                  for c in got.values()),
+              "case9i/refusal-artifact-carries-the-lengths",
+              f"the refusal record's lengths do not match what was measured: {got}")
+
+    # success path — top-level flag AND the per-candidate list
+    okr, _d = drive(mod, labels, [Trial()], rng, seed, **ctx, large_repeats=1,
+                    boundary_rung=lambda *a, **k: (
+                        "big.example", truth["big.example"],
+                        [("tc.example", truth["tc.example"]),
+                         ("big.example", truth["big.example"])]))
+    br = okr.get("boundary_rung", {})
+    gotk = _by_name(br)
+    res.check("answer_truncated" not in br,
+              "case9i/no-field-that-cannot-take-its-other-value",
+              "the success record carries a top-level `answer_truncated`. "
+              "A truncated answer is never SELECTED, so that field is False "
+              "by construction — it cannot take its other value, and a "
+              "field that looks informative while being a constant is the "
+              f"defect class this issue is about: {br}")
+    res.check(gotk.get(br.get("selected"), {}).get("answer_truncated") is False,
+              "case9i/selected-candidate-recorded-untruncated",
+              "the selected rung's own entry in the candidate list does not "
+              f"record it as untruncated: {gotk}")
+    res.check(gotk.get("tc.example", {}).get("answer_truncated") is True,
+              "case9i/success-artifact-per-candidate-truncation",
+              "a candidate measured with TC=1 is recorded as untruncated in "
+              f"the success path's candidate list: {gotk}")
     res.check(not mod.stage_errors({"stage_c": baseline}),
               "case9f/a-usable-rung-is-not-an-error",
               "a run whose boundary rung WAS available is still reported as "

@@ -109,7 +109,7 @@ _spec.loader.exec_module(C)
 #: whichever branch it takes, so two runs are comparable and a case that
 #: silently stopped running is a hard error rather than a smaller
 #: denominator nobody notices. Update deliberately when adding a check.
-EXPECTED_CHECKS = 213
+EXPECTED_CHECKS = 215
 
 # Disjoint alphabets: an echo of a request can never satisfy a reply check.
 REQ_ALPHABET = string.ascii_uppercase + string.digits
@@ -235,6 +235,15 @@ def build_pcap(frames: list[bytes], *, snaplen_clip: int = 0,
                            (i % 1000) * 1000, incl, len(f))
         out += f[:incl]
     return bytes(out)
+
+
+def clean_probe_frames(rng, c64_mac):
+    """A few well-formed ciphertext frames — enough that a verdict about them
+    is about the ARGUMENTS, not about an empty list."""
+    return [eth_frame(c64_mac, HOST_MAC, C.ETHERTYPE_IPV4,
+                      ip_udp(C64_IP, HOST_IP, 51820, WG_PORT,
+                             wg_type4(rng, rng.randrange(100, 400))))
+            for _ in range(3)]
 
 
 def cap(frames: list[bytes], **kw) -> list[C.Frame]:
@@ -404,6 +413,38 @@ def case1_plaintext(rng: random.Random, res: Result) -> None:
     c64_mac = rand_mac(rng)
     secret = rand_text(rng, 40, REQ_ALPHABET)
     needles = {"outbound-chat": secret}
+
+    # -- 1z REFUSALS THAT MUST BE CHECKED, NOT CRASHED -------------------
+    # `Verdict.__post_init__` refuses a verdict that says ok while reading
+    # as a failure, so flipping either of these two `Verdict(False, ...)`
+    # to True raises ValueError instead of returning a bad verdict. That
+    # invariant is doing real work — but the mutation harness saw only a
+    # non-zero exit and printed "killed by 0", i.e. coverage no check
+    # actually provided. These two calls run FIRST, before any other use of
+    # check_plaintext_absent, and catch the ValueError so the defect lands
+    # as a FAILED CHECK naming the property, not as a traceback.
+    def _absent_verdict(frames, nl, **kw):
+        """(ok_for_the_check, detail) — a raised invariant is a FAILURE here."""
+        try:
+            return C.check_plaintext_absent(cap(frames), nl, **kw), None
+        except ValueError as exc:
+            return None, (f"constructing the verdict raised the Verdict "
+                          f"invariant ({exc}) — the module is trying to "
+                          f"return a PASS whose own text reads as a refusal")
+
+    v0, why = _absent_verdict([], needles, c64_mac=c64_mac)
+    res.check(v0 is not None and not v0.ok, "case1z/empty-capture-is-not-clean",
+              why or ("an EMPTY capture was reported as plaintext-absent. "
+                      "Nothing was searched, so nothing was proven absent; "
+                      "this is the instrument-assumes-what-it-measures shape "
+                      f"— verdict: {v0.reason if v0 else ''}"))
+    v0, why = _absent_verdict(clean_probe_frames(rng, c64_mac), needles,
+                              c64_mac=None)
+    res.check(v0 is not None and not v0.ok, "case1z/no-c64-mac-is-not-clean",
+              why or ("with no C64 MAC supplied nothing distinguished the "
+                      "C64's traffic from the rest of the segment, and the "
+                      "capture was still reported as plaintext-absent — a "
+                      f"pass that searched the wrong thing: {v0.reason if v0 else ''}"))
 
     # -- 1a clean capture: ciphertext only -------------------------------
     clean = [eth_frame(c64_mac, HOST_MAC, C.ETHERTYPE_IPV4,
@@ -2175,6 +2216,24 @@ def self_check(seed: int) -> int:
             print(f"  FAIL  {name}\n        SURVIVED — this suite cannot see "
                   "that defect")
             survived.append(name)
+        elif not fails:
+            # A NON-ZERO EXIT IS NOT A KILL. rc != 0 also covers the mutant
+            # crashing the suite — an exception in the module, an invariant
+            # like Verdict.__post_init__ raising — and in that case NO CHECK
+            # SAW THE DEFECT. `absence/missing-c64-mac-is-a-pass` printed
+            # "killed by 0" for exactly this reason: it dies of a ValueError
+            # in Verdict.__post_init__, not of any assertion here. A real
+            # invariant firing is good, but a mutation harness that cannot
+            # tell a caught mutant from a crashed one reports coverage it
+            # does not have — which is the defect class this whole suite
+            # exists to catch, in the instrument itself.
+            print(f"  FAIL  {name}\n        NOT KILLED BY A CHECK — the "
+                  f"mutant run exited {rc} with zero failed checks, so it "
+                  "crashed (or was refused by an invariant) rather than "
+                  "being detected. Add a check that FAILS on this defect, "
+                  "or state why the invariant is the intended detector and "
+                  "assert that instead.")
+            survived.append(name)
         else:
             print(f"  PASS  {name}  (killed by {len(fails)}: {', '.join(fails[:3])}"
                   f"{'...' if len(fails) > 3 else ''})")
@@ -2193,7 +2252,7 @@ def main() -> int:
                     help="run one case: 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16")
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("--self-check", action="store_true",
-                    help="mutate the checker module 18 ways and require this "
+                    help=f"mutate the checker module {len(MUTANTS)} ways and require this "
                          "suite to go red for every one")
     args = ap.parse_args()
     VERBOSE = args.verbose
