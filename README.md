@@ -203,7 +203,7 @@ Tests use the [c64-test-harness](https://github.com/JC-000/c64-test-harness) pac
 ```bash
 pip install c64-test-harness
 
-# All 44 suites — the canonical run, and the gate for any change.
+# All 45 suites — the canonical run, and the gate for any change.
 # Most run in a staggered parallel pool against a single build; the NINE that
 # rebuild the tree themselves (x25519, write_bytes, uci_stub, both_backends,
 # chunked_send, multipart_split, build_mtu1440, ip65_bss_guard,
