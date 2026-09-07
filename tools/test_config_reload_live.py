@@ -544,11 +544,19 @@ def run_soak(args) -> int:
 # ── entry point ───────────────────────────────────────────────────────────
 
 def _turbo_down(host: str) -> None:
-    """Leave the bench at 1 MHz for whoever has it next."""
-    try:
-        set_turbo_mhz(Ultimate64Client(host), 1)
-    except Exception:                                         # noqa: BLE001
-        pass
+    """Leave the bench at 1 MHz, REU off and RESET for whoever has it next.
+
+    The name is now narrower than the job, kept because both call sites
+    below read as an exit path. It used to be exactly what it says — a bare
+    set_turbo_mhz, unlocked, with a bare `except: pass` — so this tool left
+    its UDP sockets open on every run (issue #134) AND wrote to a shared
+    device without queueing for it.
+
+    live.main() has released the lock by the time this runs, so the helper
+    takes its own.
+    """
+    from device_session import teardown_device
+    teardown_device(host, idle_mhz=1, logger=log)
 
 
 def main() -> int:

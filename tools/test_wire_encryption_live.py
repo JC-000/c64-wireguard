@@ -648,10 +648,16 @@ def main() -> int:
         return live.main(["--chat", "--host", args.host,
                           "--turbo", str(args.turbo)])
     finally:
-        # live.main() has released the lock by now, so this restore must
-        # take its own — it is a write to a shared device.
-        from device_session import restore_idle
-        restore_idle(args.host, 1)
+        # live.main() has released the lock by now, so this teardown takes
+        # its own — every write to a shared device is serialised.
+        #
+        # teardown_device, not restore_idle: this tool ran a full WireGuard
+        # session, so it holds a UDP socket the C64 never closes. Only a
+        # reset closes it (the network target does that from the reset ISR),
+        # and the reset is verified by read-back rather than assumed —
+        # issue #134.
+        from device_session import teardown_device
+        teardown_device(args.host, idle_mhz=1)
 
 
 if __name__ == "__main__":

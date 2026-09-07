@@ -108,6 +108,12 @@ TESTS = [
     # notice the live tool being rewired to a look-alike copy of the
     # searcher — the hardware run itself would stay green either way.
     ("wire_control",   ["tools/test_wire_encryption_control.py"]),
+    # Issue #134. The shared teardown contract: clock, REU, and a reset
+    # PROVEN by sentinel read-back rather than assumed from a 204. Runs
+    # against fakes, which is the only way to produce a reset that does
+    # not take on demand — a real device that resets correctly cannot
+    # demonstrate the alarm. Device-free, milliseconds.
+    ("teardown",       ["tools/test_device_teardown.py"]),
     # Issue #109. Enforcement for the cold-init trap that #107 created and
     # that has now caught three suites (type2_slow, hs_recovery, issue_94),
     # every one by copy-paste from a sibling that predated the reclaim.

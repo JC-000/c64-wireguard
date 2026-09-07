@@ -2927,60 +2927,22 @@ def main(argv: Optional[list[str]] = None) -> int:
         results["stage_c"] = c
 
     finally:
-        # Stage D: restore 1 MHz / REU off, asserted by read-back. In
-        # `finally` (not after the try body) so a raise anywhere above —
+        # Stage D: restore 1 MHz / REU off / reset, all asserted by
+        # read-back. This block used to be written out here; it is now
+        # tools/device_session.teardown_device, which every live tool
+        # shares (issue #134) — this tool was the ONLY one that reset, and
+        # the reset is the whole recovery contract for a leaked UDP socket.
+        #
+        # In `finally` (not after the try body) so a raise anywhere above —
         # notably Stage R's assertions, which are expected to raise on
-        # unfixed firmware (issue #87) — still leaves the device restored
-        # for whoever has it next.
+        # unfixed firmware (issue #87) — still leaves the device restored.
+        #
+        # client is passed in because WE ALREADY HOLD THE LOCK here; the
+        # helper takes its own only when called without one.
         if client is not None:
-            try:
-                set_turbo_mhz(client, 1)
-                time.sleep(1.0)
-                actual1 = get_turbo_mhz(client)
-                turbo_restored = (actual1 == 1)
-                set_reu(client, False)
-                reu_restored = True
-                log.info("restore: turbo=%d MHz (restored=%s) REU off",
-                        actual1, turbo_restored)
-                # Reset the C64. Restoring the CLOCK and the REU is not
-                # restoring the MACHINE: our PRG is still running and still
-                # driving the command interface, so the next lane inherits
-                # an interface that holds a reply and goes straight back to
-                # Command Busy. Measured 2026-09-03 by the firmware lane,
-                # who lost two runs to it: `release()` and `abort_to_idle()`
-                # both returned True and the status snapped back, because
-                # nothing was stuck — something was actively driving it. A
-                # reset cleared it to $00 Idle first try.
-                #
-                # This never bites US: run_prg resets on the way IN. It bites
-                # whoever goes next, and it presents as THEIR suite being
-                # broken rather than as our leftover state — the expensive
-                # shape, the same one as 1.1.1.1's silent >512 B request drop.
-            except Exception as exc:                              # noqa: BLE001
-                log.error("Stage D clock/REU restore failed: %s", exc)
-            # THE RESET GETS ITS OWN try. It used to be the last statement
-            # of the block above, which made it conditional on the clock and
-            # REU restore succeeding — and those are exactly what fail when
-            # a run is ABORTING against a flaky device. That is the one path
-            # where the reset matters most, because it is the only thing
-            # that recovers our UDP sockets: the network target closes them
-            # from the reset ISR (GideonZ/1541ultimate#814) and nothing else
-            # does. MEMP_NUM_UDP_PCB is 8 and the firmware holds several, so
-            # a client gets four or five; strand one per abort and OPEN_UDP
-            # starts returning "85,ERROR OPENING SOCKET", which reads as a
-            # regression in whatever changed most recently rather than as an
-            # inherited condition. That confusion cost two lanes a day on
-            # 2026-09-03. So: restore the clock if we can, and reset either
-            # way.
-            try:
-                client.reset()
-                time.sleep(1.0)
-                log.info("restore: C64 reset — command interface left idle "
-                         "and UDP sockets closed for the next lane")
-            except Exception as exc:                              # noqa: BLE001
-                log.error("Stage D reset FAILED: %s — UDP sockets may be "
-                          "stranded; the next lane's OPEN_UDP can fail with "
-                          "$85 and it will NOT look like our fault", exc)
+            from device_session import teardown_device
+            td = teardown_device(args.host, client=client, logger=log)
+            results["teardown"] = td
         lock.release()
         log.info("lock released")
 

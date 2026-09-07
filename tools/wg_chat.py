@@ -51,6 +51,19 @@ IDLE_TURBO_MHZ = 1
 REKEY_AFTER_S = 140.0
 
 
+# WHY THIS TOOL DOES NOT RESET, when every other live tool now does.
+#
+# Issue #134 made a verified reset the shared exit path
+# (device_session.teardown_device) because a reset is the only thing that
+# closes a leaked UDP socket. wg_chat is the deliberate exception: it is an
+# OPERATOR tool. It attaches to a machine a human is sitting in front of and
+# is talking to, and resetting that machine when they press Ctrl-C would
+# destroy the session they were using — the tool's whole purpose — to tidy
+# up a socket the next run's `run_prg` closes anyway (measured, issue #58).
+#
+# This is a decision, not the omission it used to be. If wg_chat ever grows
+# a non-interactive mode that exits on its own, that mode should call
+# teardown_device; the reasoning above only covers the human at the keyboard.
 def _restore_speed(host: str) -> None:
     """Put the shared device back to 1 MHz. Never raises.
 
