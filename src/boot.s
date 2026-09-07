@@ -30,6 +30,9 @@
 
 ; --- Imports: external data from src/wg/data.s ---------------------------
         .import vic_boost_begin, vic_boost_end
+.ifndef WG_NO_REU
+        .import x25519_reu_fault        ; SPEC v0.13.0 §8.2 sticky settle fault
+.endif
         .import net_initialized
         .import boot_ready
         .import wg_state
@@ -46,6 +49,7 @@
 
 ; --- Imports: strings from src/wg/strings.s ------------------------------
         .import title_msg
+        .import reu_fault_msg           ; SPEC v0.13.0 §8.2 settle fault
         .import ready_msg
         .import net_init_msg
         .import net_err_msg
@@ -179,6 +183,29 @@ start:
 .ifndef WG_NO_REU
         ; Initialize REU multiplication tables (precompute all 256x256 products)
         jsr     reu_mul_init
+
+        ; c64-lib-contract SPEC v0.13.0 §8.2: the REU post-execute settle
+        ; has no error return — it records failures in the sticky
+        ; x25519_reu_fault byte and carries on. reu_mul_init clears the
+        ; byte at entry, so what is in it here describes THIS table build:
+        ; a non-zero value means at least one of its DMAs was never
+        ; confirmed ($01 spin bound expired) or the REU reported VERIFY
+        ; ERROR ($02). The tables every fe25519_mul then reads are
+        ; unsound, so every scalarmult after this point is a wrong crypto
+        ; result with no other symptom. Refuse rather than boot.
+        ; Only the REU profile has a settle path at all; under
+        ; WG_NO_REU (the shipped no-REU artifact) the byte is documented
+        ; as permanently $00 and this check is compiled out with the
+        ; reu_mul_init call it belongs to.
+        lda     x25519_reu_fault
+        beq     @reu_ok
+        jsr     vic_boost_end           ; unblank, or the message is invisible
+        lda     #<reu_fault_msg
+        ldy     #>reu_fault_msg
+        jsr     print_string
+@reu_halt:
+        jmp     @reu_halt
+@reu_ok:
 .endif
 
 .ifdef USE_X25519_SIBLING

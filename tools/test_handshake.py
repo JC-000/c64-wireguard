@@ -459,7 +459,12 @@ def main():
     print(f"Labels loaded: {len(required)} required labels verified")
 
     # Launch VICE
-    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
+    # The REU=1 default build keeps its multiply rows in REU banks. With no
+    # REU attached $DF00 reads open bus, every reu_mul_init DMA goes
+    # unconfirmed, x25519_reu_fault records $02 and boot refuses. Same two
+    # flags tools/test_fe25519.py already passes.
+    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
+        extra_args=["-reu", "-reusize", "512"])
 
     with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()

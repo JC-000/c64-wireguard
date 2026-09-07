@@ -296,6 +296,23 @@ SERIAL_TESTS = [
     # announced lengths and payloads are random per run and the seed is on
     # the first line of its output (reproduce with --seed).
     ("uci_short_read", ["tools/test_uci_short_read_drop.py"]),
+    # c64-x25519 SPEC v0.13.0 §8.2. The REU post-execute settle has no error
+    # return — it records faults in the sticky x25519_reu_fault byte and
+    # carries on — and nothing here read it. Serial because it builds BOTH
+    # REU profiles (the settle code exists only in REU=1; the shipped
+    # no-REU artifact has none, which the suite asserts by set equality
+    # rather than skipping) and restores the default build on exit.
+    ("reu_fault",      ["tools/test_x25519_reu_fault_surfaced.py"]),
+    # Library-bump acceptance. Legs 1-2 are the published vectors on the
+    # current build; legs 3-4 are the question the vectors cannot answer —
+    # byte-identical results against a PRG built from the PREVIOUS pins over
+    # seeded random inputs, because a carry fix changes output only for the
+    # inputs that reach the defect. It needs --baseline-prg / --baseline-labels
+    # for a PRG built from those pins, and exits non-zero (not "skipped") when
+    # they are absent, so it is NOT listed here as a routine gate entry: run it
+    # by hand at each pin bump. Recorded here so the next bump finds it.
+    #   python3 tools/test_crypto_kat_bump_differential.py \
+    #       --baseline-prg <old-pins>.prg --baseline-labels <old-pins>.txt
     # NOT listed, deliberately: tools/test_ip65_udp_echo_vice.py and
     # tools/test_ip65_handshake_vice.py need the ethernet VICE rig (feth
     # pair + dnsmasq + a pcap-capable x64sc); they exit 77 without it.

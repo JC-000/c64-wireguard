@@ -6,6 +6,7 @@
 
 ; --- Exported string labels ---
 .export title_msg
+.export reu_fault_msg
 .export ready_msg
 .export net_init_msg
 .export net_dhcp_msg
@@ -39,6 +40,12 @@
 .export keepalive_msg
 
 .segment "APP_DATA"
+
+; SPEC v0.13.0 §8.2: a REU post-execute settle fault recorded during
+; reu_mul_init. The multiply tables are unsound, so boot halts here
+; rather than producing wrong scalarmults silently.
+reu_fault_msg:
+        .byte 13, "REU DMA FAULT - HALTED", 13, 0
 
 title_msg:
         .byte "WIREGUARD NOISE PROTOCOL", 13
