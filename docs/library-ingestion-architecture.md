@@ -79,8 +79,10 @@ into its archive but is unreferenced in the link.
      x25519 profile change silently dropping an ownership bit, which
      would otherwise surface as a table read with no init.
    - §8.0 subset invariant per library (`OWNED & ~CONSUMES = 0`).
-   - §1 per-library ABI pins: `LIB_X25519_ABI_VERSION = 3` and
-     `LIB_CHACHA20_POLY1305_ABI_VERSION = 3`.
+   - §1 per-library ABI pins: `LIB_X25519_ABI_VERSION = 4` and
+     `LIB_CHACHA20_POLY1305_ABI_VERSION = 4` (both were 3 through the
+     v0.11.2 / v0.9.0 pins; x25519 v0.15.0 and chacha v0.10.0 each moved
+     their counter 3 → 4).
 
    Both libraries are built with `-D LIB_NO_BARE_EXPORTS=1` so each
    exports only its `LIB_<X>_`-prefixed manifest. That is what lets one
@@ -180,7 +182,8 @@ Both `cfg/c64-wireguard-{ip65,uci}.cfg` carry the same segment set:
   gated on chacha's `sqtab_ready`, which lives in the file-backed
   `LIB_CHACHA20_POLY1305_DATA`, is set at boot, and is never cleared.
 - **chacha (§4-prefixed since v0.7.0)**:
-  `LIB_CHACHA20_POLY1305_CODE` (rw, MAIN_AREA_LO, 8094 B) with
+  `LIB_CHACHA20_POLY1305_CODE` (rw, MAIN_AREA_LO, 8448 B — the size
+  ratcheted by `src/contract_asserts.s` §6.6 at the v0.11.0 pin) with
   **`align=$100` — a constant-time requirement**, not cosmetic: the
   two nibswap LUTs inside it are read with `lda tab,x` on *secret*
   indexes, and ld65 only *warns* if the alignment is dropped, so the
@@ -242,12 +245,25 @@ Authoritative ledger: `src/crypto/shared/reu_layout.inc`.
    Update the integration script header — it is the load-bearing
    record of *why* each define is passed.
 3. `make clean && make` (and `make REU=0`) — must build clean; the
-   link-time composition asserts are the tripwires.
+   link-time composition asserts are the tripwires. A bump can also move a
+   symbol into an archive member nothing else references, which ld65's
+   single in-order archive scan then never extracts: x25519 v0.16.0 split
+   §8.1 into `sqtab_init.o` and every profile failed with
+   `Unresolved external 'mul_tables_init'`. Two mechanisms cover that now —
+   the `.import mul_tables_init` in `src/contract_asserts.s` §6.6c and the
+   re-listing of `x25519.a` after chacha's archive — and they mask each
+   other; read the Makefile's `SIBLING_ARCHIVES` comment before touching
+   either.
 4. `python3 tools/check_abi_drift.py` — must exit 0.
-5. `python3 tools/run_regression.py` — must pass (22 suites as of
-   2026-08-14; the list previously covered only 13 of the 27
-   `tools/test_*.py` scripts, so a suite passing locally was not
-   necessarily a suite the gate ran).
+5. `python3 tools/run_regression.py` — must pass (45 suites as of the
+   v0.16.0 / v0.11.0 bump, counted from `tools/run_regression.py`'s own
+   lists; it was 22 on 2026-08-14, when the list still covered only 13 of
+   the 27 `tools/test_*.py` scripts, so a suite passing locally was not
+   necessarily a suite the gate ran). At a **pin bump** also run
+   `tools/test_crypto_kat_bump_differential.py` by hand with
+   `--baseline-prg` / `--baseline-labels` built from the previous pins: it
+   is deliberately not a gate entry, because it exits non-zero without
+   them.
 6. Commit bump + script changes together; call out size/knob deltas.
 
 ## Adding a third sibling
@@ -295,7 +311,16 @@ points. They are no longer shipped, and the in-tree `poly1305.s`
   `SHARED_CT_MUL_8X8` deferral gate; v0.8.0 the §2 ZP registry rename
   (ABI 1→3), §6.1 canonical archive basenames and §6.2 defines
   forwarding, all codegen-neutral; v0.9.0 the §6.7 image guard and the
-  R2 ZP-usage drift ratchet, ABI unchanged at 3. Its INTEGRATION.md is
+  R2 ZP-usage drift ratchet, ABI unchanged at 3; v0.10.0 the security and
+  hardening release that moves `LIB_CHACHA20_POLY1305_ABI_VERSION` **3 →
+  4** and gives `aead_encrypt` a status return in A (SPEC §14.1:
+  `AEAD_OK`/`$00` or `AEAD_ERR_DOMAIN`/`$01`; `aead_decrypt` adds
+  `AEAD_ERR_AUTH`/`$ff`), which `src/wg/transport.s` now checks and fails
+  closed on; v0.11.0 the §6.1
+  archive-member isolation fix — no code change, four profile PRGs
+  byte-identical to v0.10.0, ABI still 4, but the published
+  `RESIDENT_BYTES` equates rise 768 B in every configuration because the
+  old ones under-reported. Its INTEGRATION.md is
   also the source of the "always call `poly1305_lib_init` once at boot"
   rule that src/boot.s now follows.
 - [c64-lib-contract](https://github.com/JC-000/c64-lib-contract)
