@@ -616,12 +616,19 @@ def _run(rng):
     mtu = L.get("WG_MTU")
     send_max = L.get("NET_UDP_SEND_MAX")
     overhead = L.get("WG_DATA_OVERHEAD")
+    label_part_max = L.get("UCI_CHUNK_PART_MAX")   # issue #149
     msg_text_max = L["ip_pkt_len"] - L["ip_packet_buf"] - IP_UDP_HDR_LEN
     check(mtu == EXPECT_MTU, f"WG_MTU == {EXPECT_MTU}", f"labels say {mtu}")
     check(send_max == EXPECT_SEND_MAX,
           f"NET_UDP_SEND_MAX == {EXPECT_SEND_MAX}", f"labels say {send_max}")
     check(overhead == EXPECT_OVERHEAD,
           f"WG_DATA_OVERHEAD == {EXPECT_OVERHEAD}", f"labels say {overhead}")
+    check(label_part_max == EXPECT_PART_MAX,
+          f"UCI_CHUNK_PART_MAX == {EXPECT_PART_MAX} (issue #149)",
+          f"labels say {label_part_max}"
+          if label_part_max is not None
+          else "no UCI_CHUNK_PART_MAX in labels.txt — rebuild this tree "
+               "(the export is inside net.s's UCI_CHUNKED_WRITE .ifdef)")
     check(msg_text_max == (mtu or 0) - IP_UDP_HDR_LEN,
           f"MSG_TEXT_MAX == WG_MTU - {IP_UDP_HDR_LEN} == {msg_text_max} "
           f"(ip_pkt_len - ip_packet_buf - {IP_UDP_HDR_LEN})")
@@ -629,8 +636,12 @@ def _run(rng):
     print(f"  UCI_CODE ${span[0]:04X}-${span[1] - 1:04X}, "
           f"MSG_TEXT_MAX={msg_text_max}")
 
-    # The part cap is not exported; derive it from the DUT below and check it
-    # against EXPECT_PART_MAX rather than assuming either way.
+    # The part cap is derived from the DUT below and checked against
+    # EXPECT_PART_MAX rather than assumed either way. Since #149 the BUILT cap
+    # is also in labels.txt, so there are now three independent readings --
+    # this constant, the image, and the wire -- and the pair of checks pins
+    # all three together. The measurement stays: the label says what the image
+    # was told, only the wire says what the adapter did.
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
     with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
@@ -662,6 +673,14 @@ def _run(rng):
               f"(895-byte command buffer - 7-byte $16 header)",
               f"second part starts at offset {measured} "
               f"({describe(parts)})")
+        # Image vs wire (#149): the label is the cap the PRG was BUILT with,
+        # `measured` is the cap it actually put on the wire. Both equalling
+        # EXPECT_PART_MAX already implies this, but stating it directly names
+        # the failure -- an adapter that ignores its own constant -- instead of
+        # leaving it to be inferred from two separate red lines.
+        check(measured == label_part_max,
+              "the measured part cap equals the built UCI_CHUNK_PART_MAX",
+              f"wire says {measured}, labels.txt says {label_part_max}")
         # Every group below drives its lengths from the PINNED cap, not from
         # `measured`: a suite that retargets itself at whatever the adapter
         # happens to do cannot fail when the adapter is wrong.

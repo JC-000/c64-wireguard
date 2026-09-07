@@ -333,29 +333,39 @@ ip_hdr_template:
         .byte $00,$00,$00,$00   ; src IP (filled per packet)
         .byte $00,$00,$00,$00   ; dst IP (filled per packet)
 
-; --- Messaging default UDP port ($270f = 9999, big-endian in memory) ---
+; --- Messaging default UDP port (9999, BIG-endian in memory) ---
 ; Initialised here because callers (ip_build) read msg_port directly without
 ; a runtime setup hook. ACME data.asm initialised it with !word $270f.
 ;
-; NOTE (test/warp-interop, issue #87 spike): the "big-endian in memory"
-; claim above does not hold for `.word` — ca65 emits `.word $270f` as
-; bytes $0f,$27 (low,high), while ip_build.s's src/dst-port copy
-; (msg_port -> ip_packet_buf+20/22, msg_port+1 -> +21/23) treats byte 0
-; as the WIRE-FIRST (high) byte, matching the UDP-length field's proven
-; high-byte-at-lower-offset convention a few lines below. So the actual
-; on-wire port for the untouched default is $0f27 = 3879, not 9999 —
-; never surfaced because prior tests only ever round-tripped this value
-; against itself. Not fixed here (out of scope / behavior-preserving);
-; the MSG_PORT override below is written in the CORRECT byte order so a
-; caller asking for a specific real-world port (e.g. 53 for DNS) gets
-; that port on the wire.
-.ifdef MSG_PORT
+; BIG-endian is the convention, and it is the CONSUMERS' — not a claim made
+; only by this comment. src/wg/ip_build.s copies byte 0 to the wire-FIRST
+; byte of both UDP ports (msg_port -> ip_packet_buf+20/+22, msg_port+1 ->
+; +21/+23, :296-305) and compares inbound the same way (:409-413), matching
+; the UDP-length field's high-byte-at-lower-offset handling beside it. Every
+; host tool that writes this word writes it big-endian too, and
+; tools/test_ip65_rrnet_hw.py:2195 reads it back as int.from_bytes(..., "big").
+;
+; Issue #113: the ONE thing that disagreed was the default literal. ca65 emits
+; `.word $270f` as $0F,$27 (low,high), so the untouched default reached the
+; wire as $0F27 = 3879 while every document said 9999. The defect was the
+; constant's byte order, NOT the copy — the copy agrees with the wire, with
+; the inbound filter, with the MSG_PORT override and with every host tool, and
+; is also the only side that would cost 6502 code to change.
+;
+; Fixed by giving the default the SAME `.byte >MSG_PORT, <MSG_PORT` form the
+; override already used, so there is one code path and the byte order is
+; written once. MSG_PORT reaches ca65 only when overridden (the Makefile omits
+; -D at the default so an unadorned build stays byte-identical to a tree
+; without the knob), so the default value is spelled here rather than made to
+; depend on the flag being passed.
+;
+; This changes the default build's on-wire port from 3879 to 9999. Anyone who
+; had configured a peer for 3879 BY OBSERVATION must move it to 9999.
+.ifndef MSG_PORT
+MSG_PORT = 9999
+.endif
 msg_port:
         .byte >MSG_PORT, <MSG_PORT
-.else
-msg_port:
-        .word $270f
-.endif
 
 ; --- Disk I/O ---
 config_filename:
@@ -563,6 +573,45 @@ mul_dma_lo:
         .res 256, 0            ; DMA target: lo bytes of a*b for current a
 mul_dma_hi:
         .res 256, 0            ; DMA target: hi bytes of a*b for current a
+
+; Issue #104: this is a CONSTANT-TIME invariant, not a performance hint, and
+; until now only a comment carried it. `.align 256` above is SEGMENT-RELATIVE,
+; so it yields a real page boundary only because cfg/c64-wireguard-*.cfg pins
+; CRYPTO_BSS with `align = $100`. Drop that one cfg word and the buffers land
+; mid-page; `lda mul_dma_lo,y` / `lda mul_dma_hi,y` in fe25519_mul
+; (src/crypto/fe25519.s:434-441, and the unrolled copy at :481-488) index with
+; Y = a byte of src2 — a Montgomery-ladder field element, i.e. SECRET — and an
+; abs,Y that crosses a page costs 5 cycles instead of 4. The execution time of
+; X25519 then depends on the secret. ld65 only WARNS about a dropped alignment
+; (docs/library-ingestion-architecture.md:156-158), the gate has no timing
+; oracle, and a misaligned build links and passes green.
+;
+; The asserts fire on the RESOLVED address, so they catch every route to the
+; failure: the cfg align removed, the `.align 256` above deleted, a field
+; inserted between the two buffers, or a future segment reshuffle.
+;
+; WHAT RUNS IT. The assert fires wherever this build is linked, but something
+; has to link it. .github/workflows/sibling-bump.yml gained cfg/** so a
+; cfg-only PR triggers the matrix, whose x25519=0 row is the only automated
+; build that reaches these lines -- and that row is `make BACKEND=uci`, so
+; cfg/c64-wireguard-ip65.cfg is covered by the assert but not by CI. It cannot
+; be: CI has no ip65 blob (see that workflow's paths: comment). Until the gate
+; carries a BACKEND=ip65 USE_X25519_SIBLING=0 link, an ip65-only align edit is
+; caught by this assert only when a human links that combination.
+;
+; Colocated here rather than in src/contract_asserts.s deliberately: these
+; symbols do not exist under USE_X25519_SIBLING=1 — the SHIPPED build, which
+; is guarded by the sibling's own asserts at libs/x25519/src/mul_stage.s:83-85
+; (three there: mul_dma_lo, mul_dma_hi and mul_dma_carry, which the in-tree
+; fallback does not have). They moved out of that library's src/data.s with the
+; buffers at its v0.14.0, so its data.s now carries only a "MOVED" note; check
+; the pinned tag before citing a line number here, and follow the buffers
+; rather than the file. So a central assert here would need its own .ifndef
+; plus .imports — a guard able to drift from the thing it guards.
+; Inside the defining block it is automatically absent in sibling builds and
+; automatically present in exactly the build that needs it.
+.assert (mul_dma_lo & $00FF) = 0, lderror, "mul_dma_lo must be page-aligned: CRYPTO_BSS lost align=$100 in cfg/c64-wireguard-*.cfg — the `.align 256` above is segment-relative, and `lda mul_dma_lo,y` in fe25519_mul indexes with secret Y, so a page cross is a data-dependent timing leak (ld65 only WARNS)"
+.assert (mul_dma_hi & $00FF) = 0, lderror, "mul_dma_hi must be page-aligned — same CT invariant as mul_dma_lo"
 
 ; --- X25519 state (mutable ladder working buffers) ---
 x25_scalar:
