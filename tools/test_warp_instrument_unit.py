@@ -84,7 +84,7 @@ from c64_test_harness.encoding.screen_codes import SCREEN_CODE_TABLE  # noqa: E4
 # branch that does not apply still emits its names as skips. Pinned so a
 # case that silently stops running is a hard error, not a smaller
 # denominator nobody notices.
-EXPECTED_CHECKS = 47
+EXPECTED_CHECKS = 72
 
 #: src/net/uci/uci_errors.inc:244. Retyped here ONLY as the value case 8
 #: pins the BUILT layout against; the tool itself always derives the
@@ -502,7 +502,7 @@ def load_tool():
 
 
 def drive(mod, labels: dict, trials: list[Trial], rng: random.Random,
-          seed: int, backend: str, prg: Path, **kw):
+          seed: int, backend: str, prg: Path, boundary_rung=None, **kw):
     """Run the tool's Stage C against the scripted device.
 
     Returns (result, device) — the device so a case can check its own
@@ -511,7 +511,8 @@ def drive(mod, labels: dict, trials: list[Trial], rng: random.Random,
     """
     dev = FakeDevice(labels, trials, rng)
     saved = (mod.PRG_C, mod.DNS_TIMEOUT, mod.BOOT_TIMEOUT,
-             mod.HS_POLL_TIMEOUT, mod._net_init_ip65)
+             mod.HS_POLL_TIMEOUT, mod._net_init_ip65,
+             mod.select_boundary_rung)
     mod.PRG_C = prg
     mod.DNS_TIMEOUT = 0.4        # nothing arrives late in the simulator
     mod.BOOT_TIMEOUT = 2.0
@@ -519,6 +520,17 @@ def drive(mod, labels: dict, trials: list[Trial], rng: random.Random,
     # DHCP + turbo are a device concern and not what is under test here;
     # stubbing them is what lets an ip65 tree drive the same query loop.
     mod._net_init_ip65 = lambda tr, client, L, turbo, result: True
+    # Issue #146: the boundary rung is sized by a REAL host-side DNS lookup
+    # at run start. Stubbed here so this suite stays offline and
+    # deterministic — the gate must not depend on a third party's TXT
+    # record, which is the very fact #146 is about. The stub returns a
+    # plausible over-boundary answer; select_boundary_rung's own refusal
+    # behaviour is proved directly in case 17, not through drive().
+    # `boundary_rung` lets a case inject its own selector -- including one
+    # that RAISES, which is how the rung-scope refusal is proved not to
+    # abort the run.
+    mod.select_boundary_rung = boundary_rung or (lambda *a, **k: (
+        "namecheap.com", 1400, [("namecheap.com", 1400)]))
     try:
         r = mod.run_stage_c(dev, FakeClient(), labels,
                             bytes(32), bytes(32), bytes(32), seed,
@@ -526,7 +538,8 @@ def drive(mod, labels: dict, trials: list[Trial], rng: random.Random,
         return r, dev
     finally:
         (mod.PRG_C, mod.DNS_TIMEOUT, mod.BOOT_TIMEOUT,
-         mod.HS_POLL_TIMEOUT, mod._net_init_ip65) = saved
+         mod.HS_POLL_TIMEOUT, mod._net_init_ip65,
+         mod.select_boundary_rung) = saved
 
 
 def rand_body(rng: random.Random, n: int, suffix: bytes = b"") -> bytes:
@@ -847,8 +860,9 @@ def case3_unmeasured_size(mod, labels, rng, seed, res: Result, ctx) -> None:
     res.check(silent.get("reply_observed") is False, "case3/no-size-on-failure",
               "on a trial where nothing arrived the record must state so "
               f"explicitly; reply_observed={silent.get('reply_observed')!r} "
-              f"while dig_measured={silent.get('dig_measured')!r} is still "
-              "reported — a hardcoded constant standing in for a measurement")
+              f"while expected_reply_len={silent.get('expected_reply_len')!r} "
+              f"({silent.get('expected_reply_len_source')!r}) is still "
+              "reported — a constant standing in for a measurement")
 
 
 def case6_unscored_absorption(mod, labels, rng, seed, res: Result,
@@ -1177,6 +1191,276 @@ def case8_status_splice(mod, labels, rng, seed, res: Result, ctx) -> None:
               f"{sorted(got)}")
 
 
+def case9_boundary_rung(mod, labels, rng, seed, res: Result, ctx) -> None:
+    """The >1280 rung must be MEASURED, and must refuse when it cannot reach
+    the boundary it is named for (issue #146).
+
+    Offline: `measure` is injected, so nothing here depends on a third
+    party's TXT record — which is the fact the defect was made of. The
+    measurements are drawn from the seeded RNG so the case is not tuned to
+    one pair of numbers.
+    """
+    print("\n[case 9] the >1280 B rung is sized by measurement, or refused")
+    boundary = mod.WARP_MTU_BOUNDARY
+    res.check(boundary == 1280, "case9/boundary-is-the-warp-mtu",
+              f"WARP_MTU_BOUNDARY is {boundary}, not Cloudflare WARP's 1280")
+
+    # (a) a candidate that still clears the boundary is selected, and the
+    #     size used is the MEASURED one, not any table constant.
+    big = rng.randrange(boundary + 1, boundary + 400)
+    small = rng.randrange(20, 200)
+    sizes = {"namecheap.com": small, "google.com": big}
+    name, got, observed = mod.select_boundary_rung(
+        candidates=("namecheap.com", "google.com"),
+        measure=lambda n, **k: sizes.get(n))
+    res.check(name == "google.com" and got == big,
+              "case9a/selects-a-candidate-over-the-boundary",
+              f"selected {name!r} at {got} B; the only candidate above "
+              f"{boundary} was google.com at {big}")
+    res.check(got > boundary, "case9a/selected-size-clears-the-boundary",
+              f"selected size {got} does not exceed {boundary}")
+    res.check(("namecheap.com", small) in observed,
+              "case9a/rejected-candidates-recorded",
+              "the candidate that measured under the boundary is not in the "
+              "record, so a reader cannot see what was rejected or why")
+
+    # (b) THE DEFECT. Every candidate has shrunk below the boundary — the
+    #     2026-09-07 state, where a rung labelled ">1280" received 39 B and
+    #     was still counted. It must REFUSE, not fall back to the largest
+    #     available answer: a ">1280" rung carrying 900 B tests something
+    #     other than its name.
+    shrunk = {n: rng.randrange(20, boundary) for n in ("a.example", "b.example")}
+    try:
+        picked = mod.select_boundary_rung(
+            candidates=tuple(shrunk), measure=lambda n, **k: shrunk.get(n))
+    except mod.BoundaryRungUnavailable as exc:
+        res.check(str(boundary) in str(exc)
+                  and all(str(v) in str(exc) for v in shrunk.values()),
+                  "case9b/refusal-names-the-numbers",
+                  f"the refusal does not carry the boundary and the "
+                  f"measurements a maintainer needs: {exc}")
+        res.check(True, "case9b/refuses-a-diminished-rung", "")
+    else:
+        res.check(False, "case9b/refuses-a-diminished-rung",
+                  f"every candidate measured under {boundary} "
+                  f"({shrunk}) and the rung was still built as "
+                  f"{picked[0]!r} at {picked[1]} B — a rung labelled "
+                  f'">{boundary}" that cannot reach {boundary}, counted as '
+                  "coverage. This is issue #146 exactly.")
+        res.check(False, "case9b/refusal-names-the-numbers", "not reached")
+
+    # (c) an unanswered candidate is not silently treated as zero-and-move-on
+    #     in a way that hides it: it must appear in the record as None.
+    try:
+        _n, _g, obs = mod.select_boundary_rung(
+            candidates=("dead.example", "google.com"),
+            measure=lambda n, **k: None if n == "dead.example" else big)
+        res.check(("dead.example", None) in obs,
+                  "case9c/unanswered-candidate-recorded",
+                  f"a candidate that did not answer is not recorded as None: {obs}")
+    except mod.BoundaryRungUnavailable as exc:
+        res.check(False, "case9c/unanswered-candidate-recorded",
+                  f"refused even though google.com answered at {big}: {exc}")
+
+    # (d) no field may claim measurement while holding a constant. The old
+    #     `dig_measured` reported 1928 for a rung that received 39 B.
+    r, _dev = drive(mod, labels, [Trial(), Trial()], rng, seed, **ctx,
+                    large_repeats=1)
+    # NOT optional. With an empty query record `keys` is set() and both
+    # checks below pass vacuously -- "no field claims measurement" is
+    # trivially true when there are no fields, and all() over [] is True.
+    # A vacuous check is indistinguishable from a satisfied one, which is
+    # the whole subject of this suite.
+    res.check(len(r.get("queries") or []) >= 2, "case9d/queries-exist",
+              f"the run produced {len(r.get('queries') or [])} query records; "
+              "the two field checks below would pass vacuously on an empty "
+              "list, asserting nothing")
+    keys = set().union(*(set(q) for q in r["queries"])) if r.get("queries") else set()
+    res.check("dig_measured" not in keys, "case9d/no-field-claims-false-measurement",
+              "`dig_measured` is back in the query record; it carried the "
+              "table constant under a name that promises a measurement")
+    res.check(all(q.get("expected_reply_len_source") in
+                  ("host-measured at run start", "table constant")
+                  for q in r["queries"]),
+              "case9d/every-size-declares-its-source",
+              "a query record does not say whether its expected size was "
+              f"measured or read from the table: {sorted(keys)}")
+
+    # (h) A TRUNCATED answer is not a measurement of the record. 1.1.1.1
+    #     answers github.com TXT with TC=1 and no answer records at every
+    #     bufsize from 512 to 4096 (measured 2026-09-07), which is why #146's
+    #     rung received 39 B — the record did not shrink, the resolver is
+    #     demanding TCP, and the C64 speaks only UDP DNS. A TC reply that
+    #     happened to land over the boundary would be a length that measures
+    #     the refusal, so it must not be selected.
+    tc_big = mod._MeasuredReply(rng.randrange(boundary + 1, boundary + 200),
+                                truncated=True)
+    clean_big = mod._MeasuredReply(rng.randrange(boundary + 1, boundary + 200))
+    tc_sizes = {"tc.example": tc_big, "clean.example": clean_big}
+    nm, sz, obs = mod.select_boundary_rung(
+        candidates=("tc.example", "clean.example"),
+        measure=lambda n, **k: tc_sizes.get(n))
+    res.check(nm == "clean.example" and sz == clean_big,
+              "case9h/truncated-answer-not-selected",
+              f"selected {nm!r} at {int(sz)} B; tc.example measured "
+              f"{int(tc_big)} B with TC=1, which measures the resolver's "
+              "demand for TCP, not the record")
+    res.check(("tc.example", tc_big) in obs,
+              "case9h/truncated-answer-still-recorded",
+              "a truncated candidate vanished from the record instead of "
+              f"being reported as truncated: {obs}")
+    try:
+        mod.select_boundary_rung(candidates=("tc.example",),
+                                 measure=lambda n, **k: tc_sizes.get(n))
+    except mod.BoundaryRungUnavailable as exc:
+        res.check("TRUNCATED" in str(exc), "case9h/refusal-names-truncation",
+                  "the refusal does not say the candidate was truncated, so "
+                  f"a maintainer reads it as a small record: {exc}")
+    else:
+        res.check(False, "case9h/refusal-names-truncation",
+                  "a TC-only candidate list was accepted rather than refused")
+
+    # (e) SCOPE. The refusal must cost ONE RUNG, not the run. An earlier
+    #     revision returned from stage C, which spent the handshake and
+    #     every --multipart rung (the #70 chunked-send proof) on a
+    #     HOST-SIDE condition — an unreachable resolver on the lab machine
+    #     voiding a C64 hardware run.
+    def _refuse(*a, **k):
+        raise mod.BoundaryRungUnavailable(
+            "no candidate reaches the boundary (injected)",
+            observed=[("a.example", 100), ("b.example", None)])
+
+    baseline, _d = drive(mod, labels, [Trial(), Trial()], rng, seed, **ctx,
+                         large_repeats=1)
+    refused, _d = drive(mod, labels, [Trial(), Trial()], rng, seed, **ctx,
+                        large_repeats=1, boundary_rung=_refuse)
+    res.check(len(refused.get("queries") or []) == len(baseline["queries"]) - 1,
+              "case9e/refusal-costs-one-rung-not-the-run",
+              f"a refused boundary rung left "
+              f"{len(refused.get('queries') or [])} queries where the same "
+              f"run with a usable rung produced {len(baseline['queries'])}; "
+              "the refusal must drop ONE rung, not abort stage C and take "
+              "the handshake, the ladder and the multipart rungs with it")
+    res.check(all(q.get("expected_reply_len_source") == "table constant"
+                  for q in (refused.get("queries") or [])),
+              "case9e/no-rung-claims-the-measurement-that-failed",
+              "a rung is labelled host-measured in a run where the "
+              "measurement refused")
+    # (f) ...and it must still be LOUD. A rung-scope refusal that decays
+    #     into a silent skip is the defect we started from.
+    errs = mod.stage_errors({"stage_c": refused})
+    res.check(any("boundary" in e.lower() or "candidate" in e.lower()
+                  for e in errs),
+              "case9f/refusal-reaches-the-exit-code",
+              "stage_errors() does not surface the refused boundary rung, so "
+              "the run exits 0 claiming >1280 B coverage it never had: "
+              f"{errs}")
+    res.check(refused.get("boundary_rung", {}).get("candidates_measured"),
+              "case9f/refusal-records-what-it-measured",
+              "the refusal record does not carry the per-candidate "
+              "measurements, so a maintainer cannot see why it refused: "
+              f"{refused.get('boundary_rung')}")
+
+    # (i) THE ARTIFACT MUST CARRY TRUNCATION, AND CARRY IT CORRECTLY.
+    #     The JSON record outlives the log, and `_MeasuredReply` degrades to
+    #     a plain int through int() and a JSON round-trip, so `.truncated`
+    #     survives only where it is explicitly captured. A record showing
+    #     "github.com: 39" with no TC marker is the exact artifact that
+    #     produced the wrong root cause ("the record shrank") for this very
+    #     issue. Asserted by VALUE against injected ground truth on BOTH
+    #     paths — a check that only tests the field is present would pass
+    #     against a hardcoded False, which is how this got through once.
+    truth = {"tc.example": mod._MeasuredReply(900, truncated=True),
+             "plain.example": mod._MeasuredReply(700),
+             "big.example": mod._MeasuredReply(boundary + 90)}
+
+    def _by_name(rec):
+        return {c["name"]: c for c in rec.get("candidates_measured", [])}
+
+    # refusal path — the one every live run takes today
+    ref, _d = drive(mod, labels, [Trial()], rng, seed, **ctx, large_repeats=1,
+                    boundary_rung=lambda *a, **k: (_ for _ in ()).throw(
+                        mod.BoundaryRungUnavailable(
+                            "injected", observed=[
+                                ("tc.example", truth["tc.example"]),
+                                ("plain.example", truth["plain.example"])])))
+    got = _by_name(ref.get("boundary_rung", {}))
+    res.check(got.get("tc.example", {}).get("answer_truncated") is True
+              and got.get("plain.example", {}).get("answer_truncated") is False,
+              "case9i/refusal-artifact-carries-truncation-correctly",
+              "the REFUSAL record's per-candidate truncation is wrong or "
+              "missing. tc.example was measured with TC=1 and plain.example "
+              f"without; the record says {got}. This is the artifact a "
+              "reader gets, and a 39 B entry with no TC marker is what made "
+              "us conclude 'the record shrank'")
+    res.check(all(c.get("host_measured_reply_len") == int(truth[c["name"]])
+                  for c in got.values()),
+              "case9i/refusal-artifact-carries-the-lengths",
+              f"the refusal record's lengths do not match what was measured: {got}")
+
+    # success path — top-level flag AND the per-candidate list
+    okr, _d = drive(mod, labels, [Trial()], rng, seed, **ctx, large_repeats=1,
+                    boundary_rung=lambda *a, **k: (
+                        "big.example", truth["big.example"],
+                        [("tc.example", truth["tc.example"]),
+                         ("big.example", truth["big.example"])]))
+    br = okr.get("boundary_rung", {})
+    gotk = _by_name(br)
+    res.check("answer_truncated" not in br,
+              "case9i/no-field-that-cannot-take-its-other-value",
+              "the success record carries a top-level `answer_truncated`. "
+              "A truncated answer is never SELECTED, so that field is False "
+              "by construction — it cannot take its other value, and a "
+              "field that looks informative while being a constant is the "
+              f"defect class this issue is about: {br}")
+    res.check(gotk.get(br.get("selected"), {}).get("answer_truncated") is False,
+              "case9i/selected-candidate-recorded-untruncated",
+              "the selected rung's own entry in the candidate list does not "
+              f"record it as untruncated: {gotk}")
+    res.check(gotk.get("tc.example", {}).get("answer_truncated") is True,
+              "case9i/success-artifact-per-candidate-truncation",
+              "a candidate measured with TC=1 is recorded as untruncated in "
+              f"the success path's candidate list: {gotk}")
+    res.check(not mod.stage_errors({"stage_c": baseline}),
+              "case9f/a-usable-rung-is-not-an-error",
+              "a run whose boundary rung WAS available is still reported as "
+              f"failing: {mod.stage_errors({'stage_c': baseline})}")
+
+    # (g) THE SEEDED STREAM MUST NOT MOVE. measure_txt_reply_len runs
+    #     between random.seed(seed) and the per-query txn_ids / multipart
+    #     QNAME tokens, and its draw count depends on how many candidates
+    #     answer and how many attempts each takes — i.e. on the network. If
+    #     it drew from the module-level `random`, two runs with the same
+    #     --seed would emit DIFFERENT bytes on the wire, breaking the
+    #     standing seeded-and-logged rule. Measured against an address that
+    #     will not answer, so this stays offline and fast.
+    import random as _r
+    _r.seed(20260907)
+    want = [_r.random() for _ in range(3)]
+    _r.seed(20260907)
+    mod.measure_txt_reply_len("a.example", resolver="127.0.0.1",
+                              timeout=0.05, attempts=3)
+    got = [_r.random() for _ in range(3)]
+    res.check(got == want, "case9g/measurement-does-not-move-the-seeded-stream",
+              "measure_txt_reply_len consumed the module-level RNG, so the "
+              "number of draws before the per-query txn_ids depends on the "
+              "network and --seed no longer reproduces the wire payloads")
+
+    _r.seed(20260907)
+    want = [_r.random() for _ in range(3)]
+    _r.seed(20260907)
+    try:
+        mod.select_boundary_rung(candidates=("a.example", "b.example"),
+                                 measure=lambda n, **k: 10)
+    except mod.BoundaryRungUnavailable:
+        pass
+    got = [_r.random() for _ in range(3)]
+    res.check(got == want, "case9g/selection-does-not-move-the-seeded-stream",
+              "select_boundary_rung consumed the module-level RNG; its draw "
+              "count varies with how many candidates answer, so the wire "
+              "payloads stop being reproducible from --seed")
+
+
 def case5_order_confound(mod, labels, rng, seed, res: Result, ctx) -> None:
     """Sweep position is perfectly confounded with reply size."""
     print("\n[case 5] sweep ladder ordering")
@@ -1276,6 +1560,7 @@ def main(argv=None) -> int:
         "7": case7_poison_stop,
         "7b": case7b_poison_collision,
         "8": case8_status_splice,
+        "9": case9_boundary_rung,
     }
     for key, fn in cases.items():
         if args.only and args.only != key:

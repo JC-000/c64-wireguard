@@ -175,12 +175,13 @@ import logging
 import os
 import random
 import string
+import socket
 import struct
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "tools"))
@@ -301,6 +302,218 @@ REPLY_SWEEP_NAMES = (
     ("google.com", 1187),
     ("namecheap.com", 1278),   # the size that fails ~55% of the time
 )
+
+# =============================================================================
+# The >1280 B boundary rung (issue #146) — SIZED BY MEASUREMENT, NOT A TABLE
+# =============================================================================
+# The rung whose whole purpose is to probe ABOVE Cloudflare WARP's inbound
+# MTU used to be a hardcoded constant describing a THIRD PARTY's TXT record:
+#
+#     ("github.com", DNS_QTYPE_TXT, 1928, "targets >1280 ...", ...)
+#
+# That record shrank. On 2026-09-07 the rung received 39 B — it exercised
+# nothing above 39 B while still being counted as a rung of the run, and the
+# very same table (REPLY_SWEEP_NAMES) already carried github.com at 39. The
+# tool did raise `size_mismatch`, so it never claimed the rung met its size
+# expectation; the defect was that a rung which cannot reach its named
+# boundary ran, was counted, and looked like coverage.
+#
+# The rung is now sized from a HOST-SIDE measurement taken at run start, and
+# a rung that cannot reach the boundary is REFUSED, not run diminished.
+#
+# THE WINDOW IS NARROW, AND 1928 WAS NEVER IN IT. The rung sends EDNS0
+# bufsize 1400, so a UDP answer above 1400 B is truncated with TC=1 and
+# never arrives whole. The rung could therefore only ever have exercised
+# 1281..1400 B — a 1928 B reply was unreachable by construction, which is
+# a second way the constant was never a measurement.
+#
+# MEASURED host-side against 1.1.1.1 on 2026-09-07, every candidate below:
+#   namecheap.com 1278   google.com 1187   paypal.com 1131
+#   bitbucket.org 1049   slack.com   948   github.com   39
+# Nothing clears 1280 today (namecheap misses by 2 B), so select_boundary_rung
+# REFUSES on a live run right now. That is the intended behaviour and the
+# honest state of the world: the rung has no coverage to offer until a
+# candidate whose TXT answer lands in 1281..1400 is added here, or the
+# bufsize is raised deliberately, or the rung is dropped on purpose. What it
+# must not do is run at 39 B and be counted.
+WARP_MTU_BOUNDARY = 1280
+
+#: The EDNS0 advertised receive buffer these rungs use. Any answer larger
+#: than this is truncated rather than delivered, so it is the hard ceiling
+#: on what the boundary rung can ever observe.
+BOUNDARY_RUNG_BUFSIZE = 1400
+
+#: Candidates for the boundary rung, tried in order. All are names whose TXT
+#: records have historically been large; none is trusted to still be, which
+#: is the entire point — whichever one measures over the boundary today is
+#: used, and if none does the rung refuses rather than shrinking silently.
+BOUNDARY_RUNG_CANDIDATES = ("namecheap.com", "google.com", "paypal.com",
+                            "bitbucket.org", "slack.com", "github.com")
+
+
+class BoundaryRungUnavailable(RuntimeError):
+    """No candidate's TXT answer still reaches WARP_MTU_BOUNDARY.
+
+    Raised rather than falling back to the largest available answer: a rung
+    labelled "targets >1280" that carries 900 B is a rung that tests
+    something other than what its name says, and counting it is how #146
+    happened. Fail loud.
+
+    SCOPE. This kills ONE RUNG, never the run. The caller records it,
+    surfaces it through stage_errors (so it still reaches the exit code)
+    and carries on with the other rungs. Aborting stage C here would spend
+    the handshake, `--reply-sweep` and every `--multipart` rung -- our #70
+    chunked-send hardware proof -- on a HOST-SIDE condition: an unreachable
+    resolver or a rate limiter on the lab machine would void a C64 run.
+    Loudness was never the problem here; blast radius was.
+
+    `.observed` carries the per-candidate measurements so the refusal
+    record can name what was rejected and why.
+    """
+
+    def __init__(self, message: str, observed=()):
+        super().__init__(message)
+        self.observed = list(observed)
+
+
+class _MeasuredReply(int):
+    """A measured reply length that also remembers whether TC was set.
+
+    Subclasses int so every existing comparison, format and JSON dump of a
+    measurement keeps working unchanged; `.truncated` is the extra fact.
+    """
+
+    truncated = False
+
+    def __new__(cls, length: int, truncated: bool = False):
+        self = super().__new__(cls, length)
+        self.truncated = bool(truncated)
+        return self
+
+
+def measure_txt_reply_len(name: str, resolver: str = PING_TARGET_IP,
+                          bufsize: int = 1400, timeout: float = 4.0,
+                          attempts: int = 2) -> Optional[int]:
+    """Host-side: the DNS TXT answer length for *name*, in bytes on the wire.
+
+    Sends the SAME query bytes build_dns_query produces for the C64 rung —
+    same qtype, same EDNS0 bufsize, same resolver — so the number returned is
+    directly comparable with the `observed_reply_len` the C64 reports, rather
+    than being a different measurement wearing the same units.
+
+    Returns None if the resolver does not answer; the caller decides what an
+    unanswered candidate means. Does NOT go through the tunnel: this runs on
+    the host before the C64 is asked anything, which is what makes it a
+    source of truth for sizing rather than another thing under test.
+    """
+    # A PRIVATE RNG, not the module-level `random`. This runs after
+    # random.seed(seed) and before the per-query txn_ids and the multipart
+    # QNAME tokens, and its draw count depends on how many candidates answer
+    # and how many attempts each takes -- i.e. on the network. Drawing from
+    # the shared stream would make two runs with the same --seed emit
+    # DIFFERENT wire payloads, breaking the standing seeded-and-logged rule
+    # for anything crossing the wire. Nothing here goes over the tunnel, so
+    # this stream needs no reproducibility of its own.
+    #
+    # NARROWED, NOT CLOSED (F8). The measurement no longer moves the shared
+    # stream, but the SELECTION OUTCOME still does: an available boundary
+    # rung appends one query, and every later draw -- the per-query txn_ids
+    # and the multipart QNAME tokens -- shifts by one. So the same --seed on
+    # a day when a candidate answers over the boundary produces different
+    # multipart payloads from a day when none does.
+    #
+    # WHAT A REAL FIX COSTS, so the next reader can judge it rather than
+    # redo this analysis. Closing it means giving each rung its own
+    # random.Random seeded from (seed, rung identity) instead of drawing
+    # from one shared stream. Three consequences, none of them free:
+    #   * Rung identity has to become STABLE — name + repeat number + role
+    #     — because the current identity is the INDEX, and the index is
+    #     precisely what shifts when the boundary rung appears or does not.
+    #   * shuffle_ladder draws from the same stream, so it needs its own
+    #     partition too, or the ladder ORDER stays coupled to the outcome.
+    #   * Every seed recorded in an existing run artifact stops reproducing
+    #     that run: the payloads and the shuffle both change. That is the
+    #     real price — our run records cite seeds as the reproduction
+    #     handle, and this would silently retire all of them.
+    # So it is worth doing deliberately, with a red/green proof that two
+    # runs at one seed and different boundary availability emit identical
+    # ladder payloads — not folded into an instrument fix.
+    rnd = random.Random()
+    for _ in range(max(1, attempts)):
+        txn_id = rnd.randint(0, 0xFFFF)
+        _question, wire = build_dns_query(name, DNS_QTYPE_TXT, txn_id,
+                                          bufsize=bufsize)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.settimeout(timeout)
+            sock.sendto(wire, (resolver, 53))
+            # BOUNDED. `while True` reset the recvfrom timeout on every
+            # non-matching datagram, so a host receiving unrelated traffic
+            # on this ephemeral port could spin indefinitely. One deadline
+            # for the whole attempt, not one per packet.
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                sock.settimeout(max(0.01, deadline - time.monotonic()))
+                reply, _addr = sock.recvfrom(65535)
+                if len(reply) >= 2 and reply[:2] == wire[:2]:
+                    # TC (RFC 1035 4.1.1, flags bit 9) says the resolver cut
+                    # the answer to fit bufsize. Such a reply is still a
+                    # genuine >1280 B datagram through the tunnel, so it is
+                    # not rejected -- but it is NOT a measurement of the
+                    # record's real size, and #146 is about a field that
+                    # claimed more than it held. Recorded, not silently
+                    # dropped: `truncated` rides along with the length.
+                    truncated = bool(len(reply) >= 3 and reply[2] & 0x02)
+                    return _MeasuredReply(len(reply), truncated)
+        except (socket.timeout, OSError):
+            continue
+        finally:
+            sock.close()
+    return None
+
+
+def select_boundary_rung(resolver: str = PING_TARGET_IP, bufsize: int = 1400,
+                         boundary: int = WARP_MTU_BOUNDARY,
+                         candidates: Sequence[str] = BOUNDARY_RUNG_CANDIDATES,
+                         measure=measure_txt_reply_len) -> tuple:
+    """Pick the boundary rung's name and size by measuring, at run start.
+
+    Returns ``(name, measured_len, [(name, measured_len_or_None), ...])`` —
+    the chosen rung plus every measurement taken, so the run record shows
+    what was rejected and why. Raises BoundaryRungUnavailable if no candidate
+    still answers above *boundary*.
+    """
+    observed = []
+    for name in candidates:
+        got = measure(name, resolver=resolver, bufsize=bufsize)
+        observed.append((name, got))
+        # A TC=1 answer is the resolver saying "retry over TCP"; its length
+        # measures the refusal, not the record. MEASURED 2026-09-07: 1.1.1.1
+        # answers github.com TXT with TC=1 and NO answer records at every
+        # bufsize from 512 to 4096, so the reply is 39 B and always will be
+        # over UDP. That -- not "the record shrank" -- is why #146's rung
+        # received 39 B, and the C64 speaks only UDP DNS, so it can never
+        # see more. Recorded in `observed` either way; never selected.
+        if got is None or getattr(got, "truncated", False):
+            continue
+        if got > boundary:
+            return name, got, observed
+    raise BoundaryRungUnavailable(
+        f"no candidate TXT answer exceeds {boundary} B today, so the "
+        f"'targets >{boundary} (Cloudflare WARP MTU)' rung cannot reach the "
+        f"boundary it is named for. Measured host-side against {resolver}: "
+        + ", ".join(
+            f"{n}=" + ("no answer" if g is None
+                       else f"{int(g)}{' TRUNCATED(TC=1)' if getattr(g, 'truncated', False) else ''}")
+            for n, g in observed)
+        + ". REFUSING to run a diminished version of this rung -- that is "
+        "exactly issue #146, where a 1928 B constant ran as a 39 B rung and "
+        "was counted as coverage. The EDNS0 bufsize in use caps any answer, "
+        f"so a usable candidate must land in {boundary + 1}..{bufsize} B: add "
+        "one, raise the bufsize, or drop the rung deliberately. This refuses "
+        "ONE RUNG -- the rest of the run continues and the refusal is "
+        "surfaced by stage_errors().", observed=observed)
+
 
 # Each rung is sent this many times. The inbound path is INTERMITTENT here
 # (a 1278 B reply failed to decrypt in 2 of 4 runs on 2026-09-03, and the
@@ -1988,9 +2201,82 @@ def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
                 "LADDER rung %d: %s ~%d B reply" % (i + 1, nm, exp),
                 None, None, 1400)
                for i, (nm, exp) in enumerate(ladder)]
-    queries += [
-        ("github.com", DNS_QTYPE_TXT, 1928, "targets >1280 (Cloudflare WARP MTU)", None, None, 1400),
-    ]
+    # Issue #146: this rung is measured at run start, not read from a table.
+    #
+    # SCOPE OF THE REFUSAL. A rung that cannot reach its named boundary is
+    # dropped and RECORDED -- the rung refuses, the RUN does not. An earlier
+    # revision returned from stage C here, which spent the handshake,
+    # `--reply-sweep` and every `--multipart` rung (our #70 chunked-send
+    # hardware proof) on a HOST-SIDE condition: a lab machine that cannot
+    # reach the resolver, or a rate limiter, would void a C64 hardware run
+    # for a fact about a different machine. The thing #146 asked for is that
+    # a diminished rung must not run and be counted as coverage; it did not
+    # ask for the other nineteen rungs to be destroyed with it.
+    #
+    # It is still LOUD, and that is asserted, not assumed:
+    # `boundary_rung_error` is picked up by stage_errors(), so the refusal
+    # reaches the run summary and the process exit code exactly as any stage
+    # error does. A rung-scope refusal that decayed into a silent skip would
+    # BE the defect we started from.
+    boundary_rung_index = None
+    try:
+        b_name, b_len, b_observed = select_boundary_rung()
+    except BoundaryRungUnavailable as exc:
+        result["boundary_rung"] = {
+            "selected": None, "error": str(exc),
+            "boundary": WARP_MTU_BOUNDARY, "resolver": PING_TARGET_IP,
+            # F6: `answer_truncated` must be here too, NOT only on the
+            # success path. The refusal path is the one every live run takes
+            # today, so this is the artifact a reader actually gets — and a
+            # bare "github.com: 39" is precisely the record that produced
+            # the wrong root cause ("the record shrank") in the first place.
+            # _MeasuredReply degrades to a plain int through int() and a
+            # JSON round-trip, so `.truncated` survives only where it is
+            # explicitly captured, as here.
+            "candidates_measured": [
+                {"name": n,
+                 "host_measured_reply_len": None if g is None else int(g),
+                 "answer_truncated": bool(getattr(g, "truncated", False))}
+                for n, g in exc.observed],
+        }
+        result["boundary_rung_error"] = str(exc)
+        # Deliberately does NOT count the surviving rungs: --multipart
+        # appends up to 3 x MULTIPART_REPEATS more AFTER this point, so any
+        # number quoted here undercounts. Saying "the run continues" is the
+        # true statement available at this line.
+        log.error("BOUNDARY RUNG REFUSED — this costs ONE rung; the ladder, "
+                  "the sweep and any multipart rungs still run: %s", exc)
+    else:
+        result["boundary_rung"] = {
+            "selected": b_name, "host_measured_reply_len": int(b_len),
+            # NO top-level `answer_truncated` here. select_boundary_rung
+            # never selects a truncated answer (see its TC branch), so the
+            # field would be False by construction — a field that cannot
+            # take its other value carries no information while looking as
+            # if it does, which is the defect class of this whole issue.
+            # Per-candidate truncation, which IS variable, is below.
+            "boundary": WARP_MTU_BOUNDARY, "resolver": PING_TARGET_IP,
+            "candidates_measured": [
+                {"name": n, "host_measured_reply_len":
+                    None if g is None else int(g),
+                 "answer_truncated": bool(getattr(g, "truncated", False))}
+                for n, g in b_observed],
+        }
+        log.info("boundary rung sized host-side: %s answers %d B (> %d) "
+                 "[candidates: %s]", b_name, int(b_len), WARP_MTU_BOUNDARY,
+                 ", ".join(f"{n}={'no answer' if g is None else int(g)}"
+                           for n, g in b_observed))
+        # 1-based rung number this rung will carry in the loop below. Keyed
+        # by INDEX, not by name: a candidate can also appear in the shuffled
+        # ladder, and matching on the name would label those rungs
+        # "host-measured" too.
+        boundary_rung_index = len(queries) + 1
+        queries += [
+            (b_name, DNS_QTYPE_TXT, int(b_len),
+             f"targets >{WARP_MTU_BOUNDARY} (Cloudflare WARP MTU), "
+             f"host-measured {int(b_len)} B at run start",
+             None, None, 1400),
+        ]
     if multipart:
         # Three rungs x MULTIPART_REPEATS, differing ONLY in size, so each
         # adjacent pair isolates exactly one variable:
@@ -2085,7 +2371,15 @@ def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
             "inner_target": target,
             "wire_len": len(wire),
             "expected_reply_len": dig_size,
-            "dig_measured": dig_size,           # legacy key, same value
+            # Issue #146: `dig_measured` is GONE. It was the same table
+            # constant under a name that promised a measurement, and it
+            # reported 1928 for a rung that received 39 B. Where the size
+            # really was measured (the boundary rung) the measurement is in
+            # result["boundary_rung"]; this field says which it is, so no
+            # key claims measurement while holding a constant.
+            "expected_reply_len_source": (
+                "host-measured at run start" if rung == boundary_rung_index
+                else "table constant"),
             "band": band,
             "outer_datagram_len": outer, "uci_parts": parts,
             "multipart": bool(pad_to), "staged_ok": staged,
@@ -2710,7 +3004,13 @@ def stage_errors(results: dict) -> list[str]:
     for key, stage in results.items():
         if not isinstance(stage, dict):
             continue
-        for k in ("error", "ping_error"):
+        # `boundary_rung_error` (issue #146) is a RUNG-scope refusal: the
+        # run continued and its other rungs are valid, but the >1280 B
+        # boundary was NOT exercised, so the run must not exit 0 claiming
+        # coverage it does not have. Listed alongside the stage-scope keys
+        # for exactly that reason -- refusing at rung scope is what keeps
+        # the handshake, not a licence to go quiet.
+        for k in ("error", "ping_error", "boundary_rung_error"):
             if stage.get(k):
                 out.append(f"{key}: {stage[k]}")
         # A query whose screen could not be attributed is not a passing

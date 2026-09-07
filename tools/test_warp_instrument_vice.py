@@ -73,10 +73,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "tools"))
 
 from c64_test_harness import (  # noqa: E402
-    Labels, ViceConfig, ViceInstanceManager, jsr, read_bytes, wait_for_text,
+    Labels, ViceConfig, ViceInstanceManager, jsr, read_bytes,
     write_bytes,
 )
 from c64_test_harness.encoding.screen_codes import SCREEN_CODE_TABLE  # noqa: E402
+from vice_util import binary_wait_for_boot_ready  # noqa: E402
 
 PRG_PATH = PROJECT_ROOT / "build" / "wireguard.prg"
 LABELS_PATH = PROJECT_ROOT / "build" / "labels.txt"
@@ -353,7 +354,8 @@ def main(argv=None) -> int:
     L = Labels.from_file(str(LABELS_PATH))
     for need in ("transport_decrypt", "display_payload", "udp_recv_buf",
                  "udp_recv_len", "hs_transport_recv", "rw_counter_max",
-                 "rw_bitmap", "tp_packet", "tp_payload_len", "msg_recv_len"):
+                 "rw_bitmap", "tp_packet", "tp_payload_len", "msg_recv_len",
+                 "boot_ready"):
         if L.address(need) is None:
             print(f"FATAL: label '{need}' not found")
             return 2
@@ -365,8 +367,33 @@ def main(argv=None) -> int:
         inst = mgr.acquire()
         print(f"VICE PID={inst.pid}, port={inst.port}")
         tr = inst.transport
-        if wait_for_text(tr, "Q=QUIT", timeout=90.0) is None:
-            print("FATAL: main menu never appeared")
+        # Issue #143: gate on the boot_ready BYTE, not on title_msg's
+        # "Q=QUIT" text. boot.s prints the title at :158-159 and only sets
+        # boot_ready at :278. Between the two lie vic_boost_begin (:167),
+        # the crypto table build (poly1305_lib_init/sqtab_init :174-176,
+        # reu_mul_init :181), the APP_BSS overlay fill that reclaims
+        # LIB_X25519_INIT_CODE (issue #103), and vic_boost_end (:269) —
+        # the longest uninterrupted stretch of compute in the program, run
+        # with the display blanked. A machine that faults or hangs anywhere
+        # in that span still shows "Q=QUIT", so the old text wait reported
+        # a healthy boot against a dead C64: this suite passed 5/5 in a
+        # gate run where eight other suites died on "Main menu did not
+        # appear". The other 31 gate VICE suites adopted
+        # binary_wait_for_boot_ready for issue #55; this file was added
+        # afterwards and reintroduced the class.
+        #
+        # (An earlier draft of this comment cited an `x25519_reu_fault`
+        # refuse-and-halt in boot.s. There is no such code: `grep -rn
+        # x25519_reu_fault src/` returns nothing — the label lives in
+        # libs/x25519 and this repo only ever READS it from a tool. That
+        # commit was dropped before merge, and the prose written while it
+        # existed outlived it, because prose is not compiled.)
+        #
+        # The text wait is NOT kept as a secondary check: boot_ready is set
+        # strictly after title_msg prints, so a set boot_ready already
+        # implies the title rendered. Keeping it would add no assertion.
+        if binary_wait_for_boot_ready(tr, L, timeout=180.0) is None:
+            print("FATAL: boot did not complete (boot_ready never set)")
             mgr.release(inst)
             return 2
         # Safety: land in a harmless loop after jsr() returns.

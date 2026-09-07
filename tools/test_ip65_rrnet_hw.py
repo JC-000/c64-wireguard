@@ -2805,8 +2805,14 @@ def main(argv: Optional[list[str]] = None) -> int:
 
         # 2. Bench health FIRST, at every requested clock, before our build
         #    is loaded at all. Stock ip65 on this silicon is the control: if
-        #    it cannot ping, the bench is wrong and nothing about our build
-        #    can be concluded from a later failure.
+        #    it cannot ping, the bench or the stock-ip65 CS8900a transmit
+        #    path is wrong AT THAT CLOCK, and any later result that rides
+        #    THAT path cannot be concluded (issue #144). It is not a blanket
+        #    void on our build: the control links c64rrnet.lib and our blob
+        #    links ip65_c64.lib's COMBO wrapper, so it exercises our driver
+        #    path in neither direction -- see BENCH_CONTROL_CAVEAT. That is
+        #    why the abort below fires only when the control fails at EVERY
+        #    requested clock.
         #
         #    Running it at BOTH clocks is what makes CPU speed a declared
         #    axis cheaply. The open question is whether the U64 times
@@ -2821,10 +2827,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         run["bench_health"] = {str(k): v for k, v in health.items()}
         if not any(health.values()):
             raise RuntimeError(
-                f"the stock-ip65 ping control failed at every requested "
-                f"clock {args.speeds}. The bench is wrong, or the 10.0.66 "
-                f"re-target of pingstatic is wrong — those are NOT "
-                f"distinguishable from here, because only the 169.254 "
+                f"the stock-ip65 ping control failed at EVERY requested "
+                f"clock {args.speeds}: the stock-ip65 CS8900a transmit path "
+                f"never worked on this bench today, at any speed. Unlike a "
+                f"single-clock failure — which leaves our own driver path "
+                f"(the COMBO wrapper, which this control does not exercise "
+                f"in either direction) entirely open, see #144 and "
+                f"BENCH_CONTROL_CAVEAT — an all-clocks failure means the "
+                f"cable, the NIC, the cartridge or the rig is unproven, or "
+                f"the 10.0.66 re-target of pingstatic is wrong. Those are "
+                f"NOT distinguishable from here, because only the 169.254 "
                 f"variant has ever been measured on the wire. Stopping "
                 f"rather than running our build and misattributing it.")
         if not health.get(args.turbo, False):
