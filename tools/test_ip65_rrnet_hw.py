@@ -171,9 +171,13 @@ WHAT WE DO NOT ASSUME
     - Not I/O decoding in general: VIC internal I/O is unfloored in both
       directions, while I/O2 at $DF00 is floored identically to I/O1 --
       which is why the range is $DE00-$DFFF and not "the $DE00 window".
-    - Not the RR-Net: the identical sweep with Cartridge Preference = Auto
-      (identity read $CCCC, cartridge deselected) gave byte-identical
-      medians at all 16 speeds.
+    - Not the RR-Net: $DF00 (I/O2) is floored identically with no card
+      there at all, so the floor belongs to the range and not to the
+      cartridge in it. NOTE a Cartridge Preference = Auto sweep giving
+      byte-identical medians was ALSO offered as evidence here and is NOT
+      cited: it cannot discriminate, because both settings still drive a
+      real bus cycle. Internal-vs-external ADDRESS is the control that
+      separates them; presence-vs-absence is not.
     - Spacing never buys a cheaper access. At index 15, spacings of 0, 1,
       2, 3, 4 and 6 nops all give exactly 1.000 PHI2/access; the per-access
       PERIOD is quantised to whole PHI2 cycles, so spreading accounts out
