@@ -347,6 +347,22 @@ transport_encrypt:
 
         ; --- 4. Encrypt ---
         jsr aead_encrypt
+        cmp #0
+        beq @aead_ok
+
+        ; aead_encrypt refused (SPEC §14.1 AEAD_ERR_DOMAIN) and, per its
+        ; contract, wrote NOTHING — no ciphertext, no poly1305_tag. Step 5
+        ; below copies poly1305_tag unconditionally, so falling through
+        ; would append the PREVIOUS packet's tag to the CLEARTEXT step 2
+        ; copied in, and present it as a finished packet. Fail closed:
+        ; zero the length and return C set, the failure convention
+        ; transport_send already uses for an over-MTU payload.
+        lda #0
+        sta tp_packet_len
+        sta tp_packet_len+1
+        sec
+        rts
+@aead_ok:
 
         ; --- 5. Append Poly1305 tag after ciphertext ---
         ; tag goes at tp_packet + 16 + payload_len (16-bit add)
@@ -382,6 +398,7 @@ transport_encrypt:
         sta zp_ptr1+1
         jsr counter_inc64
 
+        clc                     ; C clear = packet built (see the §14.1 exit above)
         rts
 
 ; =============================================================================
@@ -800,6 +817,7 @@ transport_send:
         rts
 @len_ok:
         jsr transport_encrypt
+        bcs @too_long           ; AEAD refused: nothing to send, C already set
 
         ; Set up UDP send
         lda tp_packet_len
