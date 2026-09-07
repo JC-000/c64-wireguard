@@ -1,7 +1,7 @@
 # Library-ingestion architecture
 
 How c64-wireguard consumes the sibling crypto libraries `c64-x25519`
-(v0.11.2) and `c64-ChaCha20-Poly1305` (v0.9.0) **as the shipped
+(v0.16.0) and `c64-ChaCha20-Poly1305` (v0.11.0) **as the shipped
 default**, linking the libraries' own contract-§6 archive products with
 zero source staging: each sibling builds itself via its own `make lib`
 target, and WG links the resulting `.a` unmodified.
@@ -158,7 +158,7 @@ Both `cfg/c64-wireguard-{ip65,uci}.cfg` carry the same segment set:
 - **x25519 (§4-prefixed since v0.8.0)**: `LIB_X25519_CODE` (rw —
   contains SMC patch sites; MAIN_AREA_LO), `LIB_X25519_DATA` (rw,
   `align=$100`, 3584 B — placed in LOADER's slack), and
-  `LIB_X25519_INIT_CODE` (rw, `define=yes`, MAIN_AREA_HI — 826 B REU /
+  `LIB_X25519_INIT_CODE` (rw, `define=yes`, MAIN_AREA_HI — 947 B REU /
   160 B onchip). As of issue #103 this segment is **actually
   reclaimed**, not merely documented as reclaimable: `APP_BSS_OVERLAY`
   in both cfgs describes the top of MAIN_AREA_HI a second time as a
@@ -284,7 +284,12 @@ points. They are no longer shipped, and the in-tree `poly1305.s`
   docs-accuracy release correcting `vic_blank` from "~20-25%" to ~6%
   (filed from here as their #103, and our measurement is one of the
   three independent sources it cites) plus the §6.3 `X25519_PROFILE`
-  knob guard. ABI has stayed 3 and the PRG byte-identical throughout.
+  knob guard. **Through v0.11.2 ABI stayed 3 and the PRG byte-identical;
+  neither still holds at the v0.16.0 pin** — v0.15.0 moves
+  `LIB_X25519_ABI_VERSION` 3→4 and changes the PRG, and v0.16.0 splits the
+  §8.1 group into its own archive member `sqtab_init.o` (see the
+  Makefile's `SIBLING_ARCHIVES` comment and §6.6c in
+  `src/contract_asserts.s` for the link-order consequence).
 - c64-ChaCha20-Poly1305 `CHANGELOG.md` + `docs/INTEGRATION.md` — v0.7.0
   brought §4 segment prefixes, the prefixed manifest exports and the
   `SHARED_CT_MUL_8X8` deferral gate; v0.8.0 the §2 ZP registry rename

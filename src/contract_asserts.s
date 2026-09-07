@@ -385,19 +385,43 @@ WG_REU_BANKS_USED = $00
 .import __MAIN_AREA_LO_LAST__
 .assert __MAIN_AREA_LO_LAST__ <= WG_SQTAB_BASE, lderror, "image overruns the sqtab window — MAIN_AREA_LO now extends past WG_SQTAB_BASE"
 
-; --- APP_CODE alignment cliff (a WARNING, not an error) ------------------
+; --- APP_CODE alignment cliff (an ERROR since the margin went single-digit) ---
 ; LIB_CHACHA20_POLY1305_CODE follows APP_CODE in MAIN_AREA_LO with
 ; align = $100 (a constant-time requirement, see the cfg). So APP_CODE
 ; growing past the next page boundary does not cost the bytes it grew by:
 ; it costs a whole page, because every later MAIN_AREA_LO segment moves up
 ; $100 at once. That has happened silently before (#103: 3 bytes of growth
 ; overran $7FFF by 42). The boundary is measured, not remembered: it is
-; wherever the chacha archive currently lands, $4900 as of #87, with 20 B
-; of APP_CODE headroom in every build. ldwarning so a DELIBERATE shift
-; still links - it just cannot happen unnoticed. When you move it on
-; purpose, update the constant here.
+; wherever the chacha archive currently lands, $4900 as of #87.
+;
+; NO HEADROOM FIGURE IS QUOTED HERE ANY MORE, deliberately. The margin is a
+; function of every commit that touches APP_CODE, so a number written into
+; this comment is stale almost immediately — it said "20 B in every build"
+; while the branch tip was at 3. Read it off a build instead:
+;   make BACKEND=uci REU=0 && python3 -c "import re;d=dict(re.findall(r'al C:([0-9A-F]+) \.(__APP_CODE_(?:RUN|SIZE)__)',open('build/labels.txt').read())[::-1]);print(0x4900-sum(int(k,16) for k in d))"
+; Two data points, both MEASURED 2026-09-06 on ca65/ld65 V2.18, identical
+; across uci/ip65 and REU 0/1: 20 B at the library-bump commit, 3 B at the
+; branch tip once the acceptance tests landed.
+;
+; WHY lderror NOW, WHERE IT WAS ldwarning. MEASURED at uci REU=0, injecting
+; into APP_CODE: +21 B trips this assert and nothing else, and costs a whole
+; page — §6.7 headroom drops 944 -> 688 in one step. It stays warning-only
+; through +300 (432 left) and +700 (176 left); the first HARD failure is
+; around +1000 B, where §6.7's `__MAIN_AREA_LO_LAST__ <= WG_SQTAB_BASE`
+; errors and ld65 also reports CRYPTO_BSS overflowing MAIN_AREA_LO by 42.
+; So across roughly 750 bytes of growth this warning is the ONLY signal, and
+; it is not dominated by anything. A warning is fine when the margin is 20 B
+; and a page is cheap; at 3 B, with 688 B of §6.7 headroom at REU=1, one
+; unnoticed page is 37 % of the remaining slack and the warning would be
+; scrolled past exactly when it matters.
+;
+; A DELIBERATE shift is still perfectly allowed — it now costs one edit: move
+; the $4900 constant to wherever the chacha archive lands and say why in the
+; commit. That is the "measured, not remembered" rule doing its job, not an
+; obstacle. If you would rather have the old behaviour back, changing the one
+; word `lderror` to `ldwarning` restores it exactly.
 .import __APP_CODE_RUN__, __APP_CODE_SIZE__
-.assert __APP_CODE_RUN__ + __APP_CODE_SIZE__ <= $4900, ldwarning, "APP_CODE crossed the chacha align; every later MAIN_AREA_LO segment moved up a page"
+.assert __APP_CODE_RUN__ + __APP_CODE_SIZE__ <= $4900, lderror, "APP_CODE crossed the chacha align: every later MAIN_AREA_LO segment just moved up a whole page, costing 256 B of MAIN_AREA_LO for however many bytes you added. Either shrink APP_CODE back under $4900, or move this constant deliberately to wherever LIB_CHACHA20_POLY1305_CODE now lands (read it off build/wireguard.map) and record the page in the commit message"
 
 .endif
 
