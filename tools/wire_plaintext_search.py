@@ -183,9 +183,14 @@ def plaintext_absent(buf, needles: dict[str, str]) -> tuple[bool, str]:
     if hits:
         return False, (f"{len(hits)} hit(s) in {n} B: "
                        + ", ".join(str(h) for h in hits[:6]))
-    forms = len(needle_forms(next(iter(needles.values()))))
+    # DISTINCT patterns, not branches: for an uppercase marker
+    # petscii_form is the identity, so five branches search four different
+    # byte strings. Reporting five would overstate the coverage in the one
+    # line a reader of a passing run actually reads.
+    forms = len(set(needle_forms(next(iter(needles.values()))).values()))
     return True, (f"{n} B searched for {len(needles)} needle(s) "
-                  f"[{', '.join(needles)}] in {forms} encodings each; no hit")
+                  f"[{', '.join(needles)}] in {forms} distinct encoding(s) "
+                  f"each; no hit")
 
 
 def cleartext_counterfactual(datagram, body, *, hdr_len: int = T4_HDR_LEN) -> bytes:
@@ -277,7 +282,23 @@ def selftest() -> list[tuple[bool, str, str]]:
     # searches for. Asserted by its own label for the same reason as the
     # rest -- a sibling branch matching at the same offset would otherwise
     # keep a dead branch looking alive.
-    screen_hits = find_plaintext(hdr + screen_code_form(text.encode()), needles)
+    # THE ORACLE, not the function under test. Every other check of this
+    # form built its haystack by calling screen_code_form, so the form was
+    # compared against itself: MEASURED, `b - 0x41` and `b - 0x40 + 0x60`
+    # both left the suite at 41/41 while DELETING the form alarmed. A form
+    # that generates its own oracle asserts nothing about the encoding.
+    # This table is the C64's, transcribed independently: A=$01..Z=$1A,
+    # space and $21-$3F unchanged, which is exactly what the live tool's
+    # `_screen_text` decodes back (asserted against that decoder, too, in
+    # tools/test_wire_encryption_control.py).
+    table = {c: i + 1 for i, c in enumerate("ABCDEFGHIJKLMNOPQRSTUVWXYZ")}
+    expect = bytes(table.get(ch, ord(ch)) for ch in text)
+    rec(screen_code_form(text.encode()) == expect,
+        "selftest: screen_code_form matches an INDEPENDENT A=$01..Z=$1A "
+        "table, not its own output",
+        f"{screen_code_form(text.encode())[:12].hex(' ')} vs "
+        f"{expect[:12].hex(' ')}")
+    screen_hits = find_plaintext(hdr + expect, needles)
     rec(any(h.form == "screen-code" for h in screen_hits)
         and not any(h.form in ("exact", "petscii") for h in screen_hits),
         "selftest: the screen-code form is FOUND, labelled `screen-code`, "

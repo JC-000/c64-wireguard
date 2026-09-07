@@ -69,6 +69,28 @@ import wire_plaintext_search as wps                          # noqa: E402
 # assert identity rather than a look-alike copy.
 absence_and_control = wps.absence_and_control
 
+
+def _absence_pair(datagram, body, needles, prefix, **kw):
+    """wps.absence_and_control, with a refusal turned into scored FAILs.
+
+    The searcher REFUSES a search it cannot perform -- a torn or
+    header-only datagram, a needle longer than the bytes captured -- and
+    that refusal must not end a hardware session in a traceback. It is a
+    real failure (something was expected on the wire and was not there in
+    a searchable form), so it lands as two FAILs whose labels say the
+    absence was NOT ASSERTED, rather than as an absence PASS or a crash.
+    """
+    try:
+        return wps.absence_and_control(datagram, body, needles, prefix, **kw)
+    except (wps.VacuousSearchError, TypeError) as exc:
+        why = f"{type(exc).__name__}: {exc}"
+        return [
+            (False, f"{prefix}the plaintext search was possible at all", why),
+            (False, f"{prefix}marker ABSENT from the datagram on the wire",
+             "NOT ASSERTED: the search refused as vacuous, so this run "
+             "makes no claim either way"),
+        ]
+
 # Distinct per direction so a hit can never be attributed to the wrong one.
 import os as _os
 
@@ -380,7 +402,7 @@ def build_probe():
             # C64 that skipped transport_send's encrypt would have put on
             # the wire behind the same header. The control requires the
             # absence check to FAIL there.
-            for ok, label, detail in wps.absence_and_control(
+            for ok, label, detail in _absence_pair(
                     raw, plain, {"marker_c64": MARKER_C64}, ""):
                 check(ok, label, detail)
             check(MARKER_C64 in shown,
@@ -450,7 +472,7 @@ def build_probe():
                 body, body_src = (ascii_to_petscii(text),
                                   "host-side PETSCII of the staged text "
                                   "(no decrypt captured)")
-            for ok, label, detail in wps.absence_and_control(
+            for ok, label, detail in _absence_pair(
                     raw, body, {"tail": tail, "head": text[:64]},
                     f"[out {n}] ", body_source=body_src):
                 check(ok, label, detail)
@@ -472,7 +494,7 @@ def build_probe():
         rt.send_raw(pkt1)
         print(f"  datagram {len(pkt1)}B, ciphertext starts "
               f"{pkt1[T4_HDR_LEN:T4_HDR_LEN+16].hex(' ')}", flush=True)
-        for ok, label, detail in wps.absence_and_control(
+        for ok, label, detail in _absence_pair(
                 pkt1, ascii_to_petscii(MARKER_HOST),
                 {"marker_host": MARKER_HOST}, "[host->C64] ",
                 body_source="the exact bytes handed to encrypt_transport"):
@@ -530,7 +552,7 @@ def build_probe():
             check(len(pkt) == n + T4_HDR_LEN + 16,
                   f"[in {n}] datagram we transmit is {n + T4_HDR_LEN + 16} B",
                   f"got {len(pkt)} B")
-            for ok, label, detail in wps.absence_and_control(
+            for ok, label, detail in _absence_pair(
                     pkt, ascii_to_petscii(text), {"tail": tail},
                     f"[in {n}] ",
                     body_source="the exact bytes handed to encrypt_transport"):

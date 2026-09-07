@@ -110,6 +110,17 @@ def leg_b(seed: int) -> None:
                                             "[host->C64] ")
     check(ctrl[0], ctrl[1], ctrl[2])
     check(absence[0], absence[1], absence[2])
+    # The count in that PASS line is what a reader trusts about coverage,
+    # so it is asserted rather than printed: five branches, but for an
+    # uppercase marker petscii_form is the identity, so FOUR distinct
+    # patterns are searched.
+    distinct = len(set(wps.needle_forms(text).values()))
+    check(f"in {distinct} distinct encoding(s)" in absence[2]
+          and distinct == 4,
+          "the absence line reports the number of DISTINCT patterns "
+          "searched, not the number of branches",
+          f"{distinct} distinct of {len(wps.needle_forms(text))} branches; "
+          f"detail: {absence[2]}")
 
     # --- C64 -> host, the shape sections 1 and 1b assert over -------------
     # The initiator stands in for the C64: its Type-4 is built by the same
@@ -151,6 +162,31 @@ def leg_b(seed: int) -> None:
           "the control is payload-sensitive: one flipped byte inside the "
           "counterfactual marker turns it RED",
           f"byte {len(bent_body) // 2} of {len(bent_body)}; {ctrl_bent[2]}")
+
+    # THE INDEPENDENT ORACLE for screen codes: the live tool's own
+    # `_screen_text`, which decodes $0400 for the "the C64 DECRYPTED it"
+    # half of the claim. It was written for a different purpose by a
+    # different path, so it cannot be bent to agree with screen_code_form.
+    # Round-tripping every printable byte through both is what makes the
+    # form assert something about the ENCODING rather than about itself.
+    class _FakeScreen:
+        def __init__(self, data): self.data = data
+        def read_memory(self, addr, n):
+            assert (addr, n) == (0x0400, 1000)
+            return (self.data + b"\x20" * 1000)[:1000]
+
+    probe_bytes = bytes(range(0x20, 0x80))
+    decoded = live._screen_text(_FakeScreen(wps.screen_code_form(probe_bytes)))
+    mismatch = [(hex(b), decoded[i], chr(b).upper())
+                for i, b in enumerate(probe_bytes)
+                if decoded[i] != "." and decoded[i] != chr(b).upper()]
+    resolved = sum(1 for i, b in enumerate(probe_bytes) if decoded[i] != ".")
+    check(not mismatch and resolved >= 26 + 10 + 1,
+          "screen_code_form round-trips through the live tool's OWN "
+          "_screen_text decoder",
+          f"{resolved}/{len(probe_bytes)} bytes decode back to themselves "
+          f"(the rest are the ones _screen_text renders '.'); "
+          f"mismatches: {mismatch[:6]}")
 
     # The screen-code encoding, end to end through the pair: a datagram
     # carrying the marker as $01-$1A must NOT pass the absence arm. Before
@@ -248,14 +284,39 @@ def leg_c(seed: int) -> None:
               "haystack reports a CLEAN ABSENCE",
               f"absent={ok}; {detail}")
 
+    # M5/M6 -- the two mutations that USED to pass. Breaking
+    # screen_code_form (off by one; nonsense) left the whole suite at
+    # 41/41 while DELETING the form alarmed, because every check of it
+    # built its haystack by calling it. They are kept here so that can
+    # never come back: each must make the selftest's screen-code rows red.
+    def _screen_rows():
+        return [(ok, label) for ok, label, _ in wps.selftest()
+                if "screen" in label]
+
+    for name, fn in (
+            ("M5 off-by-one",
+             lambda n: bytes((b - 0x41) if 0x41 <= b <= 0x5A else b for b in n)),
+            ("M6 nonsense",
+             lambda n: bytes(((b - 0x40 + 0x60) & 0xFF) if 0x41 <= b <= 0x5A
+                             else b for b in n))):
+        with _Mutation(name, "screen_code_form", fn):
+            rows = _screen_rows()
+            check(bool(rows) and not all(ok for ok, _ in rows),
+                  f"{name}: a WRONG screen-code mapping is caught, not just "
+                  f"a missing one",
+                  f"{[label for ok, label in rows if not ok]}")
+
     # M4 -- an empty buffer. Absence over nothing is the purest vacuous
     # pass and must raise rather than report clean.
     try:
         wps.plaintext_absent(b"", needles)
         check(False, "M4 empty buffer: the search REFUSES",
               "returned a verdict instead of raising")
-    except wps.VacuousSearchError as exc:
-        check(True, "M4 empty buffer: the search REFUSES", str(exc))
+    except Exception as exc:                                  # noqa: BLE001
+        check(isinstance(exc, wps.VacuousSearchError)
+              and "nothing was searched" in str(exc),
+              "M4 empty buffer: the search REFUSES",
+              f"{type(exc).__name__}: {exc}")
 
     ok_ctrl, ok_abs, _ = arms()
     check(ok_ctrl and ok_abs,
@@ -274,6 +335,34 @@ def leg_d(seed: int) -> None:
           "would only prove the copy works")
     check(getattr(live, "wps", None) is wps,
           "the live tool's `wps` is this module")
+
+    # The four absence assertions go through _absence_pair, which must
+    # DELEGATE (not reimplement) on the normal path and must turn a
+    # refusal into scored FAILs rather than a traceback mid-hardware-run.
+    pair_fn = getattr(live, "_absence_pair", None)
+    hdr = bytes([4, 0, 0, 0]) + b"\x01\x02\x03\x04" + b"\x00" * 8
+    text = live.random_words(seed + 41, live.REPLY_ALPHABET)
+    body = text.encode("ascii")
+    dgram = hdr + bytes((b * 29 + 5) & 0xFF for b in range(len(body) + 16))
+    if pair_fn is None:
+        check(False, "the live tool's absence calls go through a wrapper "
+                     "that scores a refused search", "no _absence_pair")
+    else:
+        check(pair_fn(dgram, body, {"m": text}, "")
+              == wps.absence_and_control(dgram, body, {"m": text}, ""),
+              "on the normal path _absence_pair returns exactly what the "
+              "searcher returns", "delegation, not a second implementation")
+        # A header-only datagram: the search is impossible, so the marker
+        # must NOT come back "absent".
+        try:
+            rows = pair_fn(hdr, body, {"m": text}, "[torn] ")
+        except Exception as exc:                              # noqa: BLE001
+            rows, why = [], f"raised {type(exc).__name__}: {exc}"
+        else:
+            why = f"{[(ok, l) for ok, l, _ in rows]}"
+        check(len(rows) == 2 and not any(ok for ok, _l, _d in rows)
+              and "NOT ASSERTED" in rows[1][2],
+              "a refused search lands as scored FAILs, not a traceback", why)
 
     builders = {name: getattr(live, f"_build_marker_{key}", None)
                 for name, key in (("MARKER_HOST", "host"),
