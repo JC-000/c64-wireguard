@@ -1640,6 +1640,9 @@ def _wait_boot_ready(tr: Ultimate64Transport, L: dict, timeout: float = BOOT_TIM
     while time.monotonic() < deadline:
         if tr.read_memory(addr, 1)[0] == 1:
             log.info("boot complete — boot_ready=1")
+            if "x25519_reu_fault" in L:
+                fault = tr.read_memory(L["x25519_reu_fault"], 1)[0]
+                log.info("x25519_reu_fault=$%02X (MEASURED at boot)", fault)
             return
         time.sleep(0.25)
     raise RuntimeError(f"boot_ready never set within {timeout}s")
@@ -2563,8 +2566,18 @@ def main(argv: Optional[list[str]] = None) -> int:
                 enable_uci(client)
                 time.sleep(0.5)
 
-        set_reu(client, False)
-        log.warning("REU DETACHED (REU=0 build)")
+        want_reu = os.environ.get("WARP_REU", "0") == "1"
+        set_reu(client, want_reu)
+        time.sleep(3.0)
+        from c64_test_harness.backends.ultimate64_helpers import get_reu_config
+        reu_en, reu_size = get_reu_config(client)
+        if reu_en != want_reu:
+            log.error("REU did not stick: wanted %s, device reports %s",
+                      want_reu, reu_en)
+            return 1
+        log.warning("REU %s (read-back: enabled=%s size=%s)",
+                    "ATTACHED (REU=1 build)" if want_reu
+                    else "DETACHED (REU=0 build)", reu_en, reu_size)
         time.sleep(0.5)
         if args.backend == "uci":
             set_turbo_mhz(client, args.turbo)
