@@ -579,10 +579,20 @@ def main() -> int:
     if os.environ.get("U64_ALLOW_MUTATE") != "1":
         live._skip("U64_ALLOW_MUTATE != 1 — this test mutates the device")
 
-    # The REU build is broken at 48 MHz on fw 3.15 (#69), and _build_uci()
-    # runs unconditionally at tool start unless C64_SKIP_BUILD is set — so
-    # without this it would happily replace a correct REU=0 binary with the
-    # REU one. C64_SKIP_BUILD=1 still wins if the caller wants the tree as-is.
+    # #69 is FIRMWARE-CONDITIONAL, so state the condition rather than the
+    # blanket claim this comment used to make ("the REU build is broken at
+    # 48 MHz on fw 3.15"). It failed on fw 3.15; it does not reproduce on
+    # fw 4011c97c (measured 2026-09-07, two handshakes at 48 MHz, zero
+    # decrypt_failed), and a pre-settle separating run was 6/6 green there,
+    # which attributes the difference to the firmware. 6/6 bounds an
+    # intermittent fault loosely rather than excluding one.
+    #
+    # REU=0 stays pinned here for a reason that does not depend on any of
+    # that: it is ~1.9x faster at turbo (47.7 s vs 89.0 s to SESSION_ACTIVE,
+    # same-day A/B), and _build_uci() runs unconditionally at tool start
+    # unless C64_SKIP_BUILD is set — so without this it would happily
+    # replace a correct REU=0 binary with the REU one. C64_SKIP_BUILD=1
+    # still wins if the caller wants the tree as-is.
     os.environ.setdefault("C64_REU", "0")
 
     if args.soak:

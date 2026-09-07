@@ -16,6 +16,7 @@ VICE instances compete for CPU during boot.
 
 import hashlib
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -114,6 +115,11 @@ TESTS = [
     # not take on demand — a real device that resets correctly cannot
     # demonstrate the alarm. Device-free, milliseconds.
     ("teardown",       ["tools/test_device_teardown.py"]),
+    # Issue #98. Asserts the ARM test_wire_encryption_live's default
+    # invocation selects. Running the tool for real proves the arm the
+    # runner configured, which is exactly how this went unnoticed: the
+    # people who run it are the people who already override the default.
+    ("wire_enc_arm",   ["tools/test_wire_encryption_defaults.py"]),
     # Issue #109. Enforcement for the cold-init trap that #107 created and
     # that has now caught three suites (type2_slow, hs_recovery, issue_94),
     # every one by copy-paste from a sibling that predated the reclaim.
@@ -607,10 +613,66 @@ def self_check():
         print("  PASS  a failing restore build is reported (by its return "
               "code, with the PRG present) and a succeeding one is not")
 
+    # (4) THE SUITE COUNT IN THE DOCS MUST MATCH THE LISTS.
+    #
+    # Not a gate defect like the three above — a documentation one, added
+    # because it has now gone stale five times. The number is written in
+    # README.md and in docs/library-ingestion-architecture.md, and every
+    # branch that adds a suite is a branch whose author reads "46",
+    # increments to 47, and is wrong because someone else added one in the
+    # meantime. That happened again this week: master went 46 -> 47 while a
+    # branch adding two suites was told to expect 48.
+    #
+    # The fix is not to be more careful. It is to make the number a
+    # BUILD-CHECKED FACT: count the lists, find every written figure, and
+    # fail if they disagree. Increment-not-recount then cannot survive a
+    # gate run.
+    total = len(TESTS) + len(SERIAL_TESTS)
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    count_claims = [
+        (os.path.join(root, "README.md"),
+         re.compile(r"All (\d+) suites")),
+        (os.path.join(root, "docs", "library-ingestion-architecture.md"),
+         re.compile(r"must pass \((\d+) suites")),
+    ]
+    seen_any = False
+    for path, pat in count_claims:
+        try:
+            with open(path) as fh:
+                text = fh.read()
+        except OSError as exc:
+            print(f"  FAIL  cannot read {os.path.relpath(path, root)} to "
+                  f"check its suite count ({exc})")
+            failed += 1
+            continue
+        hits = pat.findall(text)
+        if not hits:
+            # A claim that vanished is as much a problem as a wrong one:
+            # this check would otherwise pass vacuously once someone
+            # reworded the sentence.
+            print(f"  FAIL  no suite-count claim found in "
+                  f"{os.path.relpath(path, root)} — the pattern this "
+                  f"check pins has been reworded, so it is now guarding "
+                  f"nothing. Re-derive it.")
+            failed += 1
+            continue
+        seen_any = True
+        for h in hits:
+            if int(h) != total:
+                print(f"  FAIL  {os.path.relpath(path, root)} says {h} "
+                      f"suites; the lists hold {len(TESTS)} + "
+                      f"{len(SERIAL_TESTS)} = {total}. COUNT, do not "
+                      f"increment.")
+                failed += 1
+    if seen_any and not failed:
+        print(f"  PASS  every written suite count matches the lists "
+              f"({len(TESTS)} + {len(SERIAL_TESTS)} = {total})")
+
     if failed:
         print(f"\n{failed} gate self-check(s) failed.")
         return 1
-    print("\nAll three gate defects stay fixed.")
+    print("\nAll three gate defects stay fixed, and the documented suite "
+          "count matches the lists.")
     return 0
 
 

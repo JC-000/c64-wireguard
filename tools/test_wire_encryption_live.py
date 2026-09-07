@@ -642,11 +642,97 @@ def main() -> int:
         return 2
 
     os.environ.setdefault("U64_ALLOW_MUTATE", "1")
+
+    # ── PIN THE BUILD AND THE REU. Issue #98.
+    #
+    # This tool used to pass neither, so it inherited C64_REU=1 from
+    # test_uci_udp_echo_live and --reu on from test_uci_handshake_live, and
+    # its default invocation was REU + REU-attached + 48 MHz. Every green
+    # this tool ever recorded was obtained by an operator overriding that,
+    # so its passing history described what its operators typed, not what
+    # the tool does. Someone running it plainly got a different arm from
+    # the one the greens were measured on, and nothing said so.
+    #
+    # WHY REU=0 IS THE DEFAULT, and what the reason is NOT. It is no longer
+    # "the REU arm is broken". #69's fault does not reproduce on firmware
+    # 4011c97c: measured 2026-09-07, the REU arm at 48 MHz completed two
+    # full WireGuard handshakes against Cloudflare WARP with 20/20 DNS
+    # queries decrypted, zero decrypt_failed, and x25519_reu_fault reading
+    # $00 at both 1 MHz and 48 MHz. A separating run with the pre-settle
+    # library pins on the same firmware was 3/3 green, 6/6 handshakes, zero
+    # InvalidTag — so the FIRMWARE, not the settle, accounts for #69.
+    #
+    # 6/6 bounds an intermittent fault loosely; it does not exclude one,
+    # and #69's original signature was intermittent. This comment does not
+    # say the settle was unnecessary.
+    #
+    # The reason is SPEED, and it is measured: a controlled A/B with the
+    # same tool, peer, clock and day, differing only in build, reached
+    # SESSION_ACTIVE in 89.0 s with REU=1 and 47.7 s with REU=0. REU is
+    # ~1.9x SLOWER at turbo — the REU's DMA is a floor that does not scale
+    # with the CPU clock, so the onchip path overtakes it above ~1 MHz.
+    # A default that takes twice as long for no measured benefit is the
+    # wrong default.
+    #
+    # C64_SKIP_BUILD=1 still wins if the caller wants the tree as it
+    # stands, and an operator wanting the REU arm sets C64_REU=1 and passes
+    # --reu on. Both are then VISIBLE in the banner below.
+    os.environ.setdefault("C64_REU", "0")
+    reu_env = os.environ["C64_REU"]
+    reu_arg = "on" if reu_env == "1" else "off"
+
+    # State the configuration this run is actually under, in the run's own
+    # output. #98's second point: a green that does not record its arm
+    # cannot be told apart from a green measured on a different one. The
+    # PRG fingerprint guard in test_uci_handshake_live then refuses the
+    # combinations that cannot work, so a mismatch between this banner and
+    # the built image is a skip rather than a wrong result.
+    print(f"Configuration: C64_REU={reu_env} (--reu {reu_arg}) "
+          f"turbo={args.turbo} MHz"
+          + ("  [C64_SKIP_BUILD=1: using the tree as it stands]"
+             if os.environ.get("C64_SKIP_BUILD") == "1" else ""),
+          flush=True)
+
+    # WARN, DO NOT REFUSE — and say why, because #98 proposed a refusal.
+    #
+    # The measurement that reopened this arm is FIRMWARE-CONDITIONAL: #69
+    # failed on fw 3.15 and does not reproduce on fw 4011c97c. An operator
+    # still on the older firmware who asks for REU=1 gets #69 back, and a
+    # refusal is what #98 wanted for exactly that person.
+    #
+    # A refusal is nonetheless the wrong instrument here, for two reasons
+    # that are about what we can honestly encode:
+    #
+    #   * We have two firmware data points and no boundary between them. A
+    #     refusal has to name a predicate ("fw >= 3.15"), and the only one
+    #     we could write would refuse 4011c97c — a combination measured
+    #     WORKING. A guard that refuses a working configuration teaches
+    #     operators to bypass guards, which costs more than this buys.
+    #   * The exposure a refusal was protecting has mostly gone anyway: the
+    #     default is now REU=0, so reaching this arm takes a deliberate
+    #     C64_REU=1. That is someone who has chosen the REU path, not
+    #     someone who fell into it, and the failure is loud (InvalidTag /
+    #     a handshake that never completes) rather than silent.
+    #
+    # So: name #69, name the firmware the null was measured on, and let
+    # them proceed. If the boundary is ever established, this becomes a
+    # refusal keyed on it.
+    if reu_arg == "on" and args.turbo > 1:
+        print(f"WARNING: REU build with the REU attached at {args.turbo} MHz "
+              f"is issue #69's combination. It FAILED on fw 3.15 and did NOT "
+              f"reproduce on fw 4011c97c (2026-09-07: 2 handshakes, 20/20 "
+              f"DNS decrypted, zero decrypt_failed; a pre-settle separating "
+              f"run was 6/6 green there). 6/6 bounds an intermittent fault "
+              f"loosely, it does not exclude one. Check your firmware "
+              f"before reading an InvalidTag here as a regression in "
+              f"something you changed. C64_REU=0 is the default and is "
+              f"~1.9x faster at turbo besides.", flush=True)
+
     import test_uci_handshake_live as live
     live.post_session_hook = build_probe()
     try:
         return live.main(["--chat", "--host", args.host,
-                          "--turbo", str(args.turbo)])
+                          "--turbo", str(args.turbo), "--reu", reu_arg])
     finally:
         # live.main() has released the lock by now, so this teardown takes
         # its own — every write to a shared device is serialised.
