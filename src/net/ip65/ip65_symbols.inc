@@ -9,9 +9,9 @@
 ; defined here. Matching ABI in c64-https/src/net/ip65/ip65_symbols.inc,
 ; but with UDP entry points instead of TCP.
 ;
-; Source of truth: /home/someone/c64-wireguard/src/constants.asm
-; (migrated during Phase 1; constants.asm will keep these until Phase 4
-; when the ACME build is retired).
+; Source of truth: this file. The values originated in the ACME-era
+; src/constants.asm, which was retired with the ACME build; nothing
+; mirrors them any more.
 
 ; --- ip65 ZP overlap zone (26 bytes: $02-$1B) ---
 ip65_zp_start   = $02

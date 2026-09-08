@@ -2,7 +2,7 @@
 ; ip65_stub.s - ip65 UDP + RR-Net wrapper with fixed jump table at $2000
 ;
 ; Assembled with ca65, linked with ld65 against ip65.lib + ip65_c64.lib.
-; Produces a raw binary at $2000 for inclusion in ACME via !binary.
+; Produces a raw binary at $2000, .incbin'd by src/net/ip65/ip65_blob.s.
 ;
 ; Jump table at $2000 with 3-byte JMP entries at fixed offsets.
 ; Variable table follows with addresses of ip65 state we expose.
@@ -44,7 +44,7 @@
 .segment "ONCE"
 
 ; =============================================================================
-; Jump table at $2000 — 3-byte JMP entries, called from ACME code
+; Jump table at $2000 — 3-byte JMP entries, called from WG code
 ; =============================================================================
 .segment "JUMPTAB"
 
@@ -61,7 +61,7 @@ jmp wrap_set_udp_callback   ; $2018 +24  AX=callback addr
 jmp wrap_set_udp_dest       ; $201B +27  set dest IP from AX ptr
 
 ; Variable address table follows immediately
-; Each entry is a 2-byte address (lo/hi) — ACME reads from known offsets
+; Each entry is a 2-byte address (lo/hi) — WG code reads from known offsets
 .word cfg_mac               ; +30  -> 6 bytes MAC
 .word cfg_ip                ; +32  -> 4 bytes IP
 .word cfg_netmask           ; +34  -> 4 bytes netmask
