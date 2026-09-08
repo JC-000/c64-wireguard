@@ -458,9 +458,11 @@ def main():
         # These are removed only because `make` below regenerates them; do
         # not add a removal ahead of a build step that can fail to produce a
         # replacement. This block used to delete them and then shell out to
-        # `acme main.asm`, a toolchain and a file that no longer exist, so
-        # running this suite standalone destroyed the build tree and then
-        # exited 1. Build the same way every other suite does.
+        # `acme main.asm`. main.asm has not existed since the ACME pipeline
+        # was retired at Phase 6, so running this suite standalone destroyed
+        # the build tree and then exited 1 (acme itself may well be installed
+        # -- it just has nothing here left to assemble). Build the way every
+        # other suite does.
         build_dir = os.path.join(PROJECT_ROOT, "build")
         for f in ["wireguard.prg", "labels.txt"]:
             path = os.path.join(build_dir, f)
