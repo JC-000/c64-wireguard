@@ -754,7 +754,7 @@ def main():
     # Build
     if not os.environ.get("C64_SKIP_BUILD"):
         print("Building...")
-        # Only clean ACME outputs, not ip65 binary (may not be rebuildable)
+        # Only clean the linker outputs, not the ip65 blob (may not be rebuildable)
         build_dir = os.path.join(PROJECT_ROOT, "build")
         for f in ["wireguard.prg", "labels.txt"]:
             p = os.path.join(build_dir, f)

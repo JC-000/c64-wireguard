@@ -452,18 +452,23 @@ def main():
     # Build (skip if run_regression.py already built)
     if not os.environ.get("C64_SKIP_BUILD"):
         print("Building...")
-        # Clean only the ACME output, not ip65
-        for f in [os.path.join(PROJECT_ROOT, "build", "wireguard.prg"),
-                  os.path.join(PROJECT_ROOT, "build", "labels.txt")]:
-            if os.path.exists(f):
-                os.remove(f)
-        os.makedirs(os.path.join(PROJECT_ROOT, "build"), exist_ok=True)
-        # Build just the ACME part (ip65-c64.bin must already exist)
-        result = subprocess.run(
-            ["acme", "-f", "cbm", "-o", "../build/wireguard.prg",
-             "--vicelabels", "../build/labels.txt", "main.asm"],
-            capture_output=True, text=True,
-            cwd=os.path.join(PROJECT_ROOT, "src"))
+        # Clean only the linker outputs, not the ip65 blob (rebuilding it
+        # needs the ip65 submodule, which may not be present).
+        #
+        # These are removed only because `make` below regenerates them; do
+        # not add a removal ahead of a build step that can fail to produce a
+        # replacement. This block used to delete them and then shell out to
+        # `acme main.asm`, a toolchain and a file that no longer exist, so
+        # running this suite standalone destroyed the build tree and then
+        # exited 1. Build the same way every other suite does.
+        build_dir = os.path.join(PROJECT_ROOT, "build")
+        for f in ["wireguard.prg", "labels.txt"]:
+            path = os.path.join(build_dir, f)
+            if os.path.exists(path):
+                os.remove(path)
+        os.makedirs(build_dir, exist_ok=True)
+        result = subprocess.run(["make"], capture_output=True, text=True,
+                                cwd=PROJECT_ROOT)
         if result.returncode != 0:
             print(f"Build failed:\n{result.stderr}")
             sys.exit(1)
