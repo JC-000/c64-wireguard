@@ -10,7 +10,7 @@
 ; `labels[\"b2s_data_ptr\"]` etc.) must be listed here. Missing a symbol
 ; causes `FATAL: 'X' label not found in labels.txt` from the test harness.
 ;
-; The ACME build emits all equates automatically via `--vicelabels`, so
+; The ACME build emitted all equates automatically via `--vicelabels`, so
 ; this file has no ACME counterpart.
 ; =============================================================================
 
