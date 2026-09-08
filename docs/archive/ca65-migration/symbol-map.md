@@ -1,9 +1,19 @@
+> **ARCHIVED — HISTORICAL RECORD, NOT CURRENT.**
+>
+> This is a record of the completed ACME → ca65 migration, which finished at
+> Phase 6. The ACME pipeline is retired and no `.asm` source is tracked in this
+> repository. This file is **not maintained** and **must not be cited as the
+> source of truth** for anything. The current source of truth for exported
+> symbol names is the `.inc` ABI headers under `src/` (and, for what a given
+> build actually exports, `build/labels.txt`). Read what follows as the rename
+> table used during the migration, frozen at the moment it completed.
+
 # ACME → ca65 Symbol Rename Map
 
-This document is the authoritative source of truth for Phase 3 crypto
-migration. Every public symbol the wireguard ca65 build exports must
-appear here; anything missing must be added before that module's
-migration PR is merged.
+At the time of writing, this document was the authoritative source of truth
+for the Phase 3 crypto migration: every public symbol the wireguard ca65
+build exported had to appear here, and anything missing had to be added
+before that module's migration PR was merged. That process is over.
 
 **Goal:** align WG's in-tree crypto symbol names with the sibling
 libraries (`c64-x25519`, `c64-ChaCha20-Poly1305`) so a future swap to

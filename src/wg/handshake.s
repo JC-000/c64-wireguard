@@ -3,8 +3,11 @@
 ;
 ; ca65 port of src/handshake.asm. Mechanical translation only:
 ;   - ACME directives -> ca65 directives
-;   - fe_*   crypto calls  -> fe25519_*   (symbol-map.md rename)
-;   - kdf_N  crypto calls  -> blake2s_kdf_N (symbol-map.md rename)
+;   - fe_*   crypto calls  -> fe25519_*     (migration-era rename)
+;   - kdf_N  crypto calls  -> blake2s_kdf_N (migration-era rename)
+; The renames are recorded in the archived, non-authoritative
+; docs/archive/ca65-migration/symbol-map.md; the live names come from
+; src/crypto_abi.inc.
 ;
 ; Generates 148-byte Type 1 initiation packet.
 ; Parses 92-byte Type 2 response and derives transport keys.
@@ -50,7 +53,8 @@
 .export hs_hs_empty
 
 ; ---- External symbols -------------------------------------------------------
-; Crypto subroutines (renamed per symbol-map.md):
+; Crypto subroutines (names per src/crypto_abi.inc; renamed during the
+; migration -- see the archived symbol-map.md for the old spellings):
 ;   kdf_N  -> blake2s_kdf_N
 .import blake2s_init
 .import blake2s_update
@@ -75,7 +79,7 @@
 ; WG helpers (defined in other wg/*.s modules)
 .import hs_set_mac2
 
-; ---- Data buffers (defined in data.asm / future data.s) ---------------------
+; ---- Data buffers (defined in src/wg/data.s) -------------------------------
 ; Handshake state
 .import hs_c
 .import hs_h

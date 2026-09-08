@@ -15,7 +15,11 @@
 ; `.import`ed names. Phase 4 higher-level modules (handshake, transport,
 ; session) should use THIS file to stay future-swap-ready.
 ;
-; Source of truth for symbol names: docs/ca65-migration/symbol-map.md
+; Source of truth for symbol names: THIS file and the sibling ABI headers
+; it mirrors (src/x25519.inc, the chacha20poly1305 library's headers); for
+; what a given build actually exports, build/labels.txt. The historical
+; rename table from the retired ACME->ca65 migration is archived at
+; docs/archive/ca65-migration/symbol-map.md and is NOT authoritative.
 ; =============================================================================
 
 ; --- X25519 / fe25519 (c64-x25519 library ABI) ---

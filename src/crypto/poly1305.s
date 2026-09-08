@@ -31,7 +31,7 @@
 .export poly_prod_lo
 .export poly_prod_hi
 
-; --- Mutable state defined in data.asm (still ACME during migration) ---
+; --- Mutable state defined in src/wg/data.s ---
 .import poly_r
 .import poly_s
 .import poly_h

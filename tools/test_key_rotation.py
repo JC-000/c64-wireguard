@@ -452,18 +452,27 @@ def main():
     # Build (skip if run_regression.py already built)
     if not os.environ.get("C64_SKIP_BUILD"):
         print("Building...")
-        # Clean only the ACME output, not ip65
-        for f in [os.path.join(PROJECT_ROOT, "build", "wireguard.prg"),
-                  os.path.join(PROJECT_ROOT, "build", "labels.txt")]:
-            if os.path.exists(f):
-                os.remove(f)
-        os.makedirs(os.path.join(PROJECT_ROOT, "build"), exist_ok=True)
-        # Build just the ACME part (ip65-c64.bin must already exist)
-        result = subprocess.run(
-            ["acme", "-f", "cbm", "-o", "../build/wireguard.prg",
-             "--vicelabels", "../build/labels.txt", "main.asm"],
-            capture_output=True, text=True,
-            cwd=os.path.join(PROJECT_ROOT, "src"))
+        # Build FIRST and delete NOTHING. `make` relinks build/wireguard.prg
+        # and build/labels.txt whenever they are out of date, so a pre-delete
+        # buys nothing -- and it costs the whole build tree when the build
+        # cannot run at all.
+        #
+        # Two generations of this block got that wrong. It first deleted both
+        # and shelled out to `acme main.asm`, gone since the ACME pipeline was
+        # retired at Phase 6. Replacing acme with `make` did NOT make the
+        # delete safe: bare `make` defaults to BACKEND=ip65 (Makefile:10),
+        # whose $(IP65_BIN) prerequisite `ip65-libs` cd's into the `ip65`
+        # symlink and exits 1 when it is absent -- and ip65-build/ip65-c64.bin
+        # is untracked, so that is the ordinary fresh-checkout case, i.e. the
+        # exact condition the old comment named as the reason not to touch
+        # the blob.
+        #
+        # The rule, in general: never remove an artefact ahead of a step that
+        # can fail to replace it. A missing file announces itself at the next
+        # consumer; a stale or truncated one does not, and sends whoever runs
+        # next hunting in the wrong place.
+        result = subprocess.run(["make"], capture_output=True, text=True,
+                                cwd=PROJECT_ROOT)
         if result.returncode != 0:
             print(f"Build failed:\n{result.stderr}")
             sys.exit(1)

@@ -690,6 +690,37 @@ def main():
         sys.exit(1)
     print("Build OK\n")
 
+    # WHAT THIS GATE PINS, AND WHAT THAT COSTS.
+    #
+    # The build above runs once; every suite below is then told to skip its
+    # own. That is right for runtime -- rebuilding per suite would dominate
+    # the gate -- but it has a consequence worth stating where someone
+    # looking for "what does the gate cover" will read it:
+    #
+    #   C64_SKIP_BUILD is PINNED to "1" here, for both pools. So every
+    #   `if not os.environ.get("C64_SKIP_BUILD")` block in tools/ is dead
+    #   code from this gate's point of view. A fully green run says NOTHING
+    #   about any of them.
+    #
+    # That is not hypothetical. tools/test_key_rotation.py spent the whole
+    # ACME era deleting build/wireguard.prg and build/labels.txt inside that
+    # block and then invoking a toolchain whose input file no longer existed;
+    # standalone it destroyed the build tree and exited 1, and the gate was
+    # green over it throughout. Its first repair was destructive too, for a
+    # different reason, and the gate could not see that either.
+    #
+    # The general form, which is the useful one: the gate runs ONE
+    # configuration, so any behaviour selected by a variable it PINS is
+    # untested by construction. BACKEND and REU are SWEPT, which is why
+    # defects there get caught here. C64_SKIP_BUILD is not. When auditing
+    # coverage, ask what this gate pins and what runs at the other value --
+    # not merely what it runs.
+    #
+    # The build paths are verified instead by standalone runs with the
+    # variable unset (and, for the destructive class, with the ip65 symlink
+    # removed, which is the fresh-checkout case that breaks them). If you
+    # change a build block in tools/, a green gate is not evidence: run that
+    # tool standalone.
     env = os.environ.copy()
     env["C64_SKIP_BUILD"] = "1"
 
