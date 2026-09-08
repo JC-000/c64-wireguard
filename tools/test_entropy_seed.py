@@ -589,11 +589,14 @@ def main():
 
     if not os.environ.get("C64_SKIP_BUILD"):
         print("Building...")
-        build_dir = os.path.join(PROJECT_ROOT, "build")
-        for name in ("wireguard.prg", "labels.txt"):
-            path = os.path.join(build_dir, name)
-            if os.path.exists(path):
-                os.remove(path)
+        # Build FIRST and delete NOTHING. `make` relinks both artefacts
+        # whenever they are out of date, so pre-deleting them buys nothing --
+        # and it destroys the build tree when the build cannot run at all.
+        # Bare `make` defaults to BACKEND=ip65 (Makefile:10), whose
+        # ip65-libs prerequisite cd's into the `ip65` symlink and exits 1
+        # when it is absent, which is the ordinary fresh-checkout case.
+        # Never remove an artefact ahead of a step that can fail to replace
+        # it: a missing file announces itself, a stale one does not.
         result = subprocess.run(["make"], capture_output=True, text=True,
                                 cwd=PROJECT_ROOT)
         if result.returncode != 0:
