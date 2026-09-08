@@ -343,6 +343,22 @@ endif
 
 .PHONY: all clean run ip65-libs release
 
+# If a recipe fails AFTER its target file has been written, delete the
+# target. Without this, a link that dies partway (disk full, an ld65 error
+# raised after the output is opened, an interrupted sed rewrite of
+# $(LABELS)) leaves a wireguard.prg or labels.txt that is present, the
+# right shape, and wrong. Every consumer here tests existence, not
+# integrity -- tools/test_key_rotation.py:477 and its siblings assert
+# `os.path.exists(PRG_PATH)`, and a C64_SKIP_BUILD=1 run loads whatever it
+# finds -- so a torn artefact is not caught at the build, it is caught
+# three suites later as an unrelated-looking failure. A missing file
+# announces itself; a truncated one does not.
+#
+# Make's default is to keep the partial target, which then looks
+# up-to-date to the next `make` and is never rebuilt. This is one line and
+# it removes that whole class.
+.DELETE_ON_ERROR:
+
 # `make` produces build/wireguard.prg + build/labels.txt via ca65/ld65.
 # The legacy ACME pipeline was retired after Phase 6 (see git log for
 # the migration history).
