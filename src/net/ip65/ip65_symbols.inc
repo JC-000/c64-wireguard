@@ -9,9 +9,19 @@
 ; defined here. Matching ABI in c64-https/src/net/ip65/ip65_symbols.inc,
 ; but with UDP entry points instead of TCP.
 ;
-; Source of truth: this file. The values originated in the ACME-era
-; src/constants.asm, which was retired with the ACME build; nothing
-; mirrors them any more.
+; Where these values come from, and what checks them:
+;   - jump-table and variable-table OFFSETS: ip65-build/ip65_stub.s, which
+;     defines the table this file indexes into.
+;   - the DIRECT ABSOLUTE addresses below: ip65-build/ip65-c64.map, the
+;     ld65 map for the blob. They are linker outputs, so anything that
+;     changes the blob's link can move them.
+; This file is a HAND-MAINTAINED MIRROR of both, and NOTHING VERIFIES IT --
+; no build step, no test compares these equates against the stub or the map.
+; Re-derive them from those two files after any change to the blob; a stale
+; absolute here assembles cleanly and reads the wrong memory at run time.
+;
+; (The pre-ca65 header named src/constants.asm as the source. That file was
+; retired with the ACME build and is not the source of anything.)
 
 ; --- ip65 ZP overlap zone (26 bytes: $02-$1B) ---
 ip65_zp_start   = $02

@@ -1,7 +1,10 @@
 ; src/net/ip65/ip65_blob.s — ca65 wrapper around the pre-built ip65 binary.
 ;
-; The ip65 library is built by this repository's Makefile (ca65/ld65, see
-; the $(IP65_BIN) rule) into
+; The blob is LINKED by this repository's Makefile ($(IP65_BIN): ca65 on
+; ip65-build/ip65_stub.s, then ld65). Its INPUTS are not ours: the
+; ip65/ip65.lib, drivers/ip65_c64.lib and c64.lib it links against are
+; built by the `ip65-libs` target via `make -C ip65`, i.e. by ip65's own
+; cc65 pipeline. The result lands at
 ;   ip65-build/ip65-c64.bin
 ; which is a WG-specific UDP-only blob pre-linked at $2000 (jump table
 ; at $2000, code+data through $32EE, BSS at $A000-$AF3F). This wrapper
