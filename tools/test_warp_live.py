@@ -2826,7 +2826,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         log.error("device %s not reachable: %s", args.host, probe.error)
         return 1
     log.info("probe: %s", probe)
-    # Build IDENTITY from /v1/info (read-only, pre-lock). Not a gate: the
+    # Build IDENTITY from /v1/info (read-only, INSIDE the lock -- see :2847). Not a gate: the
     # chunked send path's $8E is the behavioural check — see u64_firmware.
 
     lock = DeviceLock(args.host)

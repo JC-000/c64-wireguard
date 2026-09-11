@@ -683,6 +683,13 @@ def _hand_back_to_c64(tr: Ultimate64Transport, L: dict[str, int],
 # combinatorial cost (see above) that a per-hook attribute does not pay.
 post_session_hook = None
 
+#: Whether main() runs the shared teardown (clock, REU, verified reset) before
+#: releasing the lock. True for every caller EXCEPT wg_chat, which attaches to
+#: a machine a human is sitting in front of: resetting it on Ctrl-C would
+#: destroy the session that is the tool's whole purpose (wg_chat.py:53-67,
+#: issue #134). A caller that opts out owns its own restore.
+post_session_teardown = True
+
 
 def wants_trampoline(fn):
     """Mark a post_session_hook that must keep host trampoline control.
@@ -843,6 +850,11 @@ def main(argv: list[str] | None = None) -> int:
     log.info("host=%s local_ip=%s responder_port=%d", args.host, local_ip, rt.port)
 
     rc = 1
+    # Bound before the try so the teardown in `finally` can test it: the
+    # client is constructed further down, and an exception before that
+    # point would otherwise raise NameError out of the cleanup and replace
+    # the traceback that says what actually went wrong.
+    client = None
     lock = DeviceLock(args.host)
     try:
         # 120s is the new "ad-hoc work" ceiling per c64-test skill (the
@@ -1193,8 +1205,34 @@ def main(argv: list[str] | None = None) -> int:
         try:
             rt.stop()
             rt.join(timeout=2.0)
-        except Exception:
+        except BaseException:
+            # BaseException, not Exception: a second Ctrl-C landing in the
+            # 2 s join() would otherwise propagate straight out of this
+            # `finally`, skipping BOTH the teardown below and
+            # lock.release() — device left at 48 MHz with the REU attached
+            # and the lock held for the rest of the process. Swallowing the
+            # interrupt here is the lesser evil; the run is ending anyway.
             pass
+        # Restore the shared device BEFORE releasing the lock. This tool
+        # sets REU and turbo above and used to release without undoing
+        # either, leaving the next lane a box at 48 MHz with a 512 KB REU
+        # attached — state that reads as a device fault, not as our residue.
+        # client is passed because WE ALREADY HOLD THE LOCK; teardown_device
+        # never raises, so this is safe in a `finally`.
+        if client is not None and post_session_teardown:
+            # The import is INSIDE the try for the reason device_session's
+            # own helper documents: an ImportError escaping a `finally`
+            # replaces the traceback that says what actually ended the run.
+            try:
+                from device_session import teardown_device
+                teardown_device(args.host, client=client, logger=log)
+            except BaseException as exc:                      # noqa: BLE001
+                # BaseException, not Exception: a second Ctrl-C landing in
+                # teardown_device's sleep would otherwise propagate past the
+                # lock.release() below and leave the lock held for the rest
+                # of the process.
+                log.warning("teardown skipped (%r); device may be left at "
+                            "turbo with the REU attached", exc)
         lock.release()
         if rc == 0:
             print("PASS — UCI WireGuard handshake stage", args.stage)

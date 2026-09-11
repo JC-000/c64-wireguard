@@ -215,6 +215,9 @@ def main() -> int:
 
     import test_uci_handshake_live as live
     live.post_session_hook = build_chat_loop()
+    # Opt out of the shared teardown: see "WHY THIS TOOL DOES NOT RESET"
+    # above. _restore_speed below is this tool's own restore.
+    live.post_session_teardown = False
     try:
         return live.main()
     except KeyboardInterrupt:

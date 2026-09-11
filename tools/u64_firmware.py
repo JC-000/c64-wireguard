@@ -42,6 +42,12 @@ rebase, so `verdict == "unknown"` is a warning, never an error.
 Run::
 
     python3 tools/u64_firmware.py 10.43.23.81
+
+Exit status: 0 = a verdict in ("chunked", "unknown", "no-hash"); 1 = any
+other verdict — today that means "unreachable", but describe_build returns
+a recorded kind verbatim and a future STOCK entry would also land here;
+2 = usage; **3 = the device lock was busy and NO check was taken** — 3 is
+not a pass, and a checklist step that sees it has identified nothing.
 """
 from __future__ import annotations
 
@@ -109,7 +115,7 @@ def fetch_info(host: str, timeout: float = INFO_TIMEOUT_S) -> Optional[dict]:
 
     The CALLER must hold the harness DeviceLock. This function does not
     acquire one — its live callers run inside their own locked region, and
-    standalone use goes through main(), which locks. Do NOT call it
+    main() acquires one around this call for standalone use. Do NOT call it
     unserialised: a read taken during another lane's transactional config
     rewrite returns a coherent-looking value from a half-applied state and
     raises nothing. (The earlier version of this docstring advertised the
@@ -291,7 +297,37 @@ def main(argv) -> int:
         print(__doc__.strip().splitlines()[0], file=sys.stderr)
         print(f"usage: {argv[0]} <host>", file=sys.stderr)
         return 2
-    verdict, text = describe_build(fetch_info(argv[1]))
+    host = argv[1]
+    # Queue for the device even though this is a bodiless GET. The standing
+    # rule is to lock the ACCESS, not just the writes: an unserialised read
+    # taken during another lane's transactional config rewrite returns a
+    # coherent-looking value from a half-applied state and raises nothing.
+    # Imported here, not at module scope: the live callers already hold the
+    # lock and must not pull device_session in just to read a build hash.
+    # sys.path is fixed up HERE, not at module scope: this module is
+    # imported by the live tools for log_build(), and they must not have
+    # their import path mutated as a side effect of reading a build hash.
+    # Without this, `python3 -m tools.u64_firmware` raises ModuleNotFound
+    # (sys.path[0] is the repo root, not tools/).
+    import os.path
+    _here = os.path.dirname(os.path.abspath(__file__))
+    if _here not in sys.path:        # main() is called repeatedly by the suite
+        sys.path.insert(0, _here)
+    from device_session import locked_client
+
+    # 120 s, matching the live tools (test_warp_live.py:2838,
+    # test_uci_udp_echo_live.py:732), NOT device_session's 30 s restore
+    # default: this is a preflight that runs while a peer lane may hold the
+    # device for a long body, and a 30 s ceiling turns a runbook checklist
+    # step into one that silently reports nothing.
+    with locked_client(host, timeout=120.0,
+                       purpose="firmware build check") as client:
+        if client is None:
+            # locked_client has already logged WHY (busy peer vs lock
+            # mechanism). Doing nothing beats an unserialised read.
+            print("[skipped] device lock busy; no build check taken")
+            return 3          # distinct from 1 (bad verdict) and 2 (usage)
+        verdict, text = describe_build(fetch_info(host))
     print(f"[{verdict}] {text}")
     return 0 if verdict in ("chunked", "unknown", "no-hash") else 1
 
