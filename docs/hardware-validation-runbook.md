@@ -170,8 +170,9 @@ you are the ones not using it.
       **every** access here — reads included, and it waits up to 120 s for
       it. **Exit 3 means the lock was busy and NO check was taken** — it is
       not a pass, so do not tick this box on a 3; find out who holds the
-      device and come back. (0 = a verdict was taken, 1 = unreachable,
-      2 = usage.) The box is shared by three
+      device and come back. (0 = a verdict was taken, 1 = any other
+      verdict — "unreachable" today, but a future STOCK entry lands here
+      too, 2 = usage.) The box is shared by three
       lanes and only the ones that lock are serialised; a read taken
       during another lane's transactional config rewrite returns a
       coherent-looking value from a half-applied state and raises

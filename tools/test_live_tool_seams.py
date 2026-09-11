@@ -593,12 +593,58 @@ def main() -> int:
         _delegators = ("wg_chat.py", "wg_demo.py",
                        "test_wire_encryption_live.py",
                        "test_config_reload_live.py")
+        # The set above is hand-maintained, so a FIFTH tool that delegates
+        # and opts out would pass unnoticed. Pin the DENOMINATOR too: every
+        # file importing test_uci_handshake_live is either a delegator or
+        # named here as a non-delegator, with the reason. A naive
+        # "imports it" rule would over-include all three of these.
+        _NOT_DELEGATORS = {
+            "test_live_tool_seams.py",          # this file; inspects, never runs main()
+            "test_wire_encryption_defaults.py",  # stubs main(), never calls it
+            "test_wire_encryption_control.py",   # imports only to stub it out
+        }
+        _tools_dir = Path(__file__).resolve().parent
+        # AST, not substring. A text search matches the four files that
+        # merely MENTION test_uci_handshake_live in a comment or docstring
+        # (test_suite_imports, test_uci_udp_echo_live, test_warp_live,
+        # wg_c64_input) — none of them import it. Only a real import counts.
+        def _imports_live(path: Path) -> bool:
+            try:
+                tree = ast.parse(path.read_text())
+            except SyntaxError:
+                return False
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    if any(a.name == "test_uci_handshake_live"
+                           for a in node.names):
+                        return True
+                elif isinstance(node, ast.ImportFrom):
+                    if node.module == "test_uci_handshake_live":
+                        return True
+            return False
+
+        _importers = {
+            f.name for f in _tools_dir.glob("*.py")
+            if f.name != "test_uci_handshake_live.py" and _imports_live(f)
+        }
+        check("every importer of test_uci_handshake_live is classified as a "
+              "delegator or an explicit non-delegator "
+              f"(unclassified: {sorted(_importers - set(_delegators) - _NOT_DELEGATORS)})",
+              not (_importers - set(_delegators) - _NOT_DELEGATORS),
+              "a new tool delegating to live.main() must be added to "
+              "_delegators, or the opt-out equality below cannot see it")
         # STRUCTURAL, not textual. A substring search for
         # "post_session_teardown = False" also matches the sentence in
         # test_wire_encryption_live.py's comment explaining what opting out
         # WOULD mean — it reported that file as an opt-out on the first run
         # of this check. Only a real assignment of the literal False counts.
-        def _opts_out(path: Path) -> bool:
+        # Three states, not two. `post_session_teardown = bool(args.keep)`
+        # opts out for real, but a check that only recognises a literal
+        # False reads it as NOT opting out — green while the device is left
+        # unrestored. That is the false-green direction, so an assignment
+        # this check cannot evaluate is reported as UNKNOWN and fails.
+        def _teardown_assignments(path: Path):
+            out = []
             for node in ast.walk(ast.parse(path.read_text())):
                 if not isinstance(node, (ast.Assign, ast.AnnAssign)):
                     continue
@@ -606,11 +652,27 @@ def main() -> int:
                            else [node.target])
                 for t in targets:
                     if (getattr(t, "attr", getattr(t, "id", None))
-                            == "post_session_teardown"
-                            and isinstance(node.value, ast.Constant)
-                            and node.value.value is False):
-                        return True
-            return False
+                            == "post_session_teardown"):
+                        v = node.value
+                        if isinstance(v, ast.Constant) and v.value is False:
+                            out.append(False)
+                        elif isinstance(v, ast.Constant) and v.value is True:
+                            out.append(True)
+                        else:
+                            out.append("UNKNOWN")
+            return out
+
+        _unknown = {n for n in _delegators
+                    if "UNKNOWN" in _teardown_assignments(
+                        Path(__file__).resolve().parent / n)}
+        check("no delegator sets post_session_teardown to a value this "
+              f"check cannot evaluate (found {sorted(_unknown)})",
+              not _unknown,
+              "a computed value opts out for real while reading as "
+              "opted-in; pin it to a literal or teach this check")
+
+        def _opts_out(path: Path) -> bool:
+            return False in _teardown_assignments(path)
 
         _opt_out_found = set()
         for _name in _delegators:

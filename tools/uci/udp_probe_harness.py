@@ -146,7 +146,5 @@ def main():
     finally:
         lock.release()
 
-
-
 if __name__ == "__main__":
     sys.exit(main())

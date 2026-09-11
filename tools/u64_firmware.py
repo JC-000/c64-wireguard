@@ -43,10 +43,11 @@ Run::
 
     python3 tools/u64_firmware.py 10.43.23.81
 
-Exit status: 0 = a verdict was taken (chunked / unknown / no-hash), 1 =
-unreachable, 2 = usage, **3 = the device lock was busy and NO check was
-taken** — 3 is not a pass, and a checklist step that sees it has identified
-nothing.
+Exit status: 0 = a verdict in ("chunked", "unknown", "no-hash"); 1 = any
+other verdict — today that means "unreachable", but describe_build returns
+a recorded kind verbatim and a future STOCK entry would also land here;
+2 = usage; **3 = the device lock was busy and NO check was taken** — 3 is
+not a pass, and a checklist step that sees it has identified nothing.
 """
 from __future__ import annotations
 
@@ -309,7 +310,9 @@ def main(argv) -> int:
     # Without this, `python3 -m tools.u64_firmware` raises ModuleNotFound
     # (sys.path[0] is the repo root, not tools/).
     import os.path
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    _here = os.path.dirname(os.path.abspath(__file__))
+    if _here not in sys.path:        # main() is called repeatedly by the suite
+        sys.path.insert(0, _here)
     from device_session import locked_client
 
     # 120 s, matching the live tools (test_warp_live.py:2838,
