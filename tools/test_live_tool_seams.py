@@ -568,6 +568,60 @@ def main() -> int:
               "the point of #134 is one teardown contract; a local "
               "reimplementation is how the seven tools drifted apart")
 
+        # test_uci_handshake_live.main() now OWNS the teardown for every
+        # tool that delegates to it (test_wire_encryption_live, wg_demo,
+        # test_config_reload_live), which is why those no longer call it
+        # themselves. That made it the load-bearing copy, and nothing
+        # asserted it: deleting the whole finally block left this gate at
+        # 49/49. Pin the helper, the default, and the single opt-out.
+        import test_uci_handshake_live as uci_live
+        check("test_uci_handshake_live.main(): teardown call is inside the "
+              "`finally:` block",
+              _restore_in_finally(uci_live, restore_call="teardown_device"),
+              "the tools that delegate to this main() stopped tearing down "
+              "themselves; if it does not happen here it happens nowhere")
+        check("test_uci_handshake_live: teardown is ON by default",
+              uci_live.post_session_teardown is True,
+              "a default of False would silently stop restoring the shared "
+              "device for every delegating tool at once")
+
+        # The opt-out is asserted by SET EQUALITY, not membership: exactly
+        # one tool may skip the teardown. A second one appearing here is
+        # the regression — an operator-tool exemption quietly spreading to
+        # a batch tool that ought to restore the box it borrowed.
+        _OPT_OUT_EXPECTED = {"wg_chat.py"}
+        _delegators = ("wg_chat.py", "wg_demo.py",
+                       "test_wire_encryption_live.py",
+                       "test_config_reload_live.py")
+        # STRUCTURAL, not textual. A substring search for
+        # "post_session_teardown = False" also matches the sentence in
+        # test_wire_encryption_live.py's comment explaining what opting out
+        # WOULD mean — it reported that file as an opt-out on the first run
+        # of this check. Only a real assignment of the literal False counts.
+        def _opts_out(path: Path) -> bool:
+            for node in ast.walk(ast.parse(path.read_text())):
+                if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    continue
+                targets = (node.targets if isinstance(node, ast.Assign)
+                           else [node.target])
+                for t in targets:
+                    if (getattr(t, "attr", getattr(t, "id", None))
+                            == "post_session_teardown"
+                            and isinstance(node.value, ast.Constant)
+                            and node.value.value is False):
+                        return True
+            return False
+
+        _opt_out_found = set()
+        for _name in _delegators:
+            if _opts_out(Path(__file__).resolve().parent / _name):
+                _opt_out_found.add(_name)
+        check("exactly wg_chat opts out of the shared teardown "
+              f"(found {sorted(_opt_out_found)})",
+              _opt_out_found == _OPT_OUT_EXPECTED,
+              "wg_chat is the deliberate exception because a human is at "
+              "the machine (issue #134); every other delegator must restore")
+
         # Alarm-proof: parse two synthetic ASTs directly (bypassing
         # inspect.getsource, which needs a real backing file) with
         # _restore_in_finally_ast — the same function the real check

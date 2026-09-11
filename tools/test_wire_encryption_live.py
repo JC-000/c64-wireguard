@@ -730,20 +730,16 @@ def main() -> int:
 
     import test_uci_handshake_live as live
     live.post_session_hook = build_probe()
-    try:
-        return live.main(["--chat", "--host", args.host,
-                          "--turbo", str(args.turbo), "--reu", reu_arg])
-    finally:
-        # live.main() has released the lock by now, so this teardown takes
-        # its own — every write to a shared device is serialised.
-        #
-        # teardown_device, not restore_idle: this tool ran a full WireGuard
-        # session, so it holds a UDP socket the C64 never closes. Only a
-        # reset closes it (the network target does that from the reset ISR),
-        # and the reset is verified by read-back rather than assumed —
-        # issue #134.
-        from device_session import teardown_device
-        teardown_device(args.host, idle_mhz=1)
+    # No teardown wrapper here any more: live.main() now runs the shared
+    # teardown INSIDE its own locked region before releasing (see
+    # test_uci_handshake_live.post_session_teardown). Doing it again here
+    # meant two resets and a second lock cycle for the same result. The
+    # reasoning that put it here still holds — this tool runs a full
+    # WireGuard session and holds a UDP socket only a reset closes, issue
+    # #134 — it is just satisfied one layer down now. If this tool ever
+    # sets post_session_teardown = False, it owns its own teardown again.
+    return live.main(["--chat", "--host", args.host,
+                      "--turbo", str(args.turbo), "--reu", reu_arg])
 
 
 if __name__ == "__main__":

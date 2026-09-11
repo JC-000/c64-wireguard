@@ -13,7 +13,7 @@ BLAST RADIUS, not the happy path:
   * the recorded `kind` must actually route. Hardcoding the verdict made
     every KNOWN_BUILDS entry read as a spike image no matter what it said;
   * `describe_build` must never raise and `fetch_info` must never
-    propagate, because both run in a PREFLIGHT, before the device lock, in
+    propagate, because both run in a PREFLIGHT, inside the device lock (main() acquires it; log_build's callers already hold it), in
     tools whose runs must not die for a build check.
 
 Assertions here avoid substrings that also appear in KNOWN_BUILDS' prose:
@@ -335,7 +335,47 @@ def main(argv) -> int:
             v = fw.log_build(host, lg2)
             chk("log_build INFOs a measured image",
                 v == "chunked" and lg2.calls[-1][0] == "info", f"{lg2.calls}")
-            chk("main() exits 0 on a measured image", fw.main(["x", host]) == 0)
+            # Stub the DeviceLock. main() acquires one for real (that is
+            # the contract this suite pins below), and a hardware-free gate
+            # suite must not open a machine-global lockfile or construct a
+            # client that probes /v1/info to get here.
+            import contextlib
+            import device_session as _ds
+            saved_lc = _ds.locked_client
+            acquired = []
+
+            @contextlib.contextmanager
+            def _fake_locked_client(h, timeout=None, purpose=None, logger=None):
+                acquired.append((h, timeout, purpose))
+                yield object()          # a granted lock yields a client
+
+            @contextlib.contextmanager
+            def _busy_locked_client(h, timeout=None, purpose=None, logger=None):
+                acquired.append((h, timeout, purpose))
+                yield None              # busy: locked_client yields None
+
+            try:
+                _ds.locked_client = _fake_locked_client
+                chk("main() exits 0 on a measured image",
+                    fw.main(["x", host]) == 0)
+                # The point of the lock is that it is TAKEN. Assert it, or
+                # this suite would pass just as happily with main() reading
+                # the device unserialised, which is what it used to do.
+                chk("main() queued for the device through locked_client",
+                    len(acquired) == 1 and acquired[0][0] == host,
+                    f"{acquired}")
+                # `acquired and ...`: if the lock is gone entirely this
+                # must REPORT a failed check, not raise IndexError out of
+                # the suite and skip every check below it.
+                chk("main() waits like a live tool, not like a restore (120s)",
+                    bool(acquired) and acquired[0][1] == 120.0,
+                    f"acquired={acquired}")
+                _ds.locked_client = _busy_locked_client
+                chk("main() exits 3 (NOT 0) when the lock is busy — a busy "
+                    "lock means no check was taken",
+                    fw.main(["x", host]) == 3)
+            finally:
+                _ds.locked_client = saved_lc
         finally:
             fw.fetch_info = saved_fetch
         chk("main() exits 2 on wrong argument count", fw.main(["x"]) == 2)

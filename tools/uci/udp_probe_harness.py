@@ -61,19 +61,24 @@ class EchoThread(threading.Thread):
 
 
 def main():
-    if not get_uci_enabled_quick(HOST):
-        print(f"enabling UCI on {HOST}...")
-    client = Ultimate64Client(host=HOST, timeout=10.0)
-    if not get_uci_enabled(client):
-        enable_uci(client)
-        time.sleep(0.5)
-        assert get_uci_enabled(client)
-
+    # The lock comes FIRST. Everything below it touches the shared device,
+    # and enable_uci is a config WRITE — running it before acquiring meant
+    # this tool reconfigured a box another lane was mid-run on. The probe
+    # read is inside for the same reason: a read taken during another
+    # lane's transactional rewrite returns a coherent-looking value from a
+    # half-applied state and raises nothing.
     lock = DeviceLock(HOST)
     if not lock.acquire(timeout=60.0):
         print("could not acquire device lock")
         return 2
     try:
+        client = Ultimate64Client(host=HOST, timeout=10.0)
+        if not get_uci_enabled(client):
+            print(f"enabling UCI on {HOST}...")
+            enable_uci(client)
+            time.sleep(0.5)
+            assert get_uci_enabled(client)
+
         tr = Ultimate64Transport(host=HOST, timeout=10.0, client=client)
 
         # Soft reset only — reboot() resets the FPGA and loses UCI config.
@@ -141,13 +146,6 @@ def main():
     finally:
         lock.release()
 
-
-def get_uci_enabled_quick(host: str) -> bool:
-    try:
-        c = Ultimate64Client(host=host, timeout=3.0)
-        return get_uci_enabled(c)
-    except Exception:
-        return False
 
 
 if __name__ == "__main__":

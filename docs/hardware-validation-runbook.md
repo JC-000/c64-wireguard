@@ -111,6 +111,21 @@ and `sid-analogmult-rng`. **Every access goes through the harness
 the long test bodies. `tools/device_session.py` provides `locked_client()` and
 `restore_idle()` for the short cases; live suites take the lock themselves.
 
+**Restore before you release, not after.** `teardown_device()` (clock, REU,
+verified reset) runs INSIDE the locked region — a restore that lands after
+the release is an unserialised write, which is the defect this rule exists
+to prevent. `test_uci_handshake_live.main()` does this for every tool that
+delegates to it, so `wg_demo.py` and `test_wire_encryption_live.py` inherit
+it and must not repeat it.
+
+The one exception is `wg_chat.py`, which sets
+`live.post_session_teardown = False`: it is an **operator** tool attached to
+a machine a human is sitting in front of, and resetting that machine on
+Ctrl-C would destroy the session that is the tool's entire purpose (issue
+#134). A tool that opts out owns its own restore — `wg_chat` does its 1 MHz
+through `restore_idle()`, under the lock. If you add a non-interactive mode
+to an operator tool, that mode takes the teardown back.
+
 Two things measured on 2026-09-03/04 are why:
 
 - The lock serialises only the lanes that **opt in**. The firmware lane's
@@ -152,7 +167,11 @@ you are the ones not using it.
       tools/u64_firmware.py <host>` reads `/v1/info`'s `git_commit_hash`
       (added upstream 2026-09-03, alongside `ethernet_mac` / `wifi_mac`).
       It queues for the device through the harness `DeviceLock`, like
-      **every** access here — reads included. The box is shared by three
+      **every** access here — reads included, and it waits up to 120 s for
+      it. **Exit 3 means the lock was busy and NO check was taken** — it is
+      not a pass, so do not tick this box on a 3; find out who holds the
+      device and come back. (0 = a verdict was taken, 1 = unreachable,
+      2 = usage.) The box is shared by three
       lanes and only the ones that lock are serialised; a read taken
       during another lane's transactional config rewrite returns a
       coherent-looking value from a half-applied state and raises
