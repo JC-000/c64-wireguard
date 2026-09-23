@@ -10,9 +10,6 @@ Never edit source. Build only in an isolated copy (rsync the tree with
 `ln -sfn /Users/someone/Documents/c64-https/ip65 <copy>/ip65`, `make clean` between
 BACKEND/REU/flag states). Never touch the U64E.
 
-Navigate `.s`/`.inc` with Serena's symbolic tools (`find_symbol include_body=True`,
-`find_referencing_symbols`), not grep reconstructions.
-
 Hunt, in this order, and say for each whether you CONFIRMED it or only SUSPECT it:
 1. Boundary and off-by-one: exact caps (888/892/893/1472/1500), 16-bit compares (the
    `beq @len_ok` class), loop termination, zero-length inputs, exact multiples of a block.
