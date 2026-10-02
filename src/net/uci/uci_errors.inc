@@ -63,9 +63,6 @@ UCI_ERR_SEND_TOO_LONG  = $8C    ; datagram exceeds NET_UDP_SEND_MAX (the
                                 ; $8B is c64-https's UCI_ERR_BAD_READ_HDR —
                                 ; allocated in SPEC §13.2 before use, per the
                                 ; rule added after the $88 collision.
-                                ; $90 is c64-https's UCI_ERR_STREAM_LOST (its
-                                ; uci-m3 backend), allocated in
-                                ; src/net_abi.inc first; never emitted here.
 UCI_ERR_LONG_READ      = $8A    ; SOCKET_READ claimed more bytes than we asked for
 UCI_ERR_OPEN_REFUSED   = $8D    ; the firmware REFUSED a socket open: it cleared
                                 ; the hardware ERROR bit and returned no socket
@@ -168,6 +165,9 @@ UCI_ERR_SHORT_READ     = $8F    ; SOCKET_READ's reply ENDED with bytes still
                                 ; "never written" — UCI_BSS is zero-filled at
                                 ; LOAD, so a bare $30 mask would default to the
                                 ; Idle verdict's own value.
+; $90 is c64-https's UCI_ERR_STREAM_LOST (its
+; uci-m3 backend), allocated in
+; src/net_abi.inc first; never emitted here.
 
 ; TCP state values stored in net_tcp_state
 UCI_TCP_CLOSED         = $00    ; no active socket
