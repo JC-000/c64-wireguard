@@ -116,7 +116,8 @@
 ; is on the record: c64-wireguard once allocated $88 for UCI_ERR_LONG_READ
 ; while c64-https had long emitted $88 as UCI_ERR_NO_SOCKET, and one byte
 ; meant two things for four days with neither side doing anything wrong.
-; Gaps below ($43-$45, $47) are deliberate and stay.
+; Codes below that we never emit ($43-$45, $47, $8B, $90) are deliberate
+; and stay.
 ;
 ; That rule is not folklore here: THIS BRANCH broke it and was caught. The
 ; first commit of #120 minted $40-$44 for the ip65 channel by picking

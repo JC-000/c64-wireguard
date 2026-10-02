@@ -130,18 +130,17 @@ INSTRUMENT (issue #128 — read this before trusting a Stage C number):
 Backends (`--backend {uci,ip65}`, default uci — issue #70):
   The tool never builds. It reads the BUILT backend structurally from each
   labels.txt BEFORE any run_prg and refuses (exit 2) when that disagrees
-  with --backend: ip65 <=> `ip65_blob_start` present AND neither
-  `uci_send_part` nor `net_last_error` present; uci <=> the reverse.
+  with --backend: ip65 <=> an IP65_MARKERS label present AND no
+  UCI_MARKERS label present; uci <=> the reverse (see detect_backend).
   Under uci the run is exactly what it was before --backend existed.
   Under ip65 (RR-Net):
     * get_uci_enabled/enable_uci are skipped (the C64 side never talks
       UCI); set_reu(False) and the turbo target are kept.
-    * `net_last_error` is a UCI-adapter label and does not exist, so every
-      read of it is gated on the backend. The post-'I' `sleep(1.0)` +
-      net_last_error read becomes a poll of `net_initialized` (src/boot.s
-      do_net_init sets it to 1 only after net_init + DHCP + UDP listen all
-      succeeded), with a budget of WARP_NET_INIT_BUDGET_S seconds (env,
-      default 120) — DHCP against a real server at 1 MHz is slow.
+    * The post-'I' `sleep(1.0)` + net_last_error read becomes a poll of
+      `net_initialized` (src/boot.s do_net_init sets it to 1 only after
+      net_init + DHCP + UDP listen all succeeded), with a budget of
+      WARP_NET_INIT_BUDGET_S seconds (env, default 120) — DHCP against a
+      real server at 1 MHz is slow.
     * The clock is raised to --turbo only AFTER net_initialized (settle
       3 s, asserted by read-back), never before 'I': see _net_init_ip65
       for why DHCP under ip65 has to run at 1 MHz.
@@ -1947,10 +1946,9 @@ def _net_init_ip65(tr: Ultimate64Transport, client: Ultimate64Client,
 
 def _dump_failure(tr: Ultimate64Transport, L: dict, tag: str,
                   backend: Optional[str] = None) -> None:
-    # net_last_error is a UCI-adapter label: gate the read on the backend
-    # (detected from the labels when the caller did not pass it).
+    # Both backends export net_last_error; gate on the label, not the backend.
     backend = backend or detect_backend(L)
-    if backend == "uci":
+    if "net_last_error" in L:
         err = tr.read_memory(L["net_last_error"], 1)[0]
         log.error("[%s] net_last_error=$%02X", tag, err)
     else:
@@ -2022,9 +2020,8 @@ def run_stage_ab(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
         if "tp_send_counter" in L else None
     ok = ki.send_message_dma(tr, msg_text, L, timeout=15.0)
     time.sleep(0.5)
-    # net_last_error exists only in the UCI adapter — gated on backend.
     err_after = (tr.read_memory(L["net_last_error"], 1)[0]
-                 if backend == "uci" else None)
+                 if "net_last_error" in L else None)
     after = int.from_bytes(tr.read_memory(L["tp_send_counter"], 2), "little") \
         if "tp_send_counter" in L else None
     result["message_sent_keypress_ok"] = ok

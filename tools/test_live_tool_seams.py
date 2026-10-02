@@ -798,8 +798,10 @@ def main() -> int:
                   warp.load_labels_for_backend(lf, "uci")["ip_packet_buf"]
                   == 0x9833)
 
-        # _dump_failure gating: on ip65 labels the UCI-only net_last_error
-        # must never be read (it is not even in the map).
+        # _dump_failure post-mortem: net_last_error is read wherever the
+        # map has it — BOTH backends since #120 (src/net/ip65/net.s:112) —
+        # exactly once, at the label's own address. A map without it (a
+        # pre-#120 ip65 build) must neither raise nor read. Issue #170.
         class _Tr:
             def __init__(self):
                 self.reads = []
@@ -816,15 +818,28 @@ def main() -> int:
             # run had already failed and wanted a post-mortem. Reported as
             # its own named check so that shows up as itself instead of
             # collapsing the section.
+            ip65_pre120 = {k: v for k, v in ip65_1440.items()
+                           if k != "net_last_error"}
+            check("_dump_failure fixtures: ip65 and uci net_last_error sit "
+                  "at different addresses (else 'at the label's address' "
+                  "cannot tell the two maps apart)",
+                  ip65_1440["net_last_error"]
+                  != uci_default["net_last_error"],
+                  f"both ${ip65_1440['net_last_error']:04X}")
             for _n, _lab, _want in (
-                    ("no reads at all on ip65 labels without hs_* labels "
-                     "(net_last_error never touched)", ip65_1440, []),
-                    ("uci labels DO read net_last_error", uci_default,
-                     [uci_default["net_last_error"]])):
+                    ("ip65 labels read net_last_error exactly once, at its "
+                     "own address (#170)", ip65_1440,
+                     [ip65_1440["net_last_error"]]),
+                    ("uci labels read net_last_error exactly once, at its "
+                     "own address", uci_default,
+                     [uci_default["net_last_error"]]),
+                    ("labels WITHOUT net_last_error (pre-#120 ip65 map): "
+                     "no raise, no read", ip65_pre120, [])):
                 tr = _Tr()
                 try:
                     warp._dump_failure(tr, _lab, "seam")
-                    detail = f"reads={tr.reads}"
+                    detail = (f"reads={[hex(a) for a in tr.reads]} "
+                              f"want={[hex(a) for a in _want]}")
                     ok_dump = tr.reads == _want
                 except Exception as exc:              # noqa: BLE001
                     ok_dump, detail = False, (
@@ -833,6 +848,72 @@ def main() -> int:
                 check(f"_dump_failure: {_n}", ok_dump, detail)
         finally:
             warp.dump_screen = saved_dump
+
+        # run_stage_ab, Stage-B message step: net_last_error is read after
+        # the message wherever the map has it, at the label's own address.
+        # Driven through the real run_stage_ab with every device-facing
+        # collaborator stubbed. Nonzero, per-address bytes so a None/$00
+        # default or a read at the wrong address cannot pass. Issue #170.
+        import tempfile as _tf
+        _NLE_BYTE = {0x79D2: 0x48, 0x7C32: 0x5A}
+
+        class _TrAB:
+            def __init__(self, L):
+                self.L = L
+
+            def read_memory(self, addr, n):
+                if addr == self.L.get("wg_state"):
+                    return bytes([warp.SESSION_ACTIVE]) + bytes(n - 1)
+                return bytes([_NLE_BYTE.get(addr, 0)]) + bytes(n - 1)
+
+        class _ClientAB:
+            def run_prg(self, data):
+                pass
+        saved_ab = (warp._wait_boot_ready, warp._stage_config,
+                    warp._net_init_ip65, warp.ki.press_key,
+                    warp.ki.wait_for_state, warp.ki.send_message_dma,
+                    warp.wait_for_text, warp.dump_screen, warp.time.sleep)
+        try:
+            warp._wait_boot_ready = lambda *a, **k: None
+            warp._stage_config = lambda *a, **k: None
+            warp._net_init_ip65 = lambda *a, **k: True
+            warp.ki.press_key = lambda *a, **k: True
+            warp.ki.wait_for_state = lambda *a, **k: True
+            warp.ki.send_message_dma = lambda *a, **k: True
+            warp.wait_for_text = lambda *a, **k: [["PING REPLY OK"]]
+            warp.dump_screen = lambda *a, **k: None
+            warp.time.sleep = lambda s: None
+            with _tf.TemporaryDirectory() as td:
+                prg = Path(td) / "a.prg"
+                prg.write_bytes(b"\x01\x08\x00")
+                ip65_pre120_ab = {k: v for k, v in ip65_1440.items()
+                                  if k != "net_last_error"}
+                for _n, _lab, _bk, _want in (
+                        ("ip65 labels: the byte at ip65's own address (#170)",
+                         ip65_1440, "ip65", "$48"),
+                        ("uci labels: the byte at uci's own address",
+                         uci_default, "uci", "$5A"),
+                        ("labels WITHOUT net_last_error (pre-#120 ip65 "
+                         "map): None, no raise", ip65_pre120_ab, "ip65",
+                         None)):
+                    try:
+                        res = warp.run_stage_ab(
+                            _TrAB(_lab), _ClientAB(), _lab, b"", b"", b"",
+                            seed=1, backend=_bk, prg_path=prg)
+                        got = res.get("net_last_error_after_message", "<unset>")
+                        ok_ab = (res.get("active") is True
+                                 and "error" not in res and got == _want)
+                        detail = (f"net_last_error_after_message={got!r} "
+                                  f"want={_want!r} active={res.get('active')}")
+                    except Exception as exc:              # noqa: BLE001
+                        ok_ab, detail = False, f"run_stage_ab RAISED {exc!r}"
+                    check(f"run_stage_ab Stage-B net_last_error: {_n}",
+                          ok_ab, detail)
+        finally:
+            (warp._wait_boot_ready, warp._stage_config,
+             warp._net_init_ip65, warp.ki.press_key,
+             warp.ki.wait_for_state, warp.ki.send_message_dma,
+             warp.wait_for_text, warp.dump_screen, warp.time.sleep) = saved_ab
 
         # _net_init_ip65 ordering: 1 MHz before 'I', turbo only after
         # net_initialized reads 1; a timeout returns False and never
@@ -897,11 +978,12 @@ def main() -> int:
     print("\n=== backend detection in test_warp_live (#70, ip65 warp) ===")
     # The tool now runs against either backend, and the two builds differ
     # in what they export: only ip65 links `ip65_blob_start`, only uci links
-    # `net_last_error` (and `uci_send_part` under UCI_CHUNKED_WRITE). A tool
-    # that assumed uci and read net_last_error on an ip65 PRG would raise a
-    # KeyError AFTER run_prg — with the device already loaded and the lock
-    # held. So the preflight must classify the labels.txt it was given and
-    # refuse a mismatch with exit 2 BEFORE any device call. Two layers:
+    # `uci_socket_open` (and `uci_send_part` under UCI_CHUNKED_WRITE); both
+    # link `net_last_error`. A tool that assumed uci and read a uci-only
+    # label on an ip65 PRG would raise a KeyError AFTER run_prg — with the
+    # device already loaded and the lock held. So the preflight must
+    # classify the labels.txt it was given and refuse a mismatch with exit
+    # 2 BEFORE any device call. Two layers:
     #   (a) detect_backend(): a pure classifier on any labels mapping;
     #   (b) the CLI, as a subprocess, fed a labels.txt of the OTHER backend.
     # (b) discriminates carefully: argparse's own "unrecognized arguments"
@@ -1213,6 +1295,9 @@ def _warp_labels(kind: str, ip_pkt_len: int, chunked: bool = False) -> dict:
          "ip_packet_buf": 0x9833, "ip_pkt_len": ip_pkt_len,
          "WG_MTU": ip_pkt_len - 0x9833, "net_last_error": 0x7C32}
     if kind == "ip65":
+        # The ip65 build places it elsewhere: $79D2 in an ip65 WG_MTU1440
+        # build/labels.txt measured 2026-10-02.
+        L["net_last_error"] = 0x79D2
         L["ip65_blob_start"] = 0x2000
         L["ip65_blob_end"] = 0x32EF
         L["ip65_listening"] = 0x7954
