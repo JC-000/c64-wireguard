@@ -366,7 +366,10 @@ def _git(root, *args):
         # GIT_DIR & co. (exported by git hooks) would make `-C` irrelevant
         # and report OUR repository as the peer's.
         env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-        r = subprocess.run(["git", "-C", str(root), *args], env=env,
+        # --no-optional-locks: `git status` must not refresh the peer's
+        # index, which other lanes share.
+        r = subprocess.run(["git", "--no-optional-locks", "-C", str(root),
+                            *args], env=env,
                            capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -796,8 +799,9 @@ def main(argv=None):
         report(name, msgs)
 
     n_skip = 0
+    child = os.environ.get(E2E_CHILD_ENV) == "1"
     print("\nalarm proofs (in-process, in-memory variants of our file):")
-    if os.environ.get(E2E_CHILD_ENV) == "1":
+    if child:
         proofs = []
         print(f"  NOT RUN: {E2E_CHILD_ENV}=1 (end-to-end child of a run "
               f"that runs them)")
@@ -823,7 +827,8 @@ def main(argv=None):
           + (f", {n_skip} proof(s) SKIPPED" if n_skip else "")
           + f"  {peer_tag}"
           + (f"  [{OPT_OUT_ENV}=1: peer comparison NOT run]" if skipped
-             else ""))
+             else "")
+          + (f"  [{E2E_CHILD_ENV}=1: proofs NOT RUN]" if child else ""))
     return 1 if failed else 0
 
 
