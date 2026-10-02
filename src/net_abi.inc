@@ -165,6 +165,8 @@
 ;   $8D   UCI_ERR_OPEN_REFUSED        retired table, ours
 ;   $8E   UCI_ERR_CMD_UNKNOWN         OURS, minted here (PR #112)
 ;   $8F   UCI_ERR_SHORT_READ          OURS, minted here (issue #130)
+;   $90   UCI_ERR_STREAM_LOST         c64-https, minted here (c64-https#276) —
+;                                     WE DO NOT EMIT
 ;
 ; This table is names, values and ownership only. The per-code reasoning —
 ; what triggers each one, what a consumer should do about it — stays in

@@ -165,6 +165,9 @@ UCI_ERR_SHORT_READ     = $8F    ; SOCKET_READ's reply ENDED with bytes still
                                 ; "never written" — UCI_BSS is zero-filled at
                                 ; LOAD, so a bare $30 mask would default to the
                                 ; Idle verdict's own value.
+; $90 is c64-https's UCI_ERR_STREAM_LOST (its
+; uci-m3 backend), allocated in
+; src/net_abi.inc first; never emitted here.
 
 ; TCP state values stored in net_tcp_state
 UCI_TCP_CLOSED         = $00    ; no active socket

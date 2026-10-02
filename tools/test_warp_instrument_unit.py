@@ -86,7 +86,7 @@ from c64_test_harness.encoding.screen_codes import SCREEN_CODE_TABLE  # noqa: E4
 # denominator nobody notices.
 EXPECTED_CHECKS = 72
 
-#: src/net/uci/uci_errors.inc:244. Retyped here ONLY as the value case 8
+#: src/net/uci/uci_errors.inc:247. Retyped here ONLY as the value case 8
 #: pins the BUILT layout against; the tool itself always derives the
 #: buffer width from the map, never from this.
 UCI_STATUS_MAX = 48
@@ -1133,7 +1133,7 @@ def case8_status_splice(mod, labels, rng, seed, res: Result, ctx) -> None:
     cap = L["uci_status_len"] - L["uci_status_buf"]
     res.check(cap == UCI_STATUS_MAX, "case8/layout-matches-the-adapter",
               f"uci_status_len - uci_status_buf = {cap}, but "
-              f"src/net/uci/uci_errors.inc:244 says UCI_STATUS_MAX = "
+              f"src/net/uci/uci_errors.inc:247 says UCI_STATUS_MAX = "
               f"{UCI_STATUS_MAX}. _status_buf_capacity derives the buffer "
               f"width from that gap, so a disagreement means every capture "
               f"is read at the wrong width.")
