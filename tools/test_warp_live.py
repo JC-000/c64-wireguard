@@ -1920,7 +1920,8 @@ def _net_init_ip65(tr: Ultimate64Transport, client: Ultimate64Client,
     only talks to $DF1B-$DF1F, and its waits are CIA-TOD bounded.)
 
     Returns False with result["error"] set when net_initialized never
-    reads 1 (screen dumped); raises if the clock does not stick.
+    reads 1 (net_last_error recorded when the map has it, screen dumped);
+    raises if the clock does not stick.
     """
     _set_turbo_checked(client, 1)
     if not ki.press_key(tr, "I", timeout=20.0):
@@ -1936,6 +1937,12 @@ def _net_init_ip65(tr: Ultimate64Transport, client: Ultimate64Client,
                            f"{NET_INIT_BUDGET_S:.0f}s of pressing I "
                            f"(ip65 net_init/DHCP/listen failed; screen dumped)")
         log.error(result["error"])
+        if "net_last_error" in L:
+            err = tr.read_memory(L["net_last_error"], 1)[0]
+            result["net_last_error"] = f"${err:02X}"
+            log.error("after I: net_last_error=$%02X (ip65)", err)
+        else:
+            result["net_last_error"] = None
         dump_screen(tr, label="ip65-net-init-timeout")
         return False
     log.info("after I: net_initialized=1 in %.1fs (ip65, at 1 MHz)",
@@ -2020,6 +2027,7 @@ def run_stage_ab(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
         if "tp_send_counter" in L else None
     ok = ki.send_message_dma(tr, msg_text, L, timeout=15.0)
     time.sleep(0.5)
+    # ip65: the LAST net_udp_send's verdict (each send clears it); uci latches.
     err_after = (tr.read_memory(L["net_last_error"], 1)[0]
                  if "net_last_error" in L else None)
     after = int.from_bytes(tr.read_memory(L["tp_send_counter"], 2), "little") \

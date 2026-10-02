@@ -156,11 +156,11 @@ The parent c64-https has a `net_banner_str` label consumed by its
 (it prints fixed `net_init_msg` / `net_dhcp_msg` strings from
 `src/wg/strings.s`), so there's no `exports.s` in this directory.
 
-## Not yet shipped
+## Not shipped
 
 `net_manifest.s` (SPEC §13.0 `NET_BACKEND_FAMILIES`) and the consumer's
-`net_abi_asserts.s` (§13.8) are deliberately absent, for both backends. The
-ip65 backend exports no `net_last_error`, so a `NET_FAMILY_CORE` claim would
-link green over an error channel that does not exist. The reasoning is
-recorded at `src/net_abi.inc`; tracked in issue #48, blocked on
-c64-lib-contract#148.
+`net_abi_asserts.s` (§13.8) are deliberately absent, for both backends.
+SPEC §13 was retired at c64-lib-contract v1.0.0, so there is nothing left
+to assert against (issue #48, closed). Both backends export
+`net_last_error` (#120); ip65 still exports no `net_local_ip` (see
+`src/net_abi.inc`).

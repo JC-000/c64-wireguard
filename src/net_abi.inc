@@ -163,9 +163,11 @@
 ;   $8A   UCI_ERR_LONG_READ           retired table, ours (moved off $88)
 ;   $8B   UCI_ERR_BAD_READ_HDR        retired table, c64-https — WE DO NOT EMIT
 ;   $8C   UCI_ERR_SEND_TOO_LONG       retired table, ours
-;   $8D   UCI_ERR_OPEN_REFUSED        retired table, ours
-;   $8E   UCI_ERR_CMD_UNKNOWN         OURS, minted here (PR #112)
-;   $8F   UCI_ERR_SHORT_READ          OURS, minted here (issue #130)
+;   $8D   UCI_ERR_OPEN_REFUSED        retired table, ours; c64-https emits too
+;   $8E   UCI_ERR_CMD_UNKNOWN         OURS, minted here (PR #112);
+;                                     c64-https emits too
+;   $8F   UCI_ERR_SHORT_READ          OURS, minted here (issue #130);
+;                                     c64-https emits too
 ;   $90   UCI_ERR_STREAM_LOST         c64-https, minted here (c64-https#276) —
 ;                                     WE DO NOT EMIT
 ;
@@ -174,7 +176,7 @@
 ; uci_errors.inc and src/net/ip65/net.s, which point back here.
 ; =============================================================================
 ;
-; It is also why src/net/<backend>/net_manifest.s and net_abi_asserts.s are
-; NOT in this branch yet: a NET_FAMILY_CORE claim asserted over an absent
-; error channel would link green and mean nothing. Manifests come after the
-; channel exists, not before. Tracked in #48.
+; src/net/<backend>/net_manifest.s and net_abi_asserts.s are absent, and
+; now permanently so: the §13 they asserted against is retired (#48, closed).
+; Both backends export net_last_error; ip65 still exports no net_local_ip
+; (see "NOT DECLARED HERE" above).

@@ -732,6 +732,9 @@ def main() -> int:
         uci_default = _warp_labels("uci", ip_pkt_len=0x9B8F)
         uci_chunked = _warp_labels("uci", ip_pkt_len=0x9DD3, chunked=True)
         ip65_1440 = _warp_labels("ip65", ip_pkt_len=0x9DD3)
+        # A pre-#120 ip65 map: no net_last_error label at all.
+        ip65_pre120 = {k: v for k, v in ip65_1440.items()
+                       if k != "net_last_error"}
         for _name, _lab, _want in (("default uci build", uci_default, "uci"),
                                    ("chunked uci build", uci_chunked, "uci"),
                                    ("ip65 build", ip65_1440, "ip65")):
@@ -818,8 +821,6 @@ def main() -> int:
             # run had already failed and wanted a post-mortem. Reported as
             # its own named check so that shows up as itself instead of
             # collapsing the section.
-            ip65_pre120 = {k: v for k, v in ip65_1440.items()
-                           if k != "net_last_error"}
             check("_dump_failure fixtures: ip65 and uci net_last_error sit "
                   "at different addresses (else 'at the label's address' "
                   "cannot tell the two maps apart)",
@@ -850,12 +851,17 @@ def main() -> int:
             warp.dump_screen = saved_dump
 
         # run_stage_ab, Stage-B message step: net_last_error is read after
-        # the message wherever the map has it, at the label's own address.
-        # Driven through the real run_stage_ab with every device-facing
-        # collaborator stubbed. Nonzero, per-address bytes so a None/$00
-        # default or a read at the wrong address cannot pass. Issue #170.
+        # send_message_dma wherever the map has it, at the label's own
+        # address. Driven through the real run_stage_ab with every
+        # device-facing collaborator stubbed. The fake memory holds $00
+        # until the send_message_dma stub has run, then a nonzero
+        # per-address byte, so a read before the message, a None/$00
+        # default or a read at the wrong address cannot pass. The 0.5 s
+        # settle after the message is not pinned. Issue #170.
         import tempfile as _tf
-        _NLE_BYTE = {0x79D2: 0x48, 0x7C32: 0x5A}
+        _NLE_BYTE = {ip65_1440["net_last_error"]: 0x48,
+                     uci_default["net_last_error"]: 0x5A}
+        _ab_sent = [False]
 
         class _TrAB:
             def __init__(self, L):
@@ -864,7 +870,8 @@ def main() -> int:
             def read_memory(self, addr, n):
                 if addr == self.L.get("wg_state"):
                     return bytes([warp.SESSION_ACTIVE]) + bytes(n - 1)
-                return bytes([_NLE_BYTE.get(addr, 0)]) + bytes(n - 1)
+                b = _NLE_BYTE.get(addr, 0) if _ab_sent[0] else 0
+                return bytes([b]) + bytes(n - 1)
 
         class _ClientAB:
             def run_prg(self, data):
@@ -879,23 +886,23 @@ def main() -> int:
             warp._net_init_ip65 = lambda *a, **k: True
             warp.ki.press_key = lambda *a, **k: True
             warp.ki.wait_for_state = lambda *a, **k: True
-            warp.ki.send_message_dma = lambda *a, **k: True
+            warp.ki.send_message_dma = lambda *a, **k: (
+                _ab_sent.__setitem__(0, True) or True)
             warp.wait_for_text = lambda *a, **k: [["PING REPLY OK"]]
             warp.dump_screen = lambda *a, **k: None
             warp.time.sleep = lambda s: None
             with _tf.TemporaryDirectory() as td:
                 prg = Path(td) / "a.prg"
                 prg.write_bytes(b"\x01\x08\x00")
-                ip65_pre120_ab = {k: v for k, v in ip65_1440.items()
-                                  if k != "net_last_error"}
                 for _n, _lab, _bk, _want in (
                         ("ip65 labels: the byte at ip65's own address (#170)",
                          ip65_1440, "ip65", "$48"),
                         ("uci labels: the byte at uci's own address",
                          uci_default, "uci", "$5A"),
                         ("labels WITHOUT net_last_error (pre-#120 ip65 "
-                         "map): None, no raise", ip65_pre120_ab, "ip65",
+                         "map): None, no raise", ip65_pre120, "ip65",
                          None)):
+                    _ab_sent[0] = False
                     try:
                         res = warp.run_stage_ab(
                             _TrAB(_lab), _ClientAB(), _lab, b"", b"", b"",
@@ -961,6 +968,32 @@ def main() -> int:
                   and ("turbo", 48) not in calls
                   and calls[:2] == [("turbo", 1), ("key", "I")],
                   f"ok={ok} calls={calls} res={res}")
+            # The failure verdict ip65 net_init/DHCP/listen left behind
+            # ($41/$42/$46) is read from net_last_error on the timeout path,
+            # at the label's own address; a map without the label neither
+            # raises nor records a value. $42 is nonzero so a $00/None
+            # default cannot pass.
+
+            class _TrInitFail:
+                def read_memory(self, addr, n):
+                    b = 0x42 if addr == ip65_1440["net_last_error"] else 0
+                    return bytes([b]) + bytes(n - 1)
+            for _n, _lab, _want in (
+                    ("ip65 labels record net_last_error=$42 (#170)",
+                     ip65_1440, "$42"),
+                    ("labels WITHOUT net_last_error (pre-#120 ip65 map): "
+                     "None, no raise", ip65_pre120, None)):
+                calls.clear()
+                res = {}
+                try:
+                    ok = warp._net_init_ip65(_TrInitFail(), None, _lab, 48,
+                                             res)
+                    got = res.get("net_last_error", "<unset>")
+                    ok_nle = ok is False and got == _want
+                    detail = f"ok={ok} net_last_error={got!r} want={_want!r}"
+                except Exception as exc:              # noqa: BLE001
+                    ok_nle, detail = False, f"_net_init_ip65 RAISED {exc!r}"
+                check(f"_net_init_ip65 timeout: {_n}", ok_nle, detail)
         finally:
             (warp.set_turbo_mhz, warp.get_turbo_mhz, warp.ki.press_key,
              warp.time.sleep, warp.dump_screen, warp.NET_INIT_BUDGET_S) = saved
@@ -1293,10 +1326,10 @@ def _warp_labels(kind: str, ip_pkt_len: int, chunked: bool = False) -> dict:
     # BUILT labels.txt so the next such divergence cannot hide.
     L = {"boot_ready": 0x8E60, "wg_state": 0x8E61, "net_initialized": 0x908E,
          "ip_packet_buf": 0x9833, "ip_pkt_len": ip_pkt_len,
-         "WG_MTU": ip_pkt_len - 0x9833, "net_last_error": 0x7C32}
+         "WG_MTU": ip_pkt_len - 0x9833, "net_last_error": 0x7D32}
+    # net_last_error is the REU=1 address on both arms: uci $7D32, ip65
+    # $79D2 (at REU=0: $7C32 and $78C2), measured at d5dd49f.
     if kind == "ip65":
-        # The ip65 build places it elsewhere: $79D2 in an ip65 WG_MTU1440
-        # build/labels.txt measured 2026-10-02.
         L["net_last_error"] = 0x79D2
         L["ip65_blob_start"] = 0x2000
         L["ip65_blob_end"] = 0x32EF
