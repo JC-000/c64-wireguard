@@ -163,9 +163,11 @@
 ;   $8A   UCI_ERR_LONG_READ           retired table, ours (moved off $88)
 ;   $8B   UCI_ERR_BAD_READ_HDR        retired table, c64-https — WE DO NOT EMIT
 ;   $8C   UCI_ERR_SEND_TOO_LONG       retired table, ours
-;   $8D   UCI_ERR_OPEN_REFUSED        retired table, ours
-;   $8E   UCI_ERR_CMD_UNKNOWN         OURS, minted here (PR #112)
-;   $8F   UCI_ERR_SHORT_READ          OURS, minted here (issue #130)
+;   $8D   UCI_ERR_OPEN_REFUSED        retired table, ours; c64-https emits too
+;   $8E   UCI_ERR_CMD_UNKNOWN         OURS, minted here (PR #112);
+;                                     c64-https emits too
+;   $8F   UCI_ERR_SHORT_READ          OURS, minted here (issue #130);
+;                                     c64-https emits too
 ;   $90   UCI_ERR_STREAM_LOST         c64-https, minted here (c64-https#276) —
 ;                                     WE DO NOT EMIT
 ;
