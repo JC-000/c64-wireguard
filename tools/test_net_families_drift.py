@@ -109,10 +109,15 @@ shared values, boundary malformations, misplaced guard lines, an empty
 file, a duplicate, a two-token name, a corrupted parser, and peer-identity
 cases on throwaway directories (a case-variant one is SKIPPED on a
 case-sensitive filesystem), and a GIT_DIR-pointing-elsewhere provenance
-case on two throwaway git repos. Every verdict is read through
-``run_checks``/``accept_peer``, the entry points main() reports from. Each
-must turn the expected check RED and name the bit or line; survivors (comment-only edit, reordered equates, a
-genuine c64-https-shaped peer) must stay GREEN. Renamed/added names and the
+case on two throwaway git repos. The check and identity proofs read their
+verdicts through ``run_checks``/``accept_peer``, the entry points main()
+reports from; the provenance proof calls ``peer_provenance``, as main()
+does; and one end-to-end proof runs this script as a subprocess against
+throwaway roots (self peer, missing peer, opt-out "1" and "yes", default
+``../c64-https``), asserting exit codes and the ``peer@`` tag, so main()'s
+own glue is driven too. Each must turn the expected check RED and name the
+bit or line; survivors (comment-only edit, reordered equates, a genuine
+c64-https-shaped peer) must stay GREEN. Renamed/added names and the
 malformed line's victim come from a seeded RNG, logged once (``--seed`` /
 ``TEST_SEED``); the value and single-bit proofs do not depend on the seed. A
 proof that fails is a check that can no longer fire, and fails the run. If
@@ -136,6 +141,7 @@ SELF_ROOT_ENV = "NET_FAMILIES_PROJECT_ROOT"
 PEER_ROOT_ENV = "C64_HTTPS_ROOT"
 OPT_OUT_ENV = "C64_NO_PEER_REGISTRY"
 FAMILIES_REL = Path("src") / "net" / "net_families.inc"
+E2E_CHILD_ENV = "NET_FAMILIES_E2E_CHILD"  # set in the end-to-end children
 
 GUARD_OPEN = ".ifndef NET_FAMILIES_INC_INCLUDED"
 GUARD_SET = "NET_FAMILIES_INC_INCLUDED = 1"
@@ -477,7 +483,8 @@ def _provenance_proof():
     """With GIT_DIR pointing at ANOTHER repo, the peer's own HEAD must win."""
     name = "provenance: GIT_DIR set elsewhere still reports the peer's HEAD"
     git = ["git", "-c", "core.hooksPath=/dev/null", "-c", "user.name=p",
-           "-c", "user.email=p@p", "-c", "init.defaultBranch=m"]
+           "-c", "user.email=p@p", "-c", "init.defaultBranch=m",
+           "-c", "commit.gpgsign=false"]
     saved = os.environ.get("GIT_DIR")
     try:
         with tempfile.TemporaryDirectory() as td:
@@ -490,13 +497,15 @@ def _provenance_proof():
                 for cmd in (["init", "-q"], ["commit", "-q", "--no-verify",
                                              "--allow-empty", "-m", repo]):
                     subprocess.run(git + ["-C", str(d)] + cmd, env=clean,
-                                   check=True, capture_output=True)
+                                   check=True, capture_output=True,
+                                   timeout=30)
                 heads[repo] = subprocess.run(
                     git + ["-C", str(d), "rev-parse", "HEAD"], env=clean,
-                    check=True, capture_output=True, text=True).stdout.strip()
+                    check=True, capture_output=True, text=True,
+                    timeout=30).stdout.strip()
             os.environ["GIT_DIR"] = str(Path(td) / "other" / ".git")
             short, _, _ = peer_provenance(Path(td) / "peer")
-    except (OSError, subprocess.CalledProcessError) as exc:
+    except (OSError, subprocess.SubprocessError) as exc:
         return [(name, None, f"SKIPPED: cannot build temp git repos ({exc})")]
     finally:
         if saved is None:
@@ -506,6 +515,57 @@ def _provenance_proof():
     ok = short == heads["peer"][:7]
     return [(name, ok, f"reported {short}, peer {heads['peer'][:7]}, "
              f"other {heads['other'][:7]}")]
+
+
+def _end_to_end_proof(ours_text):
+    """Run THIS script as a child against throwaway roots: main()'s glue."""
+    name = "end-to-end: main() exit codes and peer@ tag"
+    bad, n = [], 0
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        for root, marker in [("self", True), ("sib/self", False),
+                             ("sib/c64-https", True)]:
+            (td / root / FAMILIES_REL).parent.mkdir(parents=True)
+            (td / root / FAMILIES_REL).write_text(ours_text)
+            if marker:
+                (td / root / PEER_MARKER).write_text("; marker\n")
+        base = {k: v for k, v in os.environ.items()
+                if not k.startswith("GIT_") and k not in
+                (PEER_ROOT_ENV, OPT_OUT_ENV, "TEST_SEED")}
+        base[E2E_CHILD_ENV] = "1"
+        missing = str(td / "missing")
+        for label, self_root, extra, want_rc, want_tag in [
+                ("peer = self", "self", {PEER_ROOT_ENV: str(td / "self")},
+                 1, "peer@none"),
+                ("missing peer", "self", {PEER_ROOT_ENV: missing},
+                 1, "peer@none"),
+                ("missing peer, opt-out 1", "self",
+                 {PEER_ROOT_ENV: missing, OPT_OUT_ENV: "1"},
+                 0, "peer@none  [" + OPT_OUT_ENV),
+                ("missing peer, opt-out yes", "self",
+                 {PEER_ROOT_ENV: missing, OPT_OUT_ENV: "yes"},
+                 1, "peer@none"),
+                ("default ../c64-https", "sib/self", {},
+                 0, "peer@not-a-git-checkout")]:
+            n += 1
+            env = dict(base, **extra)
+            env[SELF_ROOT_ENV] = str(td / self_root)
+            try:
+                r = subprocess.run([sys.executable, str(Path(__file__)
+                                                        .resolve()),
+                                    "--seed", "0"], env=env, timeout=60,
+                                   capture_output=True, text=True)
+            except (OSError, subprocess.SubprocessError) as exc:
+                bad.append(f"{label}: child did not run ({exc})")
+                continue
+            res = [l for l in r.stdout.splitlines()
+                   if l.startswith("Results:")]
+            if r.returncode != want_rc or not res or want_tag not in res[-1]:
+                bad.append(f"{label}: rc {r.returncode} (want {want_rc}), "
+                           f"{res[-1] if res else 'no Results line'!r} "
+                           f"(want {want_tag!r})")
+    return [(name, not bad, f"{n - len(bad)}/{n} cases"
+             + (f"; {'; '.join(bad)}" if bad else ""))]
 
 
 def alarm_proofs(ours_text, rng):
@@ -630,6 +690,7 @@ def alarm_proofs(ours_text, rng):
 
     out += _identity_proofs(ours_text)
     out += _provenance_proof()
+    out += _end_to_end_proof(ours_text)
 
     # Survivors: these must stay GREEN everywhere.
     lines = ours_text.splitlines()
@@ -734,12 +795,18 @@ def main(argv=None):
     for name, msgs in run_checks(ours, peer):
         report(name, msgs)
 
+    n_skip = 0
     print("\nalarm proofs (in-process, in-memory variants of our file):")
-    proofs = alarm_proofs(ours["text"], random.Random(seed))
+    if os.environ.get(E2E_CHILD_ENV) == "1":
+        proofs = []
+        print(f"  NOT RUN: {E2E_CHILD_ENV}=1 (end-to-end child of a run "
+              f"that runs them)")
+    else:
+        proofs = alarm_proofs(ours["text"], random.Random(seed))
     if proofs is None:
         print("  NOT RUN: our own file is red (see the ours_* failures above), "
               "so no mutation of it proves anything")
-    else:
+    elif proofs:
         live = [(n, ok, d) for n, ok, d in proofs if ok is not None]
         for name, ok, detail in proofs:
             tag = "SKIP  " if ok is None else "ok    " if ok else "BROKEN"
@@ -752,8 +819,9 @@ def main(argv=None):
                [f"{len(live) - proofs_ok} proof(s) did not behave -- a "
                 f"check that can no longer fire, or a survivor that went RED"])
 
-    print(f"\nResults: {passed} passed, {failed} failed, {skipped} skipped  "
-          f"{peer_tag}"
+    print(f"\nResults: {passed} passed, {failed} failed, {skipped} skipped"
+          + (f", {n_skip} proof(s) SKIPPED" if n_skip else "")
+          + f"  {peer_tag}"
           + (f"  [{OPT_OUT_ENV}=1: peer comparison NOT run]" if skipped
              else ""))
     return 1 if failed else 0
