@@ -72,15 +72,19 @@ and the isolated-gate recipe repoints it, so the peer follows -- else
 ``../c64-https`` next to the repo. The variable name mirrors c64-https's
 ``C64_WIREGUARD_ROOT``.
 
-The peer must BE c64-https: it may not resolve to this tree, and it must
+The peer must BE c64-https: it may not be this tree (root or families file,
+compared by device+inode, so a case-variant path on APFS is caught), and it must
 carry ``src/tls13.s`` (c64-https has it; c64-wireguard never has). Otherwise
 a c64-wireguard worktree passed as the peer compares our file with itself.
-Both are failures the opt-out does not excuse.
+Both are failures the opt-out does not excuse. main() and the proofs decide
+through the same ``accept_peer``.
 
 The peer's commit is recorded, offline (no fetch): ``git rev-parse HEAD``
 (also on the ``Results:`` line), whether its families file is dirty, and how
 far it is behind its upstream as of its last fetch. Dirty, behind, or not a
-git checkout of its own is a loud WARNING, not a failure.
+git checkout of its own is a loud WARNING, not a failure. git runs with every
+``GIT_*`` variable removed (hooks export ``GIT_DIR``, which would otherwise
+report OUR commit as the peer's).
 
 A peer checkout that is MISSING FAILS (exit 1). ``C64_NO_PEER_REGISTRY=1``
 (exactly "1"; the same variable c64-https uses for this peer, one peer, one
@@ -99,12 +103,15 @@ BUILT-IN ALARM PROOFS
 =====================
 
 Every run also replays a mutation catalogue in-process, on in-memory
-variants of our file (most fed in as the peer, one as ours): rename, every
+variants of our file (most fed in as the peer, a few as ours): rename, every
 one of the 16 bits flipped on every row, one-sided bits, non-single-bit and
 shared values, boundary malformations, misplaced guard lines, an empty
 file, a duplicate, a two-token name, a corrupted parser, and peer-identity
-cases on throwaway directories. Each must turn the expected check RED and
-name the bit or line; survivors (comment-only edit, reordered equates, a
+cases on throwaway directories (a case-variant one is SKIPPED on a
+case-sensitive filesystem), and a GIT_DIR-pointing-elsewhere provenance
+case on two throwaway git repos. Every verdict is read through
+``run_checks``/``accept_peer``, the entry points main() reports from. Each
+must turn the expected check RED and name the bit or line; survivors (comment-only edit, reordered equates, a
 genuine c64-https-shaped peer) must stay GREEN. Renamed/added names and the
 malformed line's victim come from a seeded RNG, logged once (``--seed`` /
 ``TEST_SEED``); the value and single-bit proofs do not depend on the seed. A
@@ -300,13 +307,46 @@ def locate_peer(self_root):
     return self_root.parent / "c64-https", "../c64-https next to the repo"
 
 
+def _same(a, b):
+    """Same file by (st_dev, st_ino): immune to case-variant paths on a
+    case-insensitive filesystem, where resolve() keeps the given case."""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def accept_peer(self_root, peer_root, opted_out):
+    """(peer families path or None, [(check, msgs)], skipped). main() and the
+    identity proofs both decide through this, so neither can drift."""
+    if not peer_root.is_dir():
+        if opted_out:
+            return None, [], True
+        return None, [("peer_present", [
+            f"no c64-https checkout at {peer_root}, so our NET_FAMILY_* bits "
+            f"are UNVERIFIED against the peer. Set {PEER_ROOT_ENV}=/path/to/"
+            f"c64-https, or {OPT_OUT_ENV}=1 to accept an unverified run"])], \
+            False
+    problems = peer_identity_problems(self_root, peer_root)
+    if problems:
+        return None, [("peer_is_c64_https",
+                       problems + [f"(not excused by {OPT_OUT_ENV})"])], False
+    peer_path = peer_root / FAMILIES_REL
+    if not peer_path.is_file():
+        return None, [("peer_present", [
+            f"c64-https checkout {peer_root} has no {FAMILIES_REL}: the peer "
+            f"moved or deleted its copy of the family bits (not excused by "
+            f"{OPT_OUT_ENV})"])], False
+    return peer_path, [("peer_present", [])], False
+
+
 def peer_identity_problems(self_root, peer_root):
     """Failures if `peer_root` is this tree or is not a c64-https checkout."""
     out = []
-    if (peer_root.resolve() == self_root.resolve()
-            or (peer_root / FAMILIES_REL).resolve()
-            == (self_root / FAMILIES_REL).resolve()):
-        out.append(f"peer {peer_root} resolves to THIS tree ({self_root}): "
+    if (_same(peer_root, self_root)
+            or _same(peer_root / FAMILIES_REL, self_root / FAMILIES_REL)):
+        out.append(f"peer {peer_root} is the same directory or file as THIS "
+                   f"tree ({self_root}, compared by device+inode): "
                    f"comparing our file with itself certifies nothing")
     if not (peer_root / PEER_MARKER).is_file():
         out.append(f"peer {peer_root} has no {PEER_MARKER}, so it is not a "
@@ -317,7 +357,10 @@ def peer_identity_problems(self_root, peer_root):
 
 def _git(root, *args):
     try:
-        r = subprocess.run(["git", "-C", str(root), *args],
+        # GIT_DIR & co. (exported by git hooks) would make `-C` irrelevant
+        # and report OUR repository as the peer's.
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        r = subprocess.run(["git", "-C", str(root), *args], env=env,
                            capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -389,11 +432,13 @@ def _with_parser(fn):
 
 
 def _identity_proofs(ours_text):
+    """Through accept_peer, as main() decides. ok=None means SKIPPED."""
     out = []
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
         roots = {}
-        for name, marker in [("self", False), ("wg_worktree", False),
+        # "self" carries the marker too, so only the self-compare can fire.
+        for name, marker in [("self", True), ("wg_worktree", False),
                              ("https", True)]:
             r = td / name
             (r / FAMILIES_REL).parent.mkdir(parents=True)
@@ -402,20 +447,65 @@ def _identity_proofs(ours_text):
                 (r / PEER_MARKER).write_text("; marker\n")
             roots[name] = r
         (td / "alias").symlink_to(roots["self"])
-        for label, peer, needle in [
-                ("peer is this tree", roots["self"], "THIS tree"),
-                ("peer is a symlink to this tree", td / "alias", "THIS tree"),
-                ("peer is a c64-wireguard copy", roots["wg_worktree"],
-                 str(PEER_MARKER))]:
-            msgs = peer_identity_problems(roots["self"], peer)
+        case_variant = td / "SELF"
+        cases = [("peer is this tree", roots["self"], "THIS tree"),
+                 ("peer is a symlink to this tree", td / "alias", "THIS tree"),
+                 ("peer is a c64-wireguard copy", roots["wg_worktree"],
+                  str(PEER_MARKER))]
+        if case_variant.exists():
+            cases.append(("peer is this tree via a case-variant path",
+                          case_variant, "THIS tree"))
+        else:
+            out.append(("identity: peer is this tree via a case-variant path",
+                        None, "SKIPPED: this filesystem is case-sensitive"))
+        for label, peer, needle in cases:
+            path, results, _ = accept_peer(roots["self"], peer, False)
+            msgs = dict(results).get("peer_is_c64_https", [])
             out.append((f"identity: {label}",
-                        any(needle in m for m in msgs),
+                        path is None and any(needle in m for m in msgs),
                         "peer_is_c64_https: "
                         + (msgs[0] if msgs else "stayed GREEN")))
-        msgs = peer_identity_problems(roots["self"], roots["https"])
-        out.append(("survivor: c64-https-shaped peer", not msgs,
-                    "all GREEN" if not msgs else f"went RED: {msgs[0]}"))
+        path, results, _ = accept_peer(roots["self"], roots["https"], False)
+        red = [(n, m) for n, m in results if m]
+        out.append(("survivor: c64-https-shaped peer",
+                    path is not None and not red,
+                    "all GREEN" if not red else f"went RED: {red[0]}"))
     return out
+
+
+def _provenance_proof():
+    """With GIT_DIR pointing at ANOTHER repo, the peer's own HEAD must win."""
+    name = "provenance: GIT_DIR set elsewhere still reports the peer's HEAD"
+    git = ["git", "-c", "core.hooksPath=/dev/null", "-c", "user.name=p",
+           "-c", "user.email=p@p", "-c", "init.defaultBranch=m"]
+    saved = os.environ.get("GIT_DIR")
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            heads = {}
+            for repo in ("peer", "other"):
+                d = Path(td) / repo
+                d.mkdir()
+                clean = {k: v for k, v in os.environ.items()
+                         if not k.startswith("GIT_")}
+                for cmd in (["init", "-q"], ["commit", "-q", "--no-verify",
+                                             "--allow-empty", "-m", repo]):
+                    subprocess.run(git + ["-C", str(d)] + cmd, env=clean,
+                                   check=True, capture_output=True)
+                heads[repo] = subprocess.run(
+                    git + ["-C", str(d), "rev-parse", "HEAD"], env=clean,
+                    check=True, capture_output=True, text=True).stdout.strip()
+            os.environ["GIT_DIR"] = str(Path(td) / "other" / ".git")
+            short, _, _ = peer_provenance(Path(td) / "peer")
+    except (OSError, subprocess.CalledProcessError) as exc:
+        return [(name, None, f"SKIPPED: cannot build temp git repos ({exc})")]
+    finally:
+        if saved is None:
+            os.environ.pop("GIT_DIR", None)
+        else:
+            os.environ["GIT_DIR"] = saved
+    ok = short == heads["peer"][:7]
+    return [(name, ok, f"reported {short}, peer {heads['peer'][:7]}, "
+             f"other {heads['other'][:7]}")]
 
 
 def alarm_proofs(ours_text, rng):
@@ -482,6 +572,9 @@ def alarm_proofs(ours_text, rng):
         cases.append((f"single bits: {label}",
                       _replace_line(ours_text, line_no, text_line), None,
                       "peer_single_bits", needle))
+    cases.append(("malformed in ours", None,
+                  _replace_line(ours_text, lineno, f"{victim} = $00G1"),
+                  "ours_parses", f":{lineno}:"))
     cases.append(("single bits: ours $0003", None,
                   _replace_line(ours_text, l0, f"{n0} = $0003"),
                   "ours_single_bits", f"{n0} = $0003 is not"))
@@ -517,9 +610,8 @@ def alarm_proofs(ours_text, rng):
     for ln, name, v in base_rows:
         for bit in range(16):
             w = v ^ (1 << bit)
-            msgs = check_values_agree(
-                ours, peer_mut(_replace_line(ours_text, ln,
-                                             f"{name} = ${w:04X}")))
+            msgs = dict(run_checks(ours, peer_mut(_replace_line(
+                ours_text, ln, f"{name} = ${w:04X}")))).get("values_agree", [])
             if not any(f"{name}: ours ${v:04X}, peer ${w:04X}" in m
                        for m in msgs):
                 missed.append(f"{name} ${v:04X}->${w:04X}")
@@ -537,6 +629,7 @@ def alarm_proofs(ours_text, rng):
                 "ours_row_count: " + (msgs[0] if msgs else "stayed GREEN")))
 
     out += _identity_proofs(ours_text)
+    out += _provenance_proof()
 
     # Survivors: these must stay GREEN everywhere.
     lines = ours_text.splitlines()
@@ -615,31 +708,16 @@ def main(argv=None):
     print(f"peer: {peer_path}  (from {how})")
     peer = None
     opted_out = os.environ.get(OPT_OUT_ENV, "").strip() == "1"
-    if not peer_root.is_dir():
-        if opted_out:
-            _banner([f"{OPT_OUT_ENV}=1 and no c64-https checkout at "
-                     f"{peer_root}.",
-                     "The cross-repo NET_FAMILY_* comparison is SKIPPED. This "
-                     "run certifies NOTHING",
-                     "about agreement with c64-https's copy; only our own "
-                     "file was checked."])
-            skipped = len(LOCAL_CHECKS) + len(CROSS_CHECKS)
-        else:
-            report("peer_present", [
-                f"no c64-https checkout at {peer_root} ({how}), so our "
-                f"NET_FAMILY_* bits are UNVERIFIED against the peer. Set "
-                f"{PEER_ROOT_ENV}=/path/to/c64-https, or {OPT_OUT_ENV}=1 to "
-                f"accept an unverified run"])
-    elif peer_identity_problems(self_root, peer_root):
-        report("peer_is_c64_https",
-               peer_identity_problems(self_root, peer_root)
-               + [f"(not excused by {OPT_OUT_ENV})"])
-    elif not peer_path.is_file():
-        report("peer_present", [
-            f"c64-https checkout {peer_root} has no {FAMILIES_REL}: the peer "
-            f"moved or deleted its copy of the family bits (not excused by "
-            f"{OPT_OUT_ENV})"])
-    else:
+    peer_path, verdicts, peer_skipped = accept_peer(self_root, peer_root,
+                                                    opted_out)
+    if peer_skipped:
+        _banner([f"{OPT_OUT_ENV}=1 and no c64-https checkout at {peer_root}.",
+                 "The cross-repo NET_FAMILY_* comparison is SKIPPED. This "
+                 "run certifies NOTHING",
+                 "about agreement with c64-https's copy; only our own "
+                 "file was checked."])
+        skipped = len(LOCAL_CHECKS) + len(CROSS_CHECKS)
+    if peer_path is not None:
         print(f"      sha256[:16] {fingerprint(peer_path)}")
         short, info, warns = peer_provenance(peer_root)
         for line in info:
@@ -650,7 +728,8 @@ def main(argv=None):
         if short and warns:
             peer_tag += "(WARN)"
         peer = load(peer_path, "peer")
-        report("peer_present", [])
+    for name, msgs in verdicts:
+        report(name, msgs)
 
     for name, msgs in run_checks(ours, peer):
         report(name, msgs)
@@ -661,13 +740,16 @@ def main(argv=None):
         print("  NOT RUN: our own file is red (see the ours_* failures above), "
               "so no mutation of it proves anything")
     else:
-        proofs_ok = 0
+        live = [(n, ok, d) for n, ok, d in proofs if ok is not None]
         for name, ok, detail in proofs:
-            print(f"  {'ok    ' if ok else 'BROKEN'}  {name}: {detail}")
-            proofs_ok += ok
-        report(f"alarm_proofs ({proofs_ok}/{len(proofs)} fired as expected)",
-               [] if proofs_ok == len(proofs) else
-               [f"{len(proofs) - proofs_ok} proof(s) did not behave -- a "
+            tag = "SKIP  " if ok is None else "ok    " if ok else "BROKEN"
+            print(f"  {tag}  {name}: {detail}")
+        proofs_ok = sum(ok for _, ok, _ in live)
+        n_skip = len(proofs) - len(live)
+        report(f"alarm_proofs ({proofs_ok}/{len(live)} fired as expected"
+               + (f", {n_skip} SKIPPED" if n_skip else "") + ")",
+               [] if proofs_ok == len(live) else
+               [f"{len(live) - proofs_ok} proof(s) did not behave -- a "
                 f"check that can no longer fire, or a survivor that went RED"])
 
     print(f"\nResults: {passed} passed, {failed} failed, {skipped} skipped  "

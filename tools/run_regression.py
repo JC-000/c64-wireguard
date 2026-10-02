@@ -55,7 +55,8 @@ TESTS = [
     # without it; C64_NO_PEER_REGISTRY=1 is the loud, explicit opt-out.
     # Unseeded here: the name and malformed-line proofs it replays pick their
     # victim from a seed printed on its first line (--seed reproduces); the
-    # value and single-bit proofs are exhaustive and seed-independent.
+    # value proofs are exhaustive (16 bits x every row) and the single-bit
+    # proofs are fixed cases, so neither depends on the seed.
     ("net_families", ["tools/test_net_families_drift.py"]),
     ("session",    ["tools/test_session.py", "--seed", "51820", "--verbose"]),
     ("transport",  ["tools/test_transport.py", "--seed", "7539"]),
