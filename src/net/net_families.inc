@@ -1,8 +1,9 @@
 ; net_families.inc — from c64-lib-contract SPEC §13.0, which was retired at
 ; contract v1.0.0 (text at `git show v0.17.1:SPEC.md`). This copy is ours
 ; now, and nothing in this repo includes it. c64-https keeps the same bits in
-; its src/net/net_families.inc and nothing checks that they agree: a new bit
-; is a cross-repo agreement with that lane.
+; its src/net/net_families.inc; tools/test_net_families_drift.py checks names
+; and values against it in both directions (c64-https#278 is its half). A new
+; bit is a cross-repo agreement with that lane.
 ;
 ; Plain assemble-time equates, never .export'ed (only exported symbols can
 ; collide). Bits are append-only and never reused (§8.0 discipline).

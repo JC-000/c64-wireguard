@@ -47,6 +47,15 @@ TESTS = [
     # refuses — a host-side allowlist that blocked the next legitimate
     # firmware rebase would be worse than the thing it guards against.
     ("u64_firmware", ["tools/test_u64_firmware.py", "--verbose"]),
+    # Host-side only, milliseconds, no build: our src/net/net_families.inc
+    # NET_FAMILY_* bits must equal c64-https's copy, names both directions
+    # and values (the c64-https half is its #278). Needs the sibling checkout
+    # -- found via $C64_HTTPS_ROOT, else the ip65 symlink's parent, which any
+    # tree that can build the default (ip65) PRG already has -- and FAILS
+    # without it; C64_NO_PEER_REGISTRY=1 is the loud, explicit opt-out.
+    # Unseeded here: the mutation proofs it replays every run pick their
+    # victim bit from a seed printed on its first line (--seed reproduces).
+    ("net_families", ["tools/test_net_families_drift.py"]),
     ("session",    ["tools/test_session.py", "--seed", "51820", "--verbose"]),
     ("transport",  ["tools/test_transport.py", "--seed", "7539"]),
     # chacha20poly1305 SPEC §14.1: aead_encrypt returns a status now, and
