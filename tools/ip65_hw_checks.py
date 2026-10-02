@@ -1211,11 +1211,11 @@ def ip4_bytes(a: str) -> bytes:
 # ===========================================================================
 # net_last_error — the byte that separates a dropped cartridge from DHCP
 # ===========================================================================
-#: src/net_abi.inc:106-152 is the canonical registry; src/net/ip65/net.s
-#: carries the equates this build actually assembles. Retyped here ONLY as
-#: the value `net_error_table()` cross-checks the tree against -- a
-#: renumbering must be a loud failure, not a decoder that keeps naming the
-#: old meaning.
+#: The net_last_error REGISTRY block in src/net_abi.inc is the canonical
+#: registry; src/net/ip65/net.s carries the equates this build actually
+#: assembles. Retyped here ONLY as the value `net_error_table()` cross-checks
+#: the tree against -- a renumbering must be a loud failure, not a decoder
+#: that keeps naming the old meaning.
 NET_ERRORS: dict[int, tuple[str, str]] = {
     0x00: ("NET_ERR_NONE", "no error"),
     0x01: ("NET_ERR_TIMEBASE_STOPPED",

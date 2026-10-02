@@ -558,8 +558,7 @@ do_message_input:
         ; how a firmware WITHOUT the $16 command shows up — every send fails
         ; with net_last_error = $8E — so print the code instead of the
         ; unconditional "PACKET SENT OK" the default build shows. (The
-        ; default build is left as it was so its PRG stays byte-identical;
-        ; ip65 has no net_last_error to print.)
+        ; default build is left as it was so its PRG stays byte-identical.)
         lda     #<@msg_send_err_str
         ldy     #>@msg_send_err_str
         jsr     print_string
