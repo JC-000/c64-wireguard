@@ -2020,9 +2020,8 @@ def run_stage_ab(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
         if "tp_send_counter" in L else None
     ok = ki.send_message_dma(tr, msg_text, L, timeout=15.0)
     time.sleep(0.5)
-    # Read on uci only here; ip65 exports net_last_error too (see _dump_failure).
     err_after = (tr.read_memory(L["net_last_error"], 1)[0]
-                 if backend == "uci" else None)
+                 if "net_last_error" in L else None)
     after = int.from_bytes(tr.read_memory(L["tp_send_counter"], 2), "little") \
         if "tp_send_counter" in L else None
     result["message_sent_keypress_ok"] = ok

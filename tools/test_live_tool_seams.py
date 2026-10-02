@@ -849,6 +849,72 @@ def main() -> int:
         finally:
             warp.dump_screen = saved_dump
 
+        # run_stage_ab, Stage-B message step: net_last_error is read after
+        # the message wherever the map has it, at the label's own address.
+        # Driven through the real run_stage_ab with every device-facing
+        # collaborator stubbed. Nonzero, per-address bytes so a None/$00
+        # default or a read at the wrong address cannot pass. Issue #170.
+        import tempfile as _tf
+        _NLE_BYTE = {0x79D2: 0x48, 0x7C32: 0x5A}
+
+        class _TrAB:
+            def __init__(self, L):
+                self.L = L
+
+            def read_memory(self, addr, n):
+                if addr == self.L.get("wg_state"):
+                    return bytes([warp.SESSION_ACTIVE]) + bytes(n - 1)
+                return bytes([_NLE_BYTE.get(addr, 0)]) + bytes(n - 1)
+
+        class _ClientAB:
+            def run_prg(self, data):
+                pass
+        saved_ab = (warp._wait_boot_ready, warp._stage_config,
+                    warp._net_init_ip65, warp.ki.press_key,
+                    warp.ki.wait_for_state, warp.ki.send_message_dma,
+                    warp.wait_for_text, warp.dump_screen, warp.time.sleep)
+        try:
+            warp._wait_boot_ready = lambda *a, **k: None
+            warp._stage_config = lambda *a, **k: None
+            warp._net_init_ip65 = lambda *a, **k: True
+            warp.ki.press_key = lambda *a, **k: True
+            warp.ki.wait_for_state = lambda *a, **k: True
+            warp.ki.send_message_dma = lambda *a, **k: True
+            warp.wait_for_text = lambda *a, **k: [["PING REPLY OK"]]
+            warp.dump_screen = lambda *a, **k: None
+            warp.time.sleep = lambda s: None
+            with _tf.TemporaryDirectory() as td:
+                prg = Path(td) / "a.prg"
+                prg.write_bytes(b"\x01\x08\x00")
+                ip65_pre120_ab = {k: v for k, v in ip65_1440.items()
+                                  if k != "net_last_error"}
+                for _n, _lab, _bk, _want in (
+                        ("ip65 labels: the byte at ip65's own address (#170)",
+                         ip65_1440, "ip65", "$48"),
+                        ("uci labels: the byte at uci's own address",
+                         uci_default, "uci", "$5A"),
+                        ("labels WITHOUT net_last_error (pre-#120 ip65 "
+                         "map): None, no raise", ip65_pre120_ab, "ip65",
+                         None)):
+                    try:
+                        res = warp.run_stage_ab(
+                            _TrAB(_lab), _ClientAB(), _lab, b"", b"", b"",
+                            seed=1, backend=_bk, prg_path=prg)
+                        got = res.get("net_last_error_after_message", "<unset>")
+                        ok_ab = (res.get("active") is True
+                                 and "error" not in res and got == _want)
+                        detail = (f"net_last_error_after_message={got!r} "
+                                  f"want={_want!r} active={res.get('active')}")
+                    except Exception as exc:              # noqa: BLE001
+                        ok_ab, detail = False, f"run_stage_ab RAISED {exc!r}"
+                    check(f"run_stage_ab Stage-B net_last_error: {_n}",
+                          ok_ab, detail)
+        finally:
+            (warp._wait_boot_ready, warp._stage_config,
+             warp._net_init_ip65, warp.ki.press_key,
+             warp.ki.wait_for_state, warp.ki.send_message_dma,
+             warp.wait_for_text, warp.dump_screen, warp.time.sleep) = saved_ab
+
         # _net_init_ip65 ordering: 1 MHz before 'I', turbo only after
         # net_initialized reads 1; a timeout returns False and never
         # raises the clock.
