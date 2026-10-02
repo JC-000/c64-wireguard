@@ -41,18 +41,20 @@ The set of lines that must match it is NOT selected by a regex sharing the
 parser's prefix (the gap c64-https's registry test had: a candidate regex
 that only fires on lines the parser would almost accept is circular). It is
 every non-blank code line (text before ``;``) except the three include-guard
-lines, compared as whitespace-normalised STRINGS. So ``NET_FAMILY_X=$1``,
+lines, compared as whitespace-normalised STRINGS and accepted only at their
+positions: ``.ifndef`` and ``= 1`` as the first two code lines, ``.endif`` as
+the last, each exactly once (a second guard block after the real ``.endif``
+defines nothing ca65 will see). So ``NET_FAMILY_X=$1``,
 ``NET_FAMILY_X = $00G1``, a lowercase ``$000a``, a tab, ``:=``, ``.set``,
 ``.define``, an expression, a typo'd ``NET_FAMLY_X`` -- each fails, quoting
 its file and line. A line the parser cannot read is never skipped.
 
 The independent row count is the number of ``NET_FAMILY_`` tokens in the
 comment-stripped text, counted with ``str.count`` -- not line-based, no
-regex. On file inputs it is dominated by the fail-closed parse (any file
-that moves it also has an unparseable line); what it guards is the PARSER:
-a loop that drops a row it matched. Its alarm is proved against a corrupted
-parser in the built-in proofs below. The nonzero half is NOT dominated: an
-empty file parses cleanly and would otherwise compare vacuously.
+regex. It is NOT dominated by the parse: ``NET_FAMILY_ANET_FAMILY_B =
+$0010`` matches the strict form but holds two tokens. It also guards the
+parser itself (a loop that drops a row it matched). The nonzero half catches
+a file whose guard lines parse but which defines nothing.
 
 This parser is STRICTER than c64-https#278's (which also accepts 1-4 hex
 digits, lowercase, decimal and ``.define``). A peer edit in one of those
@@ -70,6 +72,16 @@ and the isolated-gate recipe repoints it, so the peer follows -- else
 ``../c64-https`` next to the repo. The variable name mirrors c64-https's
 ``C64_WIREGUARD_ROOT``.
 
+The peer must BE c64-https: it may not resolve to this tree, and it must
+carry ``src/tls13.s`` (c64-https has it; c64-wireguard never has). Otherwise
+a c64-wireguard worktree passed as the peer compares our file with itself.
+Both are failures the opt-out does not excuse.
+
+The peer's commit is recorded, offline (no fetch): ``git rev-parse HEAD``
+(also on the ``Results:`` line), whether its families file is dirty, and how
+far it is behind its upstream as of its last fetch. Dirty, behind, or not a
+git checkout of its own is a loud WARNING, not a failure.
+
 A peer checkout that is MISSING FAILS (exit 1). ``C64_NO_PEER_REGISTRY=1``
 (exactly "1"; the same variable c64-https uses for this peer, one peer, one
 hatch -- this repo had no equivalent) excuses ONLY an absent checkout: the
@@ -86,14 +98,18 @@ tree.
 BUILT-IN ALARM PROOFS
 =====================
 
-Every run also replays a mutation catalogue against temp copies of OUR
-file, in-process: rename a bit, flip one value bit, a bit only in the peer,
-a bit only in ours, boundary malformations of the strict form, an empty
-file, a duplicate, and a corrupted parser. Each must turn the expected check
-RED and name the bit or line; two survivors (comment-only edit, reordered
-equates) must stay GREEN. Which bit is mutated and the added bit's name come
-from a seeded RNG, logged once (``--seed`` / ``TEST_SEED``). A proof that
-fails is a check that has stopped being able to fire, and fails the run.
+Every run also replays a mutation catalogue in-process, on in-memory
+variants of our file (most fed in as the peer, one as ours): rename, every
+one of the 16 bits flipped on every row, one-sided bits, non-single-bit and
+shared values, boundary malformations, misplaced guard lines, an empty
+file, a duplicate, a two-token name, a corrupted parser, and peer-identity
+cases on throwaway directories. Each must turn the expected check RED and
+name the bit or line; survivors (comment-only edit, reordered equates, a
+genuine c64-https-shaped peer) must stay GREEN. Renamed/added names and the
+malformed line's victim come from a seeded RNG, logged once (``--seed`` /
+``TEST_SEED``); the value and single-bit proofs do not depend on the seed. A
+proof that fails is a check that can no longer fire, and fails the run. If
+our own file is red the proofs are not run (reported as NOT RUN).
 """
 
 from __future__ import annotations
@@ -103,6 +119,7 @@ import hashlib
 import os
 import random
 import re
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -113,11 +130,11 @@ PEER_ROOT_ENV = "C64_HTTPS_ROOT"
 OPT_OUT_ENV = "C64_NO_PEER_REGISTRY"
 FAMILIES_REL = Path("src") / "net" / "net_families.inc"
 
-GUARD_LINES = frozenset({
-    ".ifndef NET_FAMILIES_INC_INCLUDED",
-    "NET_FAMILIES_INC_INCLUDED = 1",
-    ".endif",
-})
+GUARD_OPEN = ".ifndef NET_FAMILIES_INC_INCLUDED"
+GUARD_SET = "NET_FAMILIES_INC_INCLUDED = 1"
+GUARD_END = ".endif"
+GUARD_LINES = frozenset({GUARD_OPEN, GUARD_SET, GUARD_END})
+PEER_MARKER = Path("src") / "tls13.s"
 STRICT_EQUATE = re.compile(r"^(NET_FAMILY_[A-Z][A-Z0-9_]*) += +\$([0-9A-F]{4})$")
 TOKEN = "NET_FAMILY_"
 
@@ -133,13 +150,30 @@ def _code(raw):
 def parse(text, label):
     """(rows, bad). rows: [(lineno, name, value)]; bad: ['label:N: line'].
 
-    Every non-blank code line that is not an include-guard line must match
-    STRICT_EQUATE; otherwise it is reported, never skipped.
+    The first two code lines must be GUARD_OPEN, GUARD_SET and the last
+    GUARD_END; a guard line anywhere else, and every other code line that
+    does not match STRICT_EQUATE, is reported, never skipped.
     """
     rows, bad = [], []
-    for lineno, raw in enumerate(text.splitlines(), 1):
-        code = _code(raw)
-        if not code or " ".join(code.split()) in GUARD_LINES:
+    code_lines = [(n, raw, _code(raw))
+                  for n, raw in enumerate(text.splitlines(), 1) if _code(raw)]
+    k = len(code_lines)
+    slots = {0: GUARD_OPEN, 1: GUARD_SET, k - 1: GUARD_END} if k >= 3 else {}
+    if k < 3:
+        bad.append(f"{label}: {k} code line(s) -- no complete include guard "
+                   f"({GUARD_OPEN!r}, {GUARD_SET!r} ... {GUARD_END!r})")
+    for idx, want in sorted(slots.items()):
+        n, raw, code = code_lines[idx]
+        if " ".join(code.split()) != want:
+            bad.append(f"{label}:{n}: expected {want!r} as code line "
+                       f"{'#' + str(idx + 1) if idx < 2 else '(last)'}, "
+                       f"got {raw.rstrip()!r}")
+    for idx, (lineno, raw, code) in enumerate(code_lines):
+        if idx in slots:
+            continue
+        if " ".join(code.split()) in GUARD_LINES:
+            bad.append(f"{label}:{lineno}: include-guard line out of place: "
+                       f"{raw.rstrip()!r}")
             continue
         m = STRICT_EQUATE.match(code)
         if not m:
@@ -266,6 +300,59 @@ def locate_peer(self_root):
     return self_root.parent / "c64-https", "../c64-https next to the repo"
 
 
+def peer_identity_problems(self_root, peer_root):
+    """Failures if `peer_root` is this tree or is not a c64-https checkout."""
+    out = []
+    if (peer_root.resolve() == self_root.resolve()
+            or (peer_root / FAMILIES_REL).resolve()
+            == (self_root / FAMILIES_REL).resolve()):
+        out.append(f"peer {peer_root} resolves to THIS tree ({self_root}): "
+                   f"comparing our file with itself certifies nothing")
+    if not (peer_root / PEER_MARKER).is_file():
+        out.append(f"peer {peer_root} has no {PEER_MARKER}, so it is not a "
+                   f"c64-https checkout (a c64-wireguard tree or worktree "
+                   f"would compare our file with a copy of itself)")
+    return out
+
+
+def _git(root, *args):
+    try:
+        r = subprocess.run(["git", "-C", str(root), *args],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def peer_provenance(peer_root):
+    """(short HEAD or None, info lines, warnings). Offline: never fetches."""
+    top = _git(peer_root, "rev-parse", "--show-toplevel")
+    if top is None or Path(top).resolve() != peer_root.resolve():
+        return None, [], [f"peer {peer_root} is not the root of its own git "
+                          f"checkout: the compared commit is UNRECORDED"]
+    head = _git(peer_root, "rev-parse", "HEAD")
+    branch = _git(peer_root, "rev-parse", "--abbrev-ref", "HEAD")
+    info, warns = [f"peer HEAD {head} ({branch})"], []
+    dirty = _git(peer_root, "status", "--porcelain", "--", str(FAMILIES_REL))
+    if dirty:
+        warns.append(f"peer {FAMILIES_REL} has uncommitted changes "
+                     f"({dirty!r}): compared the working copy, not HEAD")
+    up = _git(peer_root, "rev-parse", "--abbrev-ref",
+              "--symbolic-full-name", "@{u}")
+    if up:
+        counts = _git(peer_root, "rev-list", "--left-right", "--count",
+                      f"HEAD...{up}")
+        ahead, behind = (int(x) for x in counts.split())
+        info.append(f"peer vs {up} as of its last fetch (none done here): "
+                    f"{ahead} ahead, {behind} behind")
+        if behind:
+            warns.append(f"peer is {behind} commit(s) BEHIND {up} (as of its "
+                         f"last fetch): this run compared an OLD c64-https")
+    else:
+        info.append("peer has no upstream configured: staleness unknown")
+    return head[:7], info, warns
+
+
 def fingerprint(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]
 
@@ -301,28 +388,56 @@ def _with_parser(fn):
         parse = real
 
 
+def _identity_proofs(ours_text):
+    out = []
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        roots = {}
+        for name, marker in [("self", False), ("wg_worktree", False),
+                             ("https", True)]:
+            r = td / name
+            (r / FAMILIES_REL).parent.mkdir(parents=True)
+            (r / FAMILIES_REL).write_text(ours_text)
+            if marker:
+                (r / PEER_MARKER).write_text("; marker\n")
+            roots[name] = r
+        (td / "alias").symlink_to(roots["self"])
+        for label, peer, needle in [
+                ("peer is this tree", roots["self"], "THIS tree"),
+                ("peer is a symlink to this tree", td / "alias", "THIS tree"),
+                ("peer is a c64-wireguard copy", roots["wg_worktree"],
+                 str(PEER_MARKER))]:
+            msgs = peer_identity_problems(roots["self"], peer)
+            out.append((f"identity: {label}",
+                        any(needle in m for m in msgs),
+                        "peer_is_c64_https: "
+                        + (msgs[0] if msgs else "stayed GREEN")))
+        msgs = peer_identity_problems(roots["self"], roots["https"])
+        out.append(("survivor: c64-https-shaped peer", not msgs,
+                    "all GREEN" if not msgs else f"went RED: {msgs[0]}"))
+    return out
+
+
 def alarm_proofs(ours_text, rng):
-    """[(proof_name, ok, detail)]. ours_text must itself be green."""
-    base_rows, base_bad = parse(ours_text, "base")
-    if base_bad or not base_rows:
-        return [("baseline", False, "our file is not green, so no mutation "
-                 "proof is meaningful")]
+    """[(proof_name, ok, detail)], or None if our own file is red."""
+    ours = load("OURS", "ours", ours_text)
+    if any(m for _, m in run_checks(ours, load("PEER", "peer", ours_text))):
+        return None
+    base_rows = ours["rows"]
     lineno, victim, value = rng.choice(base_rows)
     used = {v for _, _, v in base_rows}
     free = next(1 << i for i in range(16) if (1 << i) not in used)
     alpha = "ABCDEFGHJKLMNPQRSTUVWXYZ"
     new_name = "NET_FAMILY_Z" + "".join(rng.choice(alpha) for _ in range(5))
     renamed = victim + "".join(rng.choice(alpha) for _ in range(3))
-    flipped = value ^ (1 << rng.randrange(16))
-    if flipped == value:
-        flipped ^= 1
     added = f"{new_name} = ${free:04X}"
     last_line = base_rows[-1][0]
+    end_line = max(n for n, raw in enumerate(ours_text.splitlines(), 1)
+                   if _code(raw))
 
     def peer_mut(text):
         return load("PEER", "peer", text)
 
-    ours = load("OURS", "ours", ours_text)
     # name, peer_text, ours_text, expected-red check, needle in its message
     cases = [
         ("rename", _replace_line(ours_text, lineno,
@@ -331,12 +446,6 @@ def alarm_proofs(ours_text, rng):
         ("rename(other dir)", _replace_line(ours_text, lineno,
                                             f"{renamed} = ${value:04X}"), None,
          "names_only_in_peer", renamed),
-        ("value one bit", _replace_line(ours_text, lineno,
-                                        f"{victim} = ${flipped:04X}"), None,
-         "values_agree", f"{victim}: ours ${value:04X}, peer ${flipped:04X}"),
-        ("value +1 near boundary", _replace_line(
-            ours_text, lineno, f"{victim} = ${(value + 1) & 0xFFFF:04X}"),
-         None, "values_agree", victim),
         ("bit only in peer", _insert_after(ours_text, last_line, added), None,
          "names_only_in_peer", new_name),
         ("bit only in ours", None, _insert_after(ours_text, last_line, added),
@@ -344,10 +453,38 @@ def alarm_proofs(ours_text, rng):
         ("duplicate in peer", _insert_after(
             ours_text, last_line, f"{victim} = ${value:04X}"), None,
          "peer_no_duplicates", victim),
-        ("empty peer", ".ifndef NET_FAMILIES_INC_INCLUDED\n"
-         "NET_FAMILIES_INC_INCLUDED = 1\n.endif\n", None,
+        ("empty peer", f"{GUARD_OPEN}\n{GUARD_SET}\n{GUARD_END}\n", None,
          "peer_row_count", "ZERO"),
+        ("two-token name", _insert_after(
+            ours_text, last_line, f"NET_FAMILY_ANET_FAMILY_B = ${free:04X}"),
+         None, "peer_row_count", f"parsed {len(base_rows) + 1} equate row(s) "
+         f"but the file's code holds {len(base_rows) + 2}"),
+        ("second guard block after .endif", _insert_after(
+            _replace_line(ours_text, lineno, ""), end_line,
+            f"{GUARD_OPEN}\n{victim} = ${value:04X}\n{GUARD_END}"), None,
+         "peer_parses", "out of place"),
+        (".if 0 around an equate", _insert_after(_insert_after(
+            ours_text, lineno, GUARD_END), lineno - 1, ".if 0"), None,
+         "peer_parses", ".if 0"),
+        ("stray .ifdef line", _insert_after(
+            ours_text, lineno, f".ifdef {victim}"), None,
+         "peer_parses", ".ifdef"),
     ]
+    # Single-bit proofs: deterministic, on the first and last rows.
+    (l0, n0, v0), (l1, n1, v1) = base_rows[0], base_rows[-1]
+    for label, line_no, text_line, needle in [
+            ("two names, one value", l1, f"{n1} = ${v0:04X}", "claimed by"),
+            ("$0000 value", l0, f"{n0} = $0000", f"{n0} = $0000 is not"),
+            ("two-bit value $0003", l0, f"{n0} = $0003",
+             f"{n0} = $0003 is not"),
+            ("top bit plus one $8001", l1, f"{n1} = $8001",
+             f"{n1} = $8001 is not")]:
+        cases.append((f"single bits: {label}",
+                      _replace_line(ours_text, line_no, text_line), None,
+                      "peer_single_bits", needle))
+    cases.append(("single bits: ours $0003", None,
+                  _replace_line(ours_text, l0, f"{n0} = $0003"),
+                  "ours_single_bits", f"{n0} = $0003 is not"))
     for label, bad_line in [
             ("no spaces", f"{victim}=${value:04X}"),
             ("3 hex digits", f"{victim} = ${value:03X}"),
@@ -369,20 +506,37 @@ def alarm_proofs(ours_text, rng):
     for name, ptext, otext, want, needle in cases:
         o = load("OURS", "ours", otext) if otext is not None else ours
         p = peer_mut(ptext if ptext is not None else ours_text)
-        res = dict(run_checks(o, p))
-        msgs = res.get(want, [])
-        ok = bool(msgs) and any(needle in m for m in msgs)
+        msgs = dict(run_checks(o, p)).get(want, [])
+        ok = any(needle in m for m in msgs)
         out.append((name, ok, f"{want}: " + (msgs[0] if msgs
                                              else "stayed GREEN")))
 
-    # The independent count against a CORRUPTED parser (it alone sees this).
+    # Every one of the 16 bits flipped on every row: deterministic, so a
+    # comparator or parser that sees only some bits fails on every run.
+    missed = []
+    for ln, name, v in base_rows:
+        for bit in range(16):
+            w = v ^ (1 << bit)
+            msgs = check_values_agree(
+                ours, peer_mut(_replace_line(ours_text, ln,
+                                             f"{name} = ${w:04X}")))
+            if not any(f"{name}: ours ${v:04X}, peer ${w:04X}" in m
+                       for m in msgs):
+                missed.append(f"{name} ${v:04X}->${w:04X}")
+    total = 16 * len(base_rows)
+    out.append((f"values: every bit flipped on every row ({total} flips)",
+                not missed, f"values_agree caught {total - len(missed)}/"
+                f"{total}" + (f"; missed {missed[:4]}" if missed else "")))
+
+    # The independent count against a CORRUPTED parser.
     def lossy_run():
         o = load("OURS", "ours", ours_text)
         return dict(run_checks(o, load("PEER", "peer", ours_text)))
-    res = _with_parser(lossy_run)
-    msgs = res["ours_row_count"]
-    out.append(("parser drops a row", bool(msgs) and "token" in msgs[0],
+    msgs = _with_parser(lossy_run)["ours_row_count"]
+    out.append(("parser drops a row", any("token" in m for m in msgs),
                 "ours_row_count: " + (msgs[0] if msgs else "stayed GREEN")))
+
+    out += _identity_proofs(ours_text)
 
     # Survivors: these must stay GREEN everywhere.
     lines = ours_text.splitlines()
@@ -397,11 +551,17 @@ def alarm_proofs(ours_text, rng):
         ("survivor: reordered equates", "\n".join(reordered) + "\n"),
     ]
     for name, ptext in survivors:
-        res = run_checks(ours, peer_mut(ptext))
-        red = [(n, m) for n, m in res if m]
+        red = [(n, m) for n, m in run_checks(ours, peer_mut(ptext)) if m]
         out.append((name, not red,
                     "all GREEN" if not red else f"went RED: {red[0]}"))
     return out
+
+
+def _banner(lines):
+    print("!" * 72)
+    for line in lines:
+        print(f"WARNING: {line}")
+    print("!" * 72)
 
 
 # ---------------------------------------------------------------------------
@@ -411,8 +571,16 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=None,
                     help="seed for the alarm-proof mutations (or TEST_SEED)")
     args = ap.parse_args(argv)
-    seed = args.seed if args.seed is not None else int(
-        os.environ.get("TEST_SEED", random.randrange(2 ** 31)))
+    if args.seed is not None:
+        seed = args.seed
+    elif os.environ.get("TEST_SEED", "").strip():
+        try:
+            seed = int(os.environ["TEST_SEED"])
+        except ValueError:
+            ap.error(f"TEST_SEED must be an integer, got "
+                     f"{os.environ['TEST_SEED']!r}")
+    else:
+        seed = random.randrange(2 ** 31)
     print(f"seed: {seed}  (reproduce with --seed {seed} or TEST_SEED={seed})")
 
     self_root = Path(os.environ.get(SELF_ROOT_ENV, DEFAULT_ROOT))
@@ -421,6 +589,7 @@ def main(argv=None):
           + (f"  (from ${SELF_ROOT_ENV})" if os.environ.get(SELF_ROOT_ENV)
              else ""))
     passed = failed = skipped = 0
+    peer_tag = "peer@none"
 
     def report(name, msgs):
         nonlocal passed, failed
@@ -435,7 +604,8 @@ def main(argv=None):
 
     if not ours_path.is_file():
         report("ours_present", [f"{ours_path} does not exist"])
-        print(f"\nResults: {passed} passed, {failed} failed, 0 skipped")
+        print(f"\nResults: {passed} passed, {failed} failed, 0 skipped  "
+              f"{peer_tag}")
         return 1
     print(f"      sha256[:16] {fingerprint(ours_path)}")
     ours = load(ours_path, "ours")
@@ -447,14 +617,12 @@ def main(argv=None):
     opted_out = os.environ.get(OPT_OUT_ENV, "").strip() == "1"
     if not peer_root.is_dir():
         if opted_out:
-            print("!" * 72)
-            print(f"WARNING: {OPT_OUT_ENV}=1 and no c64-https checkout at "
-                  f"{peer_root}.")
-            print("The cross-repo NET_FAMILY_* comparison is SKIPPED. This run "
-                  "certifies NOTHING")
-            print("about agreement with c64-https's copy; only our own file "
-                  "was checked.")
-            print("!" * 72)
+            _banner([f"{OPT_OUT_ENV}=1 and no c64-https checkout at "
+                     f"{peer_root}.",
+                     "The cross-repo NET_FAMILY_* comparison is SKIPPED. This "
+                     "run certifies NOTHING",
+                     "about agreement with c64-https's copy; only our own "
+                     "file was checked."])
             skipped = len(LOCAL_CHECKS) + len(CROSS_CHECKS)
         else:
             report("peer_present", [
@@ -462,6 +630,10 @@ def main(argv=None):
                 f"NET_FAMILY_* bits are UNVERIFIED against the peer. Set "
                 f"{PEER_ROOT_ENV}=/path/to/c64-https, or {OPT_OUT_ENV}=1 to "
                 f"accept an unverified run"])
+    elif peer_identity_problems(self_root, peer_root):
+        report("peer_is_c64_https",
+               peer_identity_problems(self_root, peer_root)
+               + [f"(not excused by {OPT_OUT_ENV})"])
     elif not peer_path.is_file():
         report("peer_present", [
             f"c64-https checkout {peer_root} has no {FAMILIES_REL}: the peer "
@@ -469,24 +641,37 @@ def main(argv=None):
             f"{OPT_OUT_ENV})"])
     else:
         print(f"      sha256[:16] {fingerprint(peer_path)}")
+        short, info, warns = peer_provenance(peer_root)
+        for line in info:
+            print(f"      {line}")
+        if warns:
+            _banner(warns)
+        peer_tag = f"peer@{short}" if short else "peer@not-a-git-checkout"
+        if short and warns:
+            peer_tag += "(WARN)"
         peer = load(peer_path, "peer")
         report("peer_present", [])
 
     for name, msgs in run_checks(ours, peer):
         report(name, msgs)
 
-    print("\nalarm proofs (in-process, temp copies of OUR file):")
+    print("\nalarm proofs (in-process, in-memory variants of our file):")
     proofs = alarm_proofs(ours["text"], random.Random(seed))
-    proofs_ok = 0
-    for name, ok, detail in proofs:
-        print(f"  {'ok    ' if ok else 'BROKEN'}  {name}: {detail}")
-        proofs_ok += ok
-    report(f"alarm_proofs ({proofs_ok}/{len(proofs)} fired as expected)",
-           [] if proofs_ok == len(proofs) else
-           [f"{len(proofs) - proofs_ok} proof(s) did not behave -- a check "
-            f"that can no longer fire, or a survivor that went RED"])
+    if proofs is None:
+        print("  NOT RUN: our own file is red (see the ours_* failures above), "
+              "so no mutation of it proves anything")
+    else:
+        proofs_ok = 0
+        for name, ok, detail in proofs:
+            print(f"  {'ok    ' if ok else 'BROKEN'}  {name}: {detail}")
+            proofs_ok += ok
+        report(f"alarm_proofs ({proofs_ok}/{len(proofs)} fired as expected)",
+               [] if proofs_ok == len(proofs) else
+               [f"{len(proofs) - proofs_ok} proof(s) did not behave -- a "
+                f"check that can no longer fire, or a survivor that went RED"])
 
-    print(f"\nResults: {passed} passed, {failed} failed, {skipped} skipped"
+    print(f"\nResults: {passed} passed, {failed} failed, {skipped} skipped  "
+          f"{peer_tag}"
           + (f"  [{OPT_OUT_ENV}=1: peer comparison NOT run]" if skipped
              else ""))
     return 1 if failed else 0

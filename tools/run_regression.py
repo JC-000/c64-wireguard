@@ -53,8 +53,9 @@ TESTS = [
     # -- found via $C64_HTTPS_ROOT, else the ip65 symlink's parent, which any
     # tree that can build the default (ip65) PRG already has -- and FAILS
     # without it; C64_NO_PEER_REGISTRY=1 is the loud, explicit opt-out.
-    # Unseeded here: the mutation proofs it replays every run pick their
-    # victim bit from a seed printed on its first line (--seed reproduces).
+    # Unseeded here: the name and malformed-line proofs it replays pick their
+    # victim from a seed printed on its first line (--seed reproduces); the
+    # value and single-bit proofs are exhaustive and seed-independent.
     ("net_families", ["tools/test_net_families_drift.py"]),
     ("session",    ["tools/test_session.py", "--seed", "51820", "--verbose"]),
     ("transport",  ["tools/test_transport.py", "--seed", "7539"]),
