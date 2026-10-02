@@ -533,7 +533,8 @@ session_handle_packet:
 ; The numeric code is NOT printed: this file does not import net_last_error,
 ; which src/net_abi.inc leaves undeclared (see "NOT DECLARED HERE" there).
 ; Both backends export it (#120), so a host reading it over the monitor gets
-; the code on either.
+; the code on either, unless the net_udp_close in session_reset then fails and
+; overwrites it (ip65 $49; uci $82 or $89).
 ;
 ; Output: C=1, always.
 ; Clobbers: A, X, Y

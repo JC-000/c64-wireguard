@@ -988,7 +988,7 @@ def main() -> int:
                 try:
                     ok = warp._net_init_ip65(_TrInitFail(), None, _lab, 48,
                                              res)
-                    got = res.get("net_last_error")
+                    got = res.get("net_last_error", "<unset>")
                     ok_nle = ok is False and got == _want
                     detail = f"ok={ok} net_last_error={got!r} want={_want!r}"
                 except Exception as exc:              # noqa: BLE001

@@ -1,12 +1,9 @@
-; net_families.inc — canonical per c64-lib-contract SPEC §13.0.
+; net_families.inc — from c64-lib-contract SPEC §13.0, which was retired at
+; contract v1.0.0 (text at `git show v0.17.1:SPEC.md`). This copy is ours
+; now, and nothing in this repo includes it.
 ;
-; CANONICAL SOURCE. The fenced block in SPEC.md §13.0 is shown for
-; readability; this file is the byte-for-byte source backends and
-; consumers copy into their own src/net/net_families.inc. Plain
-; assemble-time equates, never .export'ed: both sides of the link carry
-; the header, and only exported symbols can collide. Bits are append-only
-; and never reused (§8.0 discipline). Updates land via coordinated
-; cross-repo PR; do not edit your local copy.
+; Plain assemble-time equates, never .export'ed (only exported symbols can
+; collide). Bits are append-only and never reused (§8.0 discipline).
 
 .ifndef NET_FAMILIES_INC_INCLUDED
 NET_FAMILIES_INC_INCLUDED = 1
