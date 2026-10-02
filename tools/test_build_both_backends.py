@@ -27,17 +27,14 @@ IP65_BIN = os.path.join(PROJECT_ROOT, "ip65-build", "ip65-c64.bin")
 BACKENDS = ("ip65", "uci")
 
 # Labels every backend must export (names without the leading `.`).
-# NOTE: the task spec listed `net_last_error` under COMMON, but the ip65
-# backend does not export it -- only the UCI backend does. Moved here to
-# UCI_LABELS to reflect the actual source of truth (src/net/*/net.s).
+# net_last_error is exported by both (src/net/ip65/net.s:112, src/net/uci/net.s).
 COMMON_LABELS = (
     "net_init", "net_dhcp_acquire", "net_poll",
-    "net_udp_send", "net_udp_listen",
+    "net_udp_send", "net_udp_listen", "net_last_error",
 )
 
 # UCI-only labels (ip65 has no equivalents worth enumerating here).
 UCI_LABELS = (
-    "net_last_error",
     "uci_abort", "uci_wait_idle", "uci_wait_not_busy",
     "uci_wait_reply_staged",
     "uci_push_wait", "uci_read_resp_bytes", "uci_ack",

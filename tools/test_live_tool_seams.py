@@ -798,8 +798,10 @@ def main() -> int:
                   warp.load_labels_for_backend(lf, "uci")["ip_packet_buf"]
                   == 0x9833)
 
-        # _dump_failure gating: on ip65 labels the UCI-only net_last_error
-        # must never be read (it is not even in the map).
+        # _dump_failure post-mortem: net_last_error is read wherever the
+        # map has it — BOTH backends since #120 (src/net/ip65/net.s:112) —
+        # exactly once, at the label's own address. A map without it (a
+        # pre-#120 ip65 build) must neither raise nor read. Issue #170.
         class _Tr:
             def __init__(self):
                 self.reads = []
@@ -816,15 +818,28 @@ def main() -> int:
             # run had already failed and wanted a post-mortem. Reported as
             # its own named check so that shows up as itself instead of
             # collapsing the section.
+            ip65_pre120 = {k: v for k, v in ip65_1440.items()
+                           if k != "net_last_error"}
+            check("_dump_failure fixtures: ip65 and uci net_last_error sit "
+                  "at different addresses (else 'at the label's address' "
+                  "cannot tell the two maps apart)",
+                  ip65_1440["net_last_error"]
+                  != uci_default["net_last_error"],
+                  f"both ${ip65_1440['net_last_error']:04X}")
             for _n, _lab, _want in (
-                    ("no reads at all on ip65 labels without hs_* labels "
-                     "(net_last_error never touched)", ip65_1440, []),
-                    ("uci labels DO read net_last_error", uci_default,
-                     [uci_default["net_last_error"]])):
+                    ("ip65 labels read net_last_error exactly once, at its "
+                     "own address (#170)", ip65_1440,
+                     [ip65_1440["net_last_error"]]),
+                    ("uci labels read net_last_error exactly once, at its "
+                     "own address", uci_default,
+                     [uci_default["net_last_error"]]),
+                    ("labels WITHOUT net_last_error (pre-#120 ip65 map): "
+                     "no raise, no read", ip65_pre120, [])):
                 tr = _Tr()
                 try:
                     warp._dump_failure(tr, _lab, "seam")
-                    detail = f"reads={tr.reads}"
+                    detail = (f"reads={[hex(a) for a in tr.reads]} "
+                              f"want={[hex(a) for a in _want]}")
                     ok_dump = tr.reads == _want
                 except Exception as exc:              # noqa: BLE001
                     ok_dump, detail = False, (
@@ -897,11 +912,12 @@ def main() -> int:
     print("\n=== backend detection in test_warp_live (#70, ip65 warp) ===")
     # The tool now runs against either backend, and the two builds differ
     # in what they export: only ip65 links `ip65_blob_start`, only uci links
-    # `net_last_error` (and `uci_send_part` under UCI_CHUNKED_WRITE). A tool
-    # that assumed uci and read net_last_error on an ip65 PRG would raise a
-    # KeyError AFTER run_prg — with the device already loaded and the lock
-    # held. So the preflight must classify the labels.txt it was given and
-    # refuse a mismatch with exit 2 BEFORE any device call. Two layers:
+    # `uci_socket_open` (and `uci_send_part` under UCI_CHUNKED_WRITE); both
+    # link `net_last_error`. A tool that assumed uci and read a uci-only
+    # label on an ip65 PRG would raise a KeyError AFTER run_prg — with the
+    # device already loaded and the lock held. So the preflight must
+    # classify the labels.txt it was given and refuse a mismatch with exit
+    # 2 BEFORE any device call. Two layers:
     #   (a) detect_backend(): a pure classifier on any labels mapping;
     #   (b) the CLI, as a subprocess, fed a labels.txt of the OTHER backend.
     # (b) discriminates carefully: argparse's own "unrecognized arguments"
@@ -1213,6 +1229,9 @@ def _warp_labels(kind: str, ip_pkt_len: int, chunked: bool = False) -> dict:
          "ip_packet_buf": 0x9833, "ip_pkt_len": ip_pkt_len,
          "WG_MTU": ip_pkt_len - 0x9833, "net_last_error": 0x7C32}
     if kind == "ip65":
+        # The ip65 build places it elsewhere: $79D2 in an ip65 WG_MTU1440
+        # build/labels.txt measured 2026-10-02.
+        L["net_last_error"] = 0x79D2
         L["ip65_blob_start"] = 0x2000
         L["ip65_blob_end"] = 0x32EF
         L["ip65_listening"] = 0x7954
