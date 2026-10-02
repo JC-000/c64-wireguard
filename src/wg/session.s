@@ -530,11 +530,10 @@ session_handle_packet:
 ; session_handle_packet reject every Type 4 via @wrong_state — but kept the
 ; socket. This is strictly better, never worse.
 ;
-; The numeric code is deliberately NOT printed. net_last_error is exported by
-; the UCI backend and by neither ip65 nor this file's imports: src/net_abi.inc
-; records that as a known §13.1 non-conformance, because ip65's driver has no
-; error channel and referencing the symbol here would break the ip65 link. A
-; host reading net_last_error over the monitor still gets the code on UCI.
+; The numeric code is NOT printed: this file does not import net_last_error,
+; which src/net_abi.inc leaves undeclared (see "NOT DECLARED HERE" there).
+; Both backends export it (#120), so a host reading it over the monitor gets
+; the code on either.
 ;
 ; Output: C=1, always.
 ; Clobbers: A, X, Y

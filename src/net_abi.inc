@@ -176,7 +176,7 @@
 ; uci_errors.inc and src/net/ip65/net.s, which point back here.
 ; =============================================================================
 ;
-; It is also why src/net/<backend>/net_manifest.s and net_abi_asserts.s are
-; NOT in this branch yet: a NET_FAMILY_CORE claim asserted over an absent
-; error channel would link green and mean nothing. Manifests come after the
-; channel exists, not before. Tracked in #48.
+; src/net/<backend>/net_manifest.s and net_abi_asserts.s are absent, and
+; now permanently so: the §13 they asserted against is retired (#48, closed).
+; Both backends export net_last_error; ip65 still exports no net_local_ip
+; (see "NOT DECLARED HERE" above).
