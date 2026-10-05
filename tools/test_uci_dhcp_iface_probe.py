@@ -156,17 +156,19 @@ class IfaceUci:
     the firmware counts but cannot resolve ("83,INTERFACE NOT AVAILABLE").
     Index >= len(ifaces) is out of range: EMPTY reply + "82,..." status and
     NO error bit, exactly as fw 3a1ff9ff answers it.
-    `wedge_push=k`: the k-th accepted PUSH_CMD (0-based) is never accepted —
+    `wedge_push=k`: the k-th accepted PUSH_CMD (0-based) is never accepted,
+    or `wedge_cmd=bytes`: the first push of exactly that command is not —
     CMD_BUSY stays set for ever. `stuck` : STATE reads Busy from power-on.
     """
 
     def __init__(self, ifaces, *, mhz, accept_us=400,
-                 stage_us=1800, wedge_push=None, stuck=False):
+                 stage_us=1800, wedge_push=None, wedge_cmd=None, stuck=False):
         self.ifaces = list(ifaces)
         self.mhz = mhz
         self.accept_cyc = int(accept_us * mhz)
         self.stage_cyc = int(stage_us * mhz)
         self.wedge_push = wedge_push
+        self.wedge_cmd = wedge_cmd
         self.cycles = 0
         self.state = STATE_BUSY if stuck else STATE_IDLE
         self.stuck = stuck
@@ -222,7 +224,9 @@ class IfaceUci:
         self.commands.append(cmd)
         self.cmd_busy = 1
         self.state = STATE_BUSY
-        if self.wedge_push is not None and n == self.wedge_push:
+        if (self.wedge_push is not None and n == self.wedge_push) or \
+                (self.wedge_cmd is not None and cmd == self.wedge_cmd):
+            self.wedge_cmd = None
             return                          # a wedged firmware task
         self._at(self.accept_cyc, self._accept)
 
@@ -650,7 +654,8 @@ def case_wedge(ctx, res):
     res.check(r.seconds <= 7.0, "F/wedge-on-iface0-push/bounded",
               f"took {r.seconds:.2f} s simulated; the wait budget is 5 s")
     # G: interface 0 answers 0.0.0.0, the probe of interface 1 wedges.
-    dev = IfaceUci([ZERO, rand_lease(ctx["rng"])], mhz=1, wedge_push=1)
+    dev = IfaceUci([ZERO, rand_lease(ctx["rng"])], mhz=1,
+                   wedge_cmd=bytes([TARGET_NETWORK, NET_CMD_GET_IPADDR, 1]))
     r = m.call(dev, mhz=1, err_witness=0xEE)
     res.check(r.hung is None and r.carry == 1 and r.err == ERR_WAIT_TIMEOUT,
               "G/wedge-on-iface1-push/C1-WAIT_TIMEOUT",
