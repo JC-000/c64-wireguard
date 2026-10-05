@@ -1005,7 +1005,9 @@ def case_no_default_host(res):
                           "the child — 'no contact' would be unmeasured")
                 continue
             tail = " | ".join(out.strip().splitlines()[-3:])
-            ok = rc not in (0, "TIMEOUT") and "U64_HOST" in out and not contact
+            # rc 2 = a deliberate usage refusal. "U64_HOST" in the output
+            # alone would also be satisfied by a KeyError('U64_HOST') traceback.
+            ok = rc == 2 and "U64_HOST" in out and not contact
             res.check(ok, f"7/{name}",
                       f"rc={rc}, names U64_HOST: {'U64_HOST' in out}, contact "
                       f"attempts: {[(e['kind'], e['what']) for e in contact][:3]} "

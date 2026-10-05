@@ -98,7 +98,7 @@ CIA_TOD_TENTHS, CIA_TOD_SEC, CIA_TOD_MIN, CIA_TOD_HOUR = 0xDC08, 0xDC09, 0xDC0A,
 # Every full run emits exactly this many named checks; a case that silently
 # stops running is a hard error, not a smaller denominator.
 CHECKS_PER_SPEED = 11           # cases A + B at each --mhz
-CHECKS_FIXED = 30               # everything that runs once
+CHECKS_FIXED = 34               # everything that runs once
 RANDOM_TOPOLOGIES = 6
 
 # A routine that has to probe and give up may spend its TOD budgets; one
@@ -597,12 +597,17 @@ def case_stale_after_success(ctx, res):
         r1 = m.call(dev, mhz=1)
         dev.ifaces = list(later)
         r2 = m.call(dev, mhz=1, mem=r1.mem, err_witness=0xEE)
+        # No interface answered with a record at all: that is $82
+        # (CMD_FAILED), not $83 (an interface answered 0.0.0.0). An adapter
+        # that reads a stale/short buffer as "0.0.0.0" reports $83 here.
+        want_err = ERR_CMD_FAILED if name == "all-not-available" else r2.err
         res.check(r1.carry == 0 and r1.ip == lease[:4] and r2.carry == 1
-                  and r2.ip != lease[:4] and r2.hung is None,
+                  and r2.ip != lease[:4] and r2.hung is None
+                  and r2.err == want_err,
                   f"S/{name}/recall-does-not-return-the-stale-lease",
                   f"first call C={r1.carry} ip={fmt_ip(r1.ip)}; re-call with "
                   f"nothing answering: C={r2.carry} ip={fmt_ip(r2.ip)} "
-                  f"err=${r2.err:02X}"
+                  f"err=${r2.err:02X} (want ${want_err:02X})"
                   + (" — that is the STALE lease" if r2.ip == lease[:4] else ""))
 
 
@@ -632,9 +637,25 @@ def case_empty_reply_is_not_a_lease(ctx, res):
               + (" — that is the POISONED stale buffer" if r.ip == poison[:4] else ""))
     dev = IfaceUci([None], mhz=1)
     r = m.call(dev, mhz=1, resp_poison=poison)
-    res.check(r.carry == 1 and r.ip != poison[:4], "E/empty-reply-only",
+    res.check(r.carry == 1 and r.ip != poison[:4] and r.err == ERR_CMD_FAILED,
+              "E/empty-reply-only",
               f"C={r.carry} net_local_ip={fmt_ip(r.ip)} (poison "
-              f"{fmt_ip(poison[:4])}): no interface answered with a record")
+              f"{fmt_ip(poison[:4])}) err=${r.err:02X} (want "
+              f"${ERR_CMD_FAILED:02X}): no interface answered with a record")
+
+
+def case_clamp(ctx, res):
+    """K: count=6, lease only at index 5 -> probing stops at index 3 BY
+    DESIGN (NET_DHCP_MAX_IFACE = 4): C=1, $83, GET_IPADDR exactly 0..3.
+    Documents that a lease at index >= 4 is ignored, and pins the clamp."""
+    m, rng = ctx["m"], ctx["rng"]
+    dev = IfaceUci([ZERO] * 5 + [rand_lease(rng)], mhz=1)
+    r = m.call(dev, mhz=1, err_witness=0xEE)
+    tag = "K/count-6-clamped-to-4"
+    res.check(r.carry == 1 and r.err == ERR_NO_IP, f"{tag}/C1-NO_IP",
+              f"C={r.carry} net_local_ip={fmt_ip(r.ip)} err=${r.err:02X}; want "
+              f"C=1 ${ERR_NO_IP:02X} — the lease at index 5 is beyond the clamp")
+    _common(res, tag, r, want_indices=[0, 1, 2, 3])
 
 
 def case_wedge(ctx, res):
@@ -704,7 +725,7 @@ def main(argv=None):
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--build", default=None)
     p.add_argument("--mhz", default=os.environ.get("UCI_DHCP_TURBO_MHZ", "1,48"))
-    p.add_argument("--only", default=None, help="case letter: F A B C D Z S E W R")
+    p.add_argument("--only", default=None, help="case letter: F A B C D Z S K E W R")
     args = p.parse_args(argv)
 
     seed = args.seed
@@ -736,6 +757,7 @@ def main(argv=None):
              ("D", lambda: case_single_iface(ctx, res)),
              ("Z", lambda: case_zero_interfaces(ctx, res)),
              ("S", lambda: case_stale_after_success(ctx, res)),
+             ("K", lambda: case_clamp(ctx, res)),
              ("E", lambda: case_empty_reply_is_not_a_lease(ctx, res)),
              ("W", lambda: case_wedge(ctx, res)),
              ("R", lambda: case_random(ctx, res))]
