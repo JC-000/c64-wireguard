@@ -2761,13 +2761,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         log.warning("continuing WITHOUT a capture: %s", cap.note)
     run["capture"] = {"mode": cap.mode, "note": cap.note, "path": args.pcap}
 
-    probe = probe_u64(args.host)
-    if not probe.reachable:
-        log.error("device %s not reachable: %s", args.host, probe.error)
-        cap.stop()
-        return 1
-    log.info("probe: %s", probe)
-
     lock = DeviceLock(args.host)
     try:
         lock.acquire_or_raise(timeout=LOCK_TIMEOUT_S)
@@ -2781,7 +2774,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     client = None
     cart_prev: Optional[str] = None
     transport: dict = {}
+    # stage_wire stops the capture whenever control reaches it (a completed
+    # body or a caught abort); the unreachable return and a BaseException
+    # skip it, so the finally stops the capture on exactly those paths.
+    body_done = False
     try:
+        # Reachability is a REST read of the shared device: under the lock.
+        probe = probe_u64(args.host)
+        if not probe.reachable:
+            log.error("device %s not reachable: %s", args.host, probe.error)
+            return 1
+        log.info("probe: %s", probe)
         client = Ultimate64Client(host=args.host, timeout=30.0)
         tr = Ultimate64Transport(host=args.host, timeout=30.0, client=client)
         try:
@@ -2917,9 +2920,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                 log.warning("host responder recorded %d error(s): %s",
                             len(peer.errors), peer.errors[:5])
             _snap_peer()
+        body_done = True
     except Exception as exc:                                  # noqa: BLE001
         log.error("run aborted: %s: %s", type(exc).__name__, exc)
         check(False, "the run completed without aborting", f"{exc}")
+        body_done = True        # an abort still reaches stage_wire
     finally:
         # Restore, and restore on the ABORT path too — that is the path
         # where it matters most, and the one where "restore" statements
@@ -2959,6 +2964,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                           "lane", exc)
         lock.release()
         log.info("device lock released")
+        if not body_done:
+            cap.stop()
 
     # stage_wire owns cap.stop(): the capture must be flushed and the run
     # window closed in one place, so the bracket it filters on is the same
