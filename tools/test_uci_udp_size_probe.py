@@ -718,11 +718,10 @@ def main() -> int:
     cap = DebugCapture(port=DEBUG_PORT)
     responder = UDPSizeResponder(port=0)
     results: list[dict] = []
-    # The 6510 bus trace is post-mortem evidence, not an input to
-    # score_results. fw 3a1ff9ff refuses stream_debug_start with HTTP 500
-    # "No Operational Network Interface" when only WiFi is up (its stream
-    # code hardcodes interface 0), so a refusal is recorded by name here
-    # and the payload checks still run and still gate.
+    # The 6510 bus trace is post-mortem evidence; no assertion reads it.
+    # fw 3a1ff9ff refuses stream_debug_start with HTTP 500 "No Operational
+    # Network Interface" when only WiFi is up (its stream code hardcodes
+    # interface 0), so a refusal is noted and the payload checks decide.
     not_measured: dict[str, str] = {}
     stream_started = False
     try:
@@ -744,8 +743,8 @@ def main() -> int:
         except Exception as exc:
             not_measured["debug_trace"] = (
                 f"stream_debug_start refused: {exc}")
-            log.error("NOT MEASURED debug_trace: %s",
-                      not_measured["debug_trace"])
+            log.warning("debug_trace unavailable: %s",
+                        not_measured["debug_trace"])
 
         prg = (PROJECT_ROOT / "build" / "wireguard.prg").read_bytes()
         client.run_prg(prg)
@@ -788,7 +787,7 @@ def main() -> int:
             _finish_trace(client, cap, stream_started, not_measured)
         except Exception as exc:
             not_measured.setdefault("debug_trace", f"trace save raised: {exc}")
-            log.error("NOT MEASURED debug_trace: %s", exc)
+            log.warning("debug_trace unavailable: %s", exc)
         if orig_mode: _safe(set_debug_stream_mode, client, orig_mode)
         try:
             responder.stop(); responder.join(timeout=1.0)
@@ -820,7 +819,7 @@ def _finish_trace(client, cap, stream_started: bool,
     if not result.packets_received:
         not_measured["debug_trace"] = (
             "stream started but 0 packets arrived on the capture port")
-        log.error("NOT MEASURED debug_trace: %s", not_measured["debug_trace"])
+        log.warning("debug_trace unavailable: %s", not_measured["debug_trace"])
         return
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
     stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -835,16 +834,25 @@ def _finish_trace(client, cap, stream_started: bool,
                     f"rw={'R' if cyc.is_read else 'W'} data={cyc.data:02X}\n")
 
 
-def _verdict(results: list[dict], not_measured: dict[str, str]) -> int:
-    """Exit code. A missing measurement is INCONCLUSIVE, reported as FAIL
-    (the test_ip65_bss_corruption.py / test_warp_live.py convention): the
-    payload checks gate on their own, but the run never reads as PASS
-    while something it claims to record was not recorded."""
-    _print_summary(results)
+def _verdict(results: list[dict], not_measured: dict[str, str],
+             sizes: list[int] = SIZES) -> int:
+    """Exit code, from the payload checks alone.
 
-    if not results:
-        print("\nFAIL: no size was probed at all. An empty run is not a "
-              "clean run.")
+    The debug trace gates nothing, so its absence is a NOTE. What must not
+    read as PASS is a GATING check that did not run: every size in `sizes`
+    needs a scored row (an empty run and a skipped size both fail here),
+    and score_results fails any row whose responder never answered."""
+    _print_summary(results)
+    for name, why in not_measured.items():
+        print(f"NOTE {name} unavailable: {why} (post-mortem only; no "
+              f"assertion depends on it)")
+
+    probed = [r["size"] for r in results]
+    unprobed = [n for n in sizes if n not in probed]
+    if unprobed or not results:
+        print(f"\nFAIL: {len(unprobed)} of {len(sizes)} size(s) were never "
+              f"probed ({unprobed}). A size that was not measured is not a "
+              f"clean size.")
         return 1
     failures = score_results(results)
     if failures:
@@ -852,21 +860,11 @@ def _verdict(results: list[dict], not_measured: dict[str, str]) -> int:
               f"size(s):")
         for f in failures:
             print(f"  - {f}")
-        for name, why in not_measured.items():
-            print(f"  NOT MEASURED  {name}: {why}")
         return 1
-    clean = (f"all {len(results)} size(s) delivered the exact bytes that "
-             f"crossed the wire, with poison_stop == udp_recv_len on every "
-             f"one.")
-    if not_measured:
-        print(f"\nINCOMPLETE (reported as FAIL): payload checks clean — "
-              f"{clean}")
-        for name, why in not_measured.items():
-            print(f"  NOT MEASURED  {name}: {why}")
-        return 1
-    print(f"\nPASS: {clean}")
+    print(f"\nPASS: all {len(results)} size(s) delivered the exact bytes "
+          f"that crossed the wire, with poison_stop == udp_recv_len on "
+          f"every one.")
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())
