@@ -279,6 +279,17 @@ TESTS = [
     #
     # Ordinary VICE suite, honours C64_SKIP_BUILD, no build-tree mutation.
     ("warp_instrument_vice", ["tools/test_warp_instrument_vice.py"]),
+    # The 2026-10-04 WiFi run's live-tool defects, host-side: the size
+    # probe's shadowed DebugCapture (finally raised, lock never released),
+    # a refused debug stream being fatal, net_poll budgets MEASURED by
+    # executing each call site on a fake clock (1.97 s first poll must
+    # complete, a hang must still time out), seeded-random tunnel payloads
+    # with disjoint alphabets, 3a1ff9ff = chunked, no hardcoded U64_HOST,
+    # and rrnet_hw probing only under the lock. No device, no VICE, no
+    # build: every child and every in-process run sits behind a guard that
+    # records and REFUSES non-loopback sockets, DeviceLock acquisition and
+    # subprocesses. Unseeded here; the seed is on its first line.
+    ("live_tools_wifi", ["tools/test_live_tools_wifi.py"]),
     # NOT listed, deliberately: tools/test_uci_*_live.py and
     # tools/test_wg_responder*.py need real hardware or a live responder.
 ]
@@ -348,6 +359,13 @@ SERIAL_TESTS = [
     # announced lengths and payloads are random per run and the seed is on
     # the first line of its output (reproduce with --seed).
     ("uci_short_read", ["tools/test_uci_short_read_drop.py"]),
+    # WiFi-only "DHCP FAILED": the real net_dhcp_acquire on the host 6502
+    # against a model of the firmware's GET_IPADDR per interface (index 0 =
+    # ethernet, 1 = WiFi; out of range = empty reply + "82,..." status),
+    # asserting net_local_ip / net_last_error / carry and the command bytes
+    # at the wire tap, at 1 and 48 MHz. Serial: needs `make BACKEND=uci`,
+    # which it builds itself. Unseeded; the seed is on its first line.
+    ("uci_dhcp_iface", ["tools/test_uci_dhcp_iface_probe.py"]),
     # NOT listed, deliberately: tools/test_ip65_udp_echo_vice.py and
     # tools/test_ip65_handshake_vice.py need the ethernet VICE rig (feth
     # pair + dnsmasq + a pcap-capable x64sc); they exit 77 without it.
