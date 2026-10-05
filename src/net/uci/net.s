@@ -239,13 +239,32 @@ net_init:
 ; DHCP itself. The 12-byte response is IP(4) + Netmask(4) + Gateway(4);
 ; we keep the first 4 bytes in net_local_ip.
 ;
+; Interfaces are indexed in firmware registration order, which is not
+; guaranteed. On the U64E, Ethernet registers at boot cable or not (index
+; 0) and WiFi after it (index 1); a down interface answers OK + 0.0.0.0,
+; so a WiFi-only box reads 0.0.0.0 at index 0. We probe indices
+; 0..NET_DHCP_MAX_IFACE-1 and take the first non-zero lease. An index past
+; the interface count answers with the error bit (param_out_of_range): we
+; drain + ack it and advance.
+;
+; Output: C=0, net_local_ip set, net_last_error = UCI_ERR_OK on success.
+;         C=1 on failure, net_last_error =
+;           UCI_ERR_NO_IP        some interface answered, none had a lease
+;           UCI_ERR_CMD_FAILED   no index answered without the error bit
+;           UCI_ERR_WAIT_TIMEOUT the FPGA wedged (set by the wait helper)
 ; Clobbers: A, X, Y
 ; =============================================================================
+NET_DHCP_MAX_IFACE = 4          ; probe interface indices 0..3
+
 net_dhcp_acquire:
+        lda #$00
+        sta @iface_idx
+        lda #UCI_ERR_CMD_FAILED ; downgraded to NO_IP once any index answers
+        sta net_last_error
+
+@next_iface:
         jsr uci_wait_idle
-        bcc @dhcp_go            ; FPGA wedged — cannot issue the command
-        rts                     ; (net_last_error = UCI_ERR_WAIT_TIMEOUT, C=1)
-@dhcp_go:
+        bcs @dhcp_fail          ; FPGA wedged (net_last_error = WAIT_TIMEOUT)
 
         lda #UCI_TARGET_NETWORK
         jsr uci_begin_cmd
@@ -253,19 +272,25 @@ net_dhcp_acquire:
         lda #UCI_CMD_GET_IPADDR
         jsr uci_put_byte
 
-        ; Interface index 0.
-        lda #$00
+        lda @iface_idx
         jsr uci_put_byte
 
         jsr uci_push_wait
+        bcs @dhcp_fail
 
         jsr uci_check_err
         bcc @no_err
 
-        lda #UCI_ERR_CMD_FAILED
-        sta net_last_error
-        sec
-        rts
+        ; Index out of range (or otherwise refused): clean up so the next
+        ; probe starts from idle, keep whichever error is already recorded.
+        jsr uci_drain_resp
+        bcs @dhcp_fail
+        jsr uci_drain_status
+        bcs @dhcp_fail
+        jsr uci_ack
+        jmp @advance
+
+@iface_idx: .byte 0             ; code-resident local, as in uci_cmd.s
 
 @no_err:
         ; Read the 12-byte response into uci_ipaddr_resp.
@@ -278,7 +303,9 @@ net_dhcp_acquire:
         jsr uci_read_resp_bytes
 
         jsr uci_drain_resp
+        bcs @dhcp_fail
         jsr uci_drain_status
+        bcs @dhcp_fail
         jsr uci_ack
 
         ; Copy the first 4 bytes (IP) into net_local_ip.
@@ -289,19 +316,27 @@ net_dhcp_acquire:
         dex
         bpl @copy_ip
 
-        ; If all four bytes are zero the firmware has no lease yet.
         lda net_local_ip+0
         ora net_local_ip+1
         ora net_local_ip+2
         ora net_local_ip+3
         bne @have_ip
 
-        lda #UCI_ERR_NO_IP
+        lda #UCI_ERR_NO_IP      ; this interface is down: try the next
         sta net_last_error
+
+@advance:
+        inc @iface_idx
+        lda @iface_idx
+        cmp #NET_DHCP_MAX_IFACE
+        bcc @next_iface
+@dhcp_fail:
         sec
         rts
 
 @have_ip:
+        lda #UCI_ERR_OK
+        sta net_last_error
         clc
         rts
 
