@@ -2774,9 +2774,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     client = None
     cart_prev: Optional[str] = None
     transport: dict = {}
-    # stage_wire stops the capture whenever control reaches it (a completed
-    # body or a caught abort); the unreachable return and a BaseException
-    # skip it, so the finally stops the capture on exactly those paths.
+    # True once control is bound for stage_wire (completed body or caught
+    # abort), which then owns cap.stop(); see the finally below.
     body_done = False
     try:
         # Reachability is a REST read of the shared device: under the lock.
@@ -2926,46 +2925,56 @@ def main(argv: Optional[list[str]] = None) -> int:
         check(False, "the run completed without aborting", f"{exc}")
         body_done = True        # an abort still reaches stage_wire
     finally:
-        # Restore, and restore on the ABORT path too — that is the path
-        # where it matters most, and the one where "restore" statements
-        # chained onto a successful teardown quietly do not run. Clock and
-        # REU in one try, the reset in its own: the reset is what leaves
-        # the command interface idle for whoever has the device next, and
-        # it must happen even when the clock restore is what failed.
-        if client is not None:
+        # lock.release() runs even if the restore raises. stage_wire stops
+        # the capture only when the body reached its end AND this cleanup
+        # finished without raising; every other exit stops it in the
+        # outermost finally here. The two cases are complements: no double stop.
+        cleaned_up = False
+        try:
             try:
-                set_turbo_mhz(client, 1)
-                time.sleep(1.0)
-                actual = get_turbo_mhz(client)
-                set_reu(client, False)
-                log.info("restore: turbo=%d MHz (restored=%s), REU off",
-                         actual, actual == 1)
-                run["restored_mhz"] = actual
-            except Exception as exc:                          # noqa: BLE001
-                log.error("clock/REU restore FAILED: %s — the device is "
-                          "shared, check it before you walk away", exc)
-            try:
-                if cart_prev:
-                    client.set_config_item(CAT_CART, ITEM_CART_PREF, cart_prev)
-                    log.info("restore: %s back to %r", ITEM_CART_PREF,
-                             cart_prev)
-            except Exception as exc:                          # noqa: BLE001
-                log.error("could not restore %s to %r: %s — the device is "
-                          "shared and this item is not covered by the "
-                          "harness's snapshot_state", ITEM_CART_PREF,
-                          cart_prev, exc)
-            try:
-                client.reset()
-                time.sleep(1.0)
-                log.info("restore: C64 reset")
-            except Exception as exc:                          # noqa: BLE001
-                log.error("reset FAILED: %s — our PRG may still be running "
-                          "and driving the command interface for the next "
-                          "lane", exc)
-        lock.release()
-        log.info("device lock released")
-        if not body_done:
-            cap.stop()
+                # Restore, and restore on the ABORT path too — that is the path
+                # where it matters most, and the one where "restore" statements
+                # chained onto a successful teardown quietly do not run. Clock and
+                # REU in one try, the reset in its own: the reset is what leaves
+                # the command interface idle for whoever has the device next, and
+                # it must happen even when the clock restore is what failed.
+                if client is not None:
+                    try:
+                        set_turbo_mhz(client, 1)
+                        time.sleep(1.0)
+                        actual = get_turbo_mhz(client)
+                        set_reu(client, False)
+                        log.info("restore: turbo=%d MHz (restored=%s), REU off",
+                                 actual, actual == 1)
+                        run["restored_mhz"] = actual
+                    except Exception as exc:                          # noqa: BLE001
+                        log.error("clock/REU restore FAILED: %s — the device is "
+                                  "shared, check it before you walk away", exc)
+                    try:
+                        if cart_prev:
+                            client.set_config_item(CAT_CART, ITEM_CART_PREF, cart_prev)
+                            log.info("restore: %s back to %r", ITEM_CART_PREF,
+                                     cart_prev)
+                    except Exception as exc:                          # noqa: BLE001
+                        log.error("could not restore %s to %r: %s — the device is "
+                                  "shared and this item is not covered by the "
+                                  "harness's snapshot_state", ITEM_CART_PREF,
+                                  cart_prev, exc)
+                    try:
+                        client.reset()
+                        time.sleep(1.0)
+                        log.info("restore: C64 reset")
+                    except Exception as exc:                          # noqa: BLE001
+                        log.error("reset FAILED: %s — our PRG may still be running "
+                                  "and driving the command interface for the next "
+                                  "lane", exc)
+            finally:
+                lock.release()
+                log.info("device lock released")
+            cleaned_up = True
+        finally:
+            if not (body_done and cleaned_up):
+                cap.stop()
 
     # stage_wire owns cap.stop(): the capture must be flushed and the run
     # window closed in one place, so the bracket it filters on is the same
