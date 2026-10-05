@@ -76,7 +76,7 @@ from test_uci_handshake_live import (                        # noqa: E402
 )
 from test_uci_udp_echo_live import (                         # noqa: E402
     SEND_BUF, STEP_INIT, STEP_DHCP, STEP_LISTEN, STEP_TIMEOUT,
-    _install_trampoline, _local_ip_for, _run_step,
+    _install_trampoline, _local_ip_for, _run_step, resolve_seed,
 )
 
 from c64_test_harness import (                               # noqa: E402
@@ -116,8 +116,6 @@ STEP_CFG_MOVED = 0xA2
 STEP_REHANDSHAKE = 0xA3
 STEP_CLOSE = 0xA4
 STEP_SEND = 0xA5
-
-SOAK_PAYLOAD = bytes(0x40 + (i % 32) for i in range(32))
 
 # Type-2 arrives within a second; hs_process_response is ~35 s at 48 MHz.
 # STAGE2_ACTIVE_WAIT's 1800 s is sized for 1 MHz and would hide a hang here.
@@ -201,15 +199,21 @@ def build_probe(args):
         # Round trip on A, so "the traffic moved" later is a change from a
         # known-working state rather than from an unknown one.
         before = len(a_seen)
-        carry, dt = _timed_step(tr, step_id=STEP_SEND, target=L["do_send_test"],
-                                timeout=120.0)
+        rt.drain_type4()
+        pt = live.next_request_payload()
+        t0 = time.monotonic()
+        carry = live.send_tunnel_payload(tr, L, pt, step_id=STEP_SEND)
+        dt = time.monotonic() - t0
         deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline and len(a_seen) == before:
             time.sleep(0.2)
-        check(len(a_seen) > before and carry == 0,
-              "peer A receives the C64's Type-4 before the endpoint moves",
-              f"do_send_test carry={carry} in {dt:.2f}s; "
-              f"A saw {[s[0] for s in a_seen[before:]]}")
+        got = rt.drain_type4()
+        check(len(a_seen) > before and carry == 0 and got[:1] == [pt],
+              "peer A decrypts the C64's Type-4, byte-exact, before the "
+              "endpoint moves",
+              f"transport_send carry={carry} in {dt:.2f}s; "
+              f"A saw {[s[0] for s in a_seen[before:]]}; sent {pt.hex()}, "
+              f"decrypted {[g.hex() for g in got]}")
 
         # ── 1. no-change config_load must NOT close ──
         print("\n=== 1. config_load with the endpoint UNCHANGED ===",
@@ -331,7 +335,7 @@ def build_probe(args):
         polls = 0
         while time.monotonic() < deadline:
             _run_step(tr, step_id=live.STEP_POLL, target=L["net_poll"],
-                      timeout=live.POLL_TIMEOUT + 1.0)
+                      timeout=live.poll_budget(live.T2_TOTAL, args.turbo))
             polls += 1
             if tr.read_memory(L["udp_recv_ready"], 1)[0] != 0:
                 live._run_step_slow(tr, step_id=live.STEP_HANDLE,
@@ -346,7 +350,7 @@ def build_probe(args):
                      "SESSION_ACTIVE re-established through peer B",
                      f"wg_state={state} after {polls} polls"):
             return _report()
-        rc3 = live._run_stage3(tr, L, rt_b, responder)
+        rc3 = live._run_stage3(tr, L, rt_b, responder, args.turbo)
         check(rc3 == 0,
               "Type-4 transport round trip works over the new endpoint",
               "forward (C64 -> B) is the gate; reverse (B -> C64) is logged")
@@ -386,9 +390,6 @@ def run_soak(args) -> int:
     survivable now is GideonZ/1541ultimate#814's close-all-on-C64-reset,
     which run_prg triggers on every iteration.
     """
-    pr = probe_u64(args.host)
-    if not pr.reachable:
-        live._skip(f"U64E {args.host} not reachable: {pr.error}")
     live._build_uci()
 
     root = live.PROJECT_ROOT
@@ -420,6 +421,10 @@ def run_soak(args) -> int:
 
     rows: list[tuple[int, str, float, str]] = []
     try:
+        # Reachability is a REST read of the shared device: inside the lock.
+        pr = probe_u64(args.host)
+        if not pr.reachable:
+            live._skip(f"U64E {args.host} not reachable: {pr.error}")
         client = Ultimate64Client(host=args.host, password=args.password,
                                   timeout=30.0)
         tr = Ultimate64Transport(host=args.host, password=args.password,
@@ -475,9 +480,10 @@ def run_soak(args) -> int:
                             bytes([sink_port >> 8, sink_port & 0xFF]))
                 write_bytes(tr, L["wg_local_port"],
                             bytes([lp & 0xFF, lp >> 8]))
-                write_bytes(tr, SEND_BUF, SOAK_PAYLOAD)
+                soak_payload = live.next_request_payload()
+                write_bytes(tr, SEND_BUF, soak_payload)
                 write_bytes(tr, L["net_udp_send_len"],
-                            struct.pack("<H", len(SOAK_PAYLOAD)))
+                            struct.pack("<H", len(soak_payload)))
                 write_bytes(tr, L["net_last_error"], bytes([ERR_SENTINEL]))
                 t_send = time.monotonic()
                 c = _run_step(tr, step_id=STEP_SEND, target=L["net_udp_send"],
@@ -496,9 +502,9 @@ def run_soak(args) -> int:
                     data, src = sink.recvfrom(2048)
                 except socket.timeout:
                     raise RuntimeError("sink never received the datagram")
-                if data != SOAK_PAYLOAD:
+                if data != soak_payload:
                     raise RuntimeError(
-                        f"sink got {len(data)}B, wanted {len(SOAK_PAYLOAD)}B")
+                        f"sink got {data.hex()}, wanted {soak_payload.hex()}")
                 note = (note + " " if note else "") + \
                     f"connect+send {dt_send:.2f}s from {src[0]}:{src[1]}"
 
@@ -561,8 +567,10 @@ def _turbo_down(host: str) -> None:
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--host", default=os.environ.get("U64_HOST",
-                                                    live.DEFAULT_HOST))
+    p.add_argument("--host", default=os.environ.get("U64_HOST"))
+    p.add_argument("--seed", type=int, default=None,
+                   help="seed for every payload sent (else TEST_SEED, else "
+                        "random); logged once")
     p.add_argument("--turbo", type=int, default=48)
     p.add_argument("--password", default=os.environ.get("U64_PASSWORD"))
     p.add_argument("--soak", type=int, default=0, metavar="N",
@@ -595,15 +603,20 @@ def main() -> int:
     # still wins if the caller wants the tree as-is.
     os.environ.setdefault("C64_REU", "0")
 
+    seed = resolve_seed(args.seed)
     if args.soak:
+        live.seed_payloads(seed)
+        print(f"Random seed: {seed} (reproduce with --seed {seed} or "
+              f"TEST_SEED={seed})", flush=True)
         try:
             return run_soak(args)
         finally:
             _turbo_down(args.host)
 
+    # live.main() seeds the payload stream and logs the seed.
     live.post_session_hook = build_probe(args)
     argv = ["--chat", "--host", args.host, "--turbo", str(args.turbo),
-            "--reu", "off"]
+            "--reu", "off", "--seed", str(seed)]
     if args.password:
         argv += ["--password", args.password]
     try:

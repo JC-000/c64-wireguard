@@ -13,12 +13,13 @@ Stages, gated by ``--stage``:
   2   (default) "SESSION_ACTIVE" — full handshake completes: responder
       sends Type-2, C64 decodes it, wg_state transitions to 2. ~7-10 min.
 
-Gates: ``U64_HOST`` (default 10.43.23.81) and ``U64_ALLOW_MUTATE=1``.
-Skip exit is 77.
+Gates: ``--host``/``U64_HOST`` (required; exit 2 without it) and
+``U64_ALLOW_MUTATE=1``. Skip exit is 77. Tunnel payloads are seeded random
+(``--seed``/``TEST_SEED``; the seed is logged).
 
 Run::
 
-    U64_HOST=10.43.23.81 U64_ALLOW_MUTATE=1 \\
+    U64_HOST=<device-ip> U64_ALLOW_MUTATE=1 \\
         /opt/homebrew/bin/python3.13 tools/test_uci_handshake_live.py --stage 1
 """
 from __future__ import annotations
@@ -27,6 +28,7 @@ import argparse
 import hashlib
 import logging
 import os
+import random
 import socket
 import sys
 import threading
@@ -59,12 +61,13 @@ from test_uci_udp_echo_live import (  # noqa: E402
     STEP_INIT, STEP_DHCP, STEP_LISTEN, STEP_POLL, STEP_TIMEOUT,
     _build_trampoline, _build_uci, _install_trampoline, _local_ip_for,
     _persist_trace, _run_step, _safe, _wait_boot,
+    REQUEST_BYTE_ALPHABET, REPLY_BYTE_ALPHABET, SEND_BUF, resolve_seed,
 )
 
 from wg_responder.keys import generate_keypair  # noqa: E402
 from wg_responder.responder import (  # noqa: E402
     MSG_TYPE_INITIATION, MSG_TYPE_RESPONSE, MSG_TYPE_TRANSPORT,
-    T1_TOTAL, TimestampReplayError, WireGuardResponder,
+    T1_TOTAL, T2_TOTAL, TimestampReplayError, WireGuardResponder,
 )
 from wg_responder.server import (  # noqa: E402
     ascii_to_petscii, petscii_to_ascii, strip_tunnel_headers,
@@ -125,8 +128,6 @@ def _install_aead_capture_patch() -> None:
     _ns.SymmetricState.encrypt_and_hash = _capture_eah
     _ns.SymmetricState.decrypt_and_hash = _capture_dah
 
-DEFAULT_HOST = "10.43.23.81"
-
 # Custom step IDs for handshake-specific JSR targets.
 STEP_HS_INIT = 0x66        # session_initiate (Type-1 build & send)
 STEP_HANDLE = 0x77         # session_handle_packet (Type-2 process)
@@ -140,10 +141,64 @@ STEP_HANDLE_T4 = 0x99      # session_handle_packet (stage 3: reverse Type-4)
 # when the firmware doesn't return a proper write-count. Long timeouts
 # cost only wall-clock.
 HS_INIT_TIMEOUT = 1800.0   # do_handshake (entropy_init + session_initiate)
-POLL_TIMEOUT = 1.0         # individual net_poll JSR — short, called in a loop
 HANDLE_TIMEOUT = 1800.0    # session_handle_packet: hs_process_response is similar
 STAGE1_RESPONDER_WAIT = 60.0   # responder side is fast — should be immediate
 STAGE2_ACTIVE_WAIT = 1800.0    # max wall-clock to wait for SESSION_ACTIVE
+
+# One net_poll JSR that may carry a datagram of `n` bytes. Measured on a
+# WiFi-only U64E at 1 MHz (2026-10-04): the poll that picks up the 92 B
+# Type-2 took ~1.97 s wall clock, and a flat 1.0 s failed n=2. The per-byte
+# term is the two uci_fences per received byte (~11 ms at 1 MHz,
+# test_uci_udp_echo_live.py:385) and is CPU-bound, so it scales with turbo;
+# the fixed term (command setup + the firmware's read) is not scaled. x2
+# margin, plus 1.0 s for ~6 REST round trips at the 155 ms WiFi max.
+# 92 B at 1 MHz -> 5.0 s; at 48 MHz -> 3.0 s.
+POLL_FIXED_S = 1.0
+POLL_PER_BYTE_S = 0.011
+POLL_REST_S = 1.0
+
+
+def poll_budget(n_bytes: int, turbo_mhz: int = 1) -> float:
+    return (2.0 * (POLL_FIXED_S + POLL_PER_BYTE_S * n_bytes / max(1, turbo_mhz))
+            + POLL_REST_S)
+
+
+# What crosses the tunnel is seeded random (--seed / TEST_SEED, logged once
+# by main()): C64 -> peer bytes from REQUEST_BYTE_ALPHABET, peer -> C64 from
+# the disjoint REPLY_BYTE_ALPHABET, so an echo cannot satisfy a reply check.
+# Both alphabets keep plaintext[9] off IP_PROTO_ICMP/UDP (1/17), so the C64
+# routes the reply to display_payload. Drawn in call order from one stream.
+_payload_rng = random.Random(0)
+TUNNEL_PAYLOAD_MIN, TUNNEL_PAYLOAD_MAX = 10, 48   # <= SEND_BUF's 64 B
+
+
+def seed_payloads(seed: int) -> None:
+    _payload_rng.seed(seed)
+
+
+def next_request_payload() -> bytes:
+    n = _payload_rng.randint(TUNNEL_PAYLOAD_MIN, TUNNEL_PAYLOAD_MAX)
+    return bytes(_payload_rng.choice(REQUEST_BYTE_ALPHABET) for _ in range(n))
+
+
+def next_reply_payload() -> bytes:
+    n = _payload_rng.randint(TUNNEL_PAYLOAD_MIN, TUNNEL_PAYLOAD_MAX)
+    return bytes(_payload_rng.choice(REPLY_BYTE_ALPHABET) for _ in range(n))
+
+
+def send_tunnel_payload(tr: Ultimate64Transport, L: dict[str, int],
+                        payload: bytes, *, step_id: int,
+                        timeout: float = 120.0) -> int:
+    """Stage `payload` at SEND_BUF and JSR transport_send; return carry.
+
+    do_send_test would send the PRG's fixed "HELLO WIREGUARD"; this is the
+    same transport_send call with the run's seeded bytes instead."""
+    assert len(payload) <= 64, "payload must fit SEND_BUF"
+    write_bytes(tr, SEND_BUF, payload)
+    write_bytes(tr, L["tp_payload_ptr"], bytes([SEND_BUF & 0xFF, SEND_BUF >> 8]))
+    write_bytes(tr, L["tp_payload_len"], bytes([len(payload), 0]))
+    return _run_step_slow(tr, step_id=step_id, target=L["transport_send"],
+                          timeout=timeout)
 
 # Session state constants (must match src/wg/session.s).
 SESSION_IDLE = 0
@@ -162,8 +217,8 @@ REQUIRED_LABELS = (
     "hs_h", "hs_c", "aead_key", "kdf_out1", "kdf_out2", "kdf_out3",
     "hs_resp_packet", "hs_ephem_pub",
     # Stage-3 Type-4 transport round-trip.
-    "do_send_test", "tp_send_counter", "tp_packet", "tp_packet_len",
-    "tp_payload_len",
+    "transport_send", "tp_payload_ptr", "tp_send_counter", "tp_packet",
+    "tp_packet_len", "tp_payload_len",
 )
 
 
@@ -473,51 +528,59 @@ class _ResponderThread(threading.Thread):
 # ── Stage 3: Type-4 transport round-trip ──────────────────────────────────
 
 def _run_stage3(tr: Ultimate64Transport, L: dict[str, int],
-                rt: "_ResponderThread", responder: WireGuardResponder) -> int:
+                rt: "_ResponderThread", responder: WireGuardResponder,
+                turbo_mhz: int = 1) -> int:
     """On an ACTIVE session, exercise Type-4 transport data both ways.
 
-    Forward (C64 -> responder) is the pass gate: JSR do_send_test, which
-    encrypts "HELLO WIREGUARD" into a Type-4 (counter 0) and sends it to
-    the peer; assert the responder decrypts it. Reverse (responder -> C64)
-    is a bonus that does not fail the test: the responder encrypts a Type-4,
-    we drive net_poll + session_handle_packet, and read the decrypted
-    plaintext out of tp_packet+16.
+    Forward (C64 -> responder) is the pass gate: stage a seeded random
+    payload, JSR transport_send, and require the responder to decrypt
+    exactly those bytes. Reverse (responder -> C64) is a bonus that does
+    not fail the test: the responder encrypts a seeded reply, we drive
+    net_poll + session_handle_packet, and read the decrypted plaintext out
+    of tp_packet+16.
     """
     # ── Forward: C64 encrypts + sends a Type-4 ──
+    fwd_pt = next_request_payload()
+    rt.drain_type4()
+    seen = rt.type4_count
     pre = bytes(tr.read_memory(L["tp_send_counter"], 8))
-    log.info("stage 3 forward: JSR do_send_test (encrypt + send Type-4)...")
-    carry = _run_step_slow(tr, step_id=STEP_SEND_TEST,
-                           target=L["do_send_test"], timeout=120.0)
+    log.info("stage 3 forward: transport_send of %d seeded bytes (%s)...",
+             len(fwd_pt), fwd_pt.hex())
+    carry = send_tunnel_payload(tr, L, fwd_pt, step_id=STEP_SEND_TEST)
     post = bytes(tr.read_memory(L["tp_send_counter"], 8))
     plen = int.from_bytes(bytes(tr.read_memory(L["tp_packet_len"], 2)),
                           "little")
-    log.info("do_send_test carry=%d tp_send_counter %s->%s tp_packet_len=%d",
+    log.info("transport_send carry=%d tp_send_counter %s->%s tp_packet_len=%d",
              carry, pre.hex(), post.hex(), plen)
     deadline = time.monotonic() + 15.0
-    while time.monotonic() < deadline and rt.type4_received_at is None:
+    while time.monotonic() < deadline and rt.type4_count == seen:
         time.sleep(0.25)
-    if rt.type4_received_at is None:
+    got = rt.drain_type4()
+    if not got:
         log.error("STAGE 3 forward FAILED — responder never decrypted a "
                   "Type-4 (last_error=%s)", rt.last_error)
         return 1
+    if got[0] != fwd_pt:
+        log.error("STAGE 3 forward FAILED — responder decrypted %s, the C64 "
+                  "was given %s", got[0].hex(), fwd_pt.hex())
+        return 1
     log.info("STAGE 3 forward ✓ — responder decrypted the C64's Type-4 "
-             "transport packet (tunnel carries data)")
+             "byte-exact (tunnel carries data)")
 
     # ── Reverse: responder encrypts a Type-4 to the C64 (bonus) ──
     try:
         if rt.c64_addr is None:
             log.warning("stage 3 reverse: no c64_addr; skipping bonus")
             return 0
-        # plaintext[9] must not be IP_PROTO_ICMP(1)/UDP(17) so the C64 routes
-        # it to display_payload rather than an IP parser. 16 ASCII bytes.
-        rev_pt = b"PONG-FROM-PY-C64"
+        rev_pt = next_reply_payload()
         rev_pkt = responder.encrypt_transport(rev_pt)
         rt.send_raw(rev_pkt)
-        log.info("stage 3 reverse: sent %dB Type-4 to C64; polling...",
-                 len(rev_pkt))
+        log.info("stage 3 reverse: sent %dB Type-4 (%s) to C64; polling...",
+                 len(rev_pkt), rev_pt.hex())
         got = False
         for _ in range(60):
-            _run_step(tr, step_id=STEP_POLL, target=L["net_poll"])
+            _run_step(tr, step_id=STEP_POLL, target=L["net_poll"],
+                      timeout=poll_budget(len(rev_pkt), turbo_mhz))
             if tr.read_memory(L["udp_recv_ready"], 1)[0] != 0:
                 got = True
                 break
@@ -766,7 +829,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--stage", type=int, choices=[1, 2, 3], default=2,
                    help="1=Type-1 accepted; 2=SESSION_ACTIVE (default); "
                         "3=Type-4 transport round-trip")
-    p.add_argument("--host", default=os.environ.get("U64_HOST", DEFAULT_HOST))
+    p.add_argument("--host", default=os.environ.get("U64_HOST"),
+                   help="device address (or U64_HOST); required, no default: "
+                        "the U64E's IP moves with its network")
+    p.add_argument("--seed", type=int, default=None,
+                   help="seed for the tunnel payloads (else TEST_SEED, else "
+                        "random); logged once")
     p.add_argument("--chat", action="store_true",
                    help="After SESSION_ACTIVE, hand the C64 back its own "
                         "main loop and drop into an interactive two-way "
@@ -806,16 +874,18 @@ def main(argv: list[str] | None = None) -> int:
                         "captured via SymmetricState monkey-patch. Exits "
                         "after one iteration regardless of outcome.")
     args = p.parse_args(argv)
+    if not args.host:
+        print("ERROR: pass --host <ip> or set U64_HOST", file=sys.stderr)
+        return 2
+    seed = resolve_seed(args.seed)
+    seed_payloads(seed)
+    print(f"Random seed: {seed} (reproduce with --seed {seed} or "
+          f"TEST_SEED={seed})", flush=True)
     if args.dump_aead:
         _install_aead_capture_patch()
 
     if os.environ.get("U64_ALLOW_MUTATE") != "1":
         _skip("U64_ALLOW_MUTATE != 1 — this test mutates the device")
-
-    pr = probe_u64(args.host)
-    if not pr.reachable:
-        _skip(f"U64E {args.host} not reachable: {pr.error}")
-    log.info("U64E %s ok (%.1f ms)", args.host, pr.latency_ms or -1)
 
     _build_uci()
     labels_path = PROJECT_ROOT / "build" / "labels.txt"
@@ -869,6 +939,11 @@ def main(argv: list[str] | None = None) -> int:
         _skip(str(e))
 
     try:
+        # Reachability is a REST read of the shared device: inside the lock.
+        pr = probe_u64(args.host)
+        if not pr.reachable:
+            _skip(f"U64E {args.host} not reachable: {pr.error}")
+        log.info("U64E %s ok (%.1f ms)", args.host, pr.latency_ms or -1)
         # 30 s: the C64 Ultimate (fw 1.1.0) takes >10 s to answer the first
         # run_prg POST after a cold boot (the PRG loads fine; only the HTTP
         # response is late). 10 s was fine on the U64E but times out here.
@@ -1109,7 +1184,7 @@ def main(argv: list[str] | None = None) -> int:
         while time.monotonic() < deadline:
             # Drive one net_poll.
             _run_step(tr, step_id=STEP_POLL, target=L["net_poll"],
-                      timeout=POLL_TIMEOUT)
+                      timeout=poll_budget(T2_TOTAL, args.turbo))
             polls += 1
             ready = tr.read_memory(L["udp_recv_ready"], 1)[0]
             if ready != 0:
@@ -1187,7 +1262,7 @@ def main(argv: list[str] | None = None) -> int:
                     if args.stage < 3:
                         rc = 0
                         return 0
-                    rc = _run_stage3(tr, L, rt, responder)
+                    rc = _run_stage3(tr, L, rt, responder, args.turbo)
                     return rc
                 if state == SESSION_IDLE:
                     log.error("wg_state reverted to IDLE after handle_packet")
