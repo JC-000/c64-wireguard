@@ -100,6 +100,21 @@ KNOWN_BUILDS = {
         "absence of the capability from absence of an attestation. Probe, do "
         "not assume.",
     ),
+    "3a1ff9ff": (
+        "chunked",
+        "The image on device 601A96 on 2026-10-04, on WiFi only (Ethernet "
+        "registered but down). $16 OBSERVED TO DISPATCH: a UCI_CHUNKED_WRITE=1 "
+        "build sent every size from 888 to 1472 B and each arrived as ONE "
+        "datagram, none answered $8E. REASSEMBLY-EVIDENCE: 1472B as 1 "
+        "datagram on 2026-10-04. 1473 B was refused with $8C "
+        "(UCI_ERR_SEND_TOO_LONG) — our own pre-check, so it puts nothing on "
+        "the wire and says nothing about the firmware. Same caveat as "
+        "4011c97c: the hash is the builder's assertion, so this records "
+        "what a device reporting it did, not what the commit contains. "
+        "KNOWN DEFECT on this image: the debug stream refuses to start on "
+        "WiFi (HTTP 500 'No Operational Network Interface'; its stream code "
+        "uses interface 0).",
+    ),
 }
 
 # Verdicts describe what we know about the CHUNKED SEND PATH ($16):
