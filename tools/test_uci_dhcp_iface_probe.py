@@ -26,9 +26,8 @@ The transport ERROR bit ($DF1C bit 3) is NOT how the firmware reports
 those: in command_protocol.vhd it means "PUSH_CMD while not idle"
 (error_busy) and the pushed command is DROPPED. The model does exactly
 that, so an adapter that forgets to ACK a reply is caught on its NEXT
-command, at the wire tap, not inferred. A second out-of-range mode
-(`errbit`) additionally raises the ERROR bit, for adapters ported from code
-that assumed it (c64-https net.s); both modes must come out the same.
+command, at the wire tap, not inferred. NET_CMD_GET_INTERFACE_COUNT ($02)
+answers one byte, the number of interfaces (len(ifaces)), status "00,OK".
 
 The model knows nothing about what `net_dhcp_acquire` ought to conclude:
 it serves per-interface records and logs every command byte pushed. The
@@ -92,13 +91,13 @@ ST_NOT_AVAILABLE = b"83,INTERFACE NOT AVAILABLE"
 ST_UNKNOWN = b"21,UNKNOWN COMMAND"
 
 # net_last_error codes (src/net/uci/uci_errors.inc)
-ERR_OK, ERR_NO_IP, ERR_WAIT_TIMEOUT = 0x00, 0x83, 0x89
+ERR_OK, ERR_CMD_FAILED, ERR_NO_IP, ERR_WAIT_TIMEOUT = 0x00, 0x82, 0x83, 0x89
 
 CIA_TOD_TENTHS, CIA_TOD_SEC, CIA_TOD_MIN, CIA_TOD_HOUR = 0xDC08, 0xDC09, 0xDC0A, 0xDC0B
 
 # Every full run emits exactly this many named checks; a case that silently
 # stops running is a hard error, not a smaller denominator.
-CHECKS_PER_SPEED = 10           # cases A + B at each --mhz
+CHECKS_PER_SPEED = 11           # cases A + B at each --mhz
 CHECKS_FIXED = 30               # everything that runs once
 RANDOM_TOPOLOGIES = 6
 
@@ -155,17 +154,16 @@ class IfaceUci:
 
     `ifaces[i]` is a 12-byte IP/mask/gw record, or None for an interface
     the firmware counts but cannot resolve ("83,INTERFACE NOT AVAILABLE").
-    Index >= len(ifaces) is out of range. `oor_mode` "status" is the real
-    firmware (status line only); "errbit" also raises the ERROR bit.
+    Index >= len(ifaces) is out of range: EMPTY reply + "82,..." status and
+    NO error bit, exactly as fw 3a1ff9ff answers it.
     `wedge_push=k`: the k-th accepted PUSH_CMD (0-based) is never accepted —
     CMD_BUSY stays set for ever. `stuck` : STATE reads Busy from power-on.
     """
 
-    def __init__(self, ifaces, *, mhz, oor_mode="status", accept_us=400,
+    def __init__(self, ifaces, *, mhz, accept_us=400,
                  stage_us=1800, wedge_push=None, stuck=False):
         self.ifaces = list(ifaces)
         self.mhz = mhz
-        self.oor_mode = oor_mode
         self.accept_cyc = int(accept_us * mhz)
         self.stage_cyc = int(stage_us * mhz)
         self.wedge_push = wedge_push
@@ -205,7 +203,7 @@ class IfaceUci:
                 return b"", ST_INVALID, False
             idx = cmd[2]
             if idx >= len(self.ifaces):
-                return b"", ST_OUT_OF_RANGE, self.oor_mode == "errbit"
+                return b"", ST_OUT_OF_RANGE, False
             rec = self.ifaces[idx]
             if rec is None:
                 return b"", ST_NOT_AVAILABLE, False
@@ -484,12 +482,17 @@ def case_fidelity(ctx, res):
               f"uci_status_leading_code on '{code:02d},' returned A={r.a}")
 
 
+def _count_first(dev):
+    c = dev.commands
+    return bool(c) and c[0][:2] == bytes([TARGET_NETWORK, NET_CMD_GET_INTERFACE_COUNT])
+
+
 def case_wifi_only(ctx, res, mhz):
-    """A: ethernet (0) reads 0.0.0.0, WiFi (1) holds the lease."""
+    """A: count=2, ethernet (0) reads 0.0.0.0, WiFi (1) holds the lease."""
     m, rng = ctx["m"], ctx["rng"]
     lease = rand_lease(rng)
     witness = bytes(rng.randrange(1, 256) for _ in range(4))
-    dev = IfaceUci([ZERO, lease], mhz=mhz, oor_mode=rng.choice(["status", "errbit"]))
+    dev = IfaceUci([ZERO, lease], mhz=mhz)
     # net_last_error starts at $00, as net_init leaves it on the boot path:
     # a stale $83 from the interface-0 probe is then the only way to fail.
     r = m.call(dev, mhz=mhz, ip_witness=witness, err_witness=0x00)
@@ -501,6 +504,9 @@ def case_wifi_only(ctx, res, mhz):
               f"net_local_ip={fmt_ip(r.ip)}, want {fmt_ip(lease[:4])} (interface 1)")
     res.check(r.err == ERR_OK, f"{tag}/net_last_error-cleared",
               f"net_last_error=${r.err:02X} beside a successful acquire")
+    res.check(_count_first(dev), f"{tag}/interface-count-queried-first",
+              f"first command {dev.commands[0].hex() if dev.commands else None}, "
+              f"want 03 02 (GET_INTERFACE_COUNT) before any GET_IPADDR")
     _common(res, tag, r, want_indices=[0, 1])
 
 
@@ -521,8 +527,8 @@ def case_ethernet(ctx, res, mhz):
 
 
 def case_no_lease(ctx, res):
-    """C: every registered interface reads 0.0.0.0 -> C=1, NO_IP."""
-    m, rng = ctx["m"], ctx["rng"]
+    """C: count=2, both read 0.0.0.0 -> C=1 NO_IP, indices 0 and 1 ONLY."""
+    m = ctx["m"]
     dev = IfaceUci([ZERO, ZERO], mhz=1)
     r = m.call(dev, mhz=1, err_witness=0xEE)
     tag = "C/no-lease-anywhere"
@@ -530,33 +536,70 @@ def case_no_lease(ctx, res):
     res.check(r.err == ERR_NO_IP, f"{tag}/net_last_error-NO_IP",
               f"net_last_error=${r.err:02X}, want ${ERR_NO_IP:02X} "
               f"(UCI_ERR_NO_IP: interfaces exist, none has a lease)")
-    _common(res, tag, r, want_prefix=[0, 1])
+    _common(res, tag, r, want_indices=[0, 1])
 
 
-def case_out_of_range(ctx, res, mode):
-    """D: index 1 is out of range (no WiFi registered) -> skipped cleanly,
-    UCI drained + ACKed, and the NEXT command on the same machine works."""
+def case_single_iface(ctx, res):
+    """D: count=1 (no WiFi registered), iface0 0.0.0.0 -> C=1 NO_IP, index
+    1 never asked for; UCI drained + ACKed, and the NEXT command on the same
+    machine works."""
     m, rng = ctx["m"], ctx["rng"]
-    dev = IfaceUci([ZERO], mhz=1, oor_mode=mode)
+    dev = IfaceUci([ZERO], mhz=1)
     r = m.call(dev, mhz=1, err_witness=0xEE)
-    tag = f"D/{mode}/out-of-range-iface1"
+    tag = "D/single-interface-no-lease"
     res.check(r.carry == 1 and r.err == ERR_NO_IP, f"{tag}/C1-NO_IP",
-              f"C={r.carry} net_last_error=${r.err:02X}, want C=1 "
-              f"${ERR_NO_IP:02X}: the only real interface had no lease; "
-              f"an out-of-range index is the end of the list, not a fault")
-    _common(res, tag, r, want_prefix=[0, 1])
-    # The next command works: the lease arrives, call again on the SAME
-    # memory and the SAME device. A probe that left the UCI un-ACKed gets
-    # its next PUSH dropped (error_busy) and is caught right here.
+              f"C={r.carry} net_last_error=${r.err:02X}, want C=1 ${ERR_NO_IP:02X}")
+    _common(res, tag, r, want_indices=[0])
     lease = rand_lease(rng)
     dev.ifaces[0] = lease
-    before = len(dev.commands)
+    before = len(dev.ipaddr_indices())
     r2 = m.call(dev, mhz=1, mem=r.mem, err_witness=0xEE)
     res.check(r2.carry == 0 and r2.ip == lease[:4] and not dev.dropped
-              and dev.ipaddr_indices()[before:before + 1] == [0],
+              and dev.ipaddr_indices()[before:] == [0],
               f"{tag}/next-command-works",
               f"second acquire: C={r2.carry} ip={fmt_ip(r2.ip)} want "
               f"{fmt_ip(lease[:4])}; {dev.describe()}")
+
+
+def case_zero_interfaces(ctx, res):
+    """Z: count=0 -> C=1 with $82 (UCI_ERR_CMD_FAILED), bounded."""
+    m = ctx["m"]
+    dev = IfaceUci([], mhz=1)
+    r = m.call(dev, mhz=1, err_witness=0xEE)
+    tag = "Z/zero-interfaces"
+    res.check(r.hung is None and r.carry == 1 and r.err == ERR_CMD_FAILED,
+              f"{tag}/C1-CMD_FAILED",
+              f"hung={r.hung} C={r.carry} net_last_error=${r.err:02X}, want "
+              f"C=1 ${ERR_CMD_FAILED:02X}: no interface answered at all")
+    res.check(r.seconds <= 3.0, f"{tag}/bounded",
+              f"took {r.seconds:.2f} s simulated")
+    res.check(dev.is_idle() and not dev.dropped and not dev.foreign_commands(),
+              f"{tag}/uci-idle-and-acked", dev.describe())
+
+
+def case_stale_after_success(ctx, res):
+    """S: a re-call after a previous SUCCESS, where nothing answers with a
+    record any more, must fail — not report the previous lease again.
+
+    The first call leaves the old lease in the response buffer; the second
+    sees only empty replies (interface count 0, or "83,INTERFACE NOT
+    AVAILABLE" on every index). An adapter that copies the buffer without
+    checking that 12 bytes arrived re-announces the stale address with C=0.
+    """
+    m, rng = ctx["m"], ctx["rng"]
+    for name, later in (("count-now-0", []), ("all-not-available", [None, None])):
+        lease = rand_lease(rng)
+        dev = IfaceUci([lease], mhz=1)
+        r1 = m.call(dev, mhz=1)
+        dev.ifaces = list(later)
+        r2 = m.call(dev, mhz=1, mem=r1.mem, err_witness=0xEE)
+        res.check(r1.carry == 0 and r1.ip == lease[:4] and r2.carry == 1
+                  and r2.ip != lease[:4] and r2.hung is None,
+                  f"S/{name}/recall-does-not-return-the-stale-lease",
+                  f"first call C={r1.carry} ip={fmt_ip(r1.ip)}; re-call with "
+                  f"nothing answering: C={r2.carry} ip={fmt_ip(r2.ip)} "
+                  f"err=${r2.err:02X}"
+                  + (" — that is the STALE lease" if r2.ip == lease[:4] else ""))
 
 
 def case_empty_reply_is_not_a_lease(ctx, res):
@@ -632,20 +675,19 @@ def case_random(ctx, res):
     for i in range(RANDOM_TOPOLOGIES):
         n = rng.choice([1, 2])
         ifaces = [rand_lease(rng) if rng.random() < 0.5 else ZERO for _ in range(n)]
-        mode = rng.choice(["status", "errbit"])
         want = next((x[:4] for x in ifaces if x != ZERO), None)
         want_idx = next((k for k, x in enumerate(ifaces) if x != ZERO), None)
-        dev = IfaceUci(ifaces, mhz=1, oor_mode=mode,
+        dev = IfaceUci(ifaces, mhz=1,
                        accept_us=rng.randrange(50, 2000),
                        stage_us=rng.randrange(100, 8000))
         r = m.call(dev, mhz=1, err_witness=0x00)
-        shape = "[" + ",".join("lease" if x != ZERO else "0.0.0.0" for x in ifaces) + f"] {mode}"
+        shape = "[" + ",".join("lease" if x != ZERO else "0.0.0.0" for x in ifaces) + "]"
         if want is not None:
             ok = (r.carry == 0 and r.ip == want and r.err == ERR_OK
                   and dev.ipaddr_indices() == list(range(want_idx + 1)))
         else:
             ok = (r.carry == 1 and r.err == ERR_NO_IP
-                  and dev.ipaddr_indices()[:n] == list(range(n)))
+                  and dev.ipaddr_indices() == list(range(n)))
         ok = ok and dev.is_idle() and not dev.dropped and r.hung is None
         res.check(ok, f"R{i}/random-topology",
                   f"{shape}: C={r.carry} ip={fmt_ip(r.ip)} err=${r.err:02X} "
@@ -657,7 +699,7 @@ def main(argv=None):
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--build", default=None)
     p.add_argument("--mhz", default=os.environ.get("UCI_DHCP_TURBO_MHZ", "1,48"))
-    p.add_argument("--only", default=None, help="case letter: F A B C D E W R")
+    p.add_argument("--only", default=None, help="case letter: F A B C D Z S E W R")
     args = p.parse_args(argv)
 
     seed = args.seed
@@ -686,8 +728,9 @@ def main(argv=None):
         plan.append(("A", lambda mhz=mhz: case_wifi_only(ctx, res, mhz)))
         plan.append(("B", lambda mhz=mhz: case_ethernet(ctx, res, mhz)))
     plan += [("C", lambda: case_no_lease(ctx, res)),
-             ("D", lambda: case_out_of_range(ctx, res, "status")),
-             ("D", lambda: case_out_of_range(ctx, res, "errbit")),
+             ("D", lambda: case_single_iface(ctx, res)),
+             ("Z", lambda: case_zero_interfaces(ctx, res)),
+             ("S", lambda: case_stale_after_success(ctx, res)),
              ("E", lambda: case_empty_reply_is_not_a_lease(ctx, res)),
              ("W", lambda: case_wedge(ctx, res)),
              ("R", lambda: case_random(ctx, res))]
