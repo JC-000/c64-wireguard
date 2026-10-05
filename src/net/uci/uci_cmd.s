@@ -9,7 +9,8 @@
 ; Exported primitives (see the per-routine headers for calling conventions):
 ;
 ;   uci_abort          — flush the state machine (write ABORT + short delay)
-;   uci_wait_idle      — spin until (STATE==0 AND CMD_BUSY==0); TOD-bounded
+;   uci_wait_idle      — spin until (STATE==0 AND CMD_BUSY==0), accepting an
+;                        orphaned reply on the way; TOD-bounded
 ;   uci_wait_not_busy  — spin until CMD_BUSY==0; TOD-bounded
 ;   uci_begin_cmd      — A = target id; writes target to UCI_CMD_DATA
 ;   uci_put_byte       — A = parameter byte; writes to UCI_CMD_DATA
@@ -23,7 +24,6 @@
 ;   uci_drain_status   — drain remaining STAT_AV bytes to nowhere, ACKing each;
 ;                        TOD-bounded (5 s wall-clock), C=1 on expiry
 ;   uci_ack            — single NEXT_DATA pulse
-;   uci_wedged_ack     — uci_ack, then C=1: exit for a timed-out transaction
 ;
 ; Phase 2 only needs enough machinery for GET_IPADDR (12-byte response,
 ; one interface-index parameter). Later phases will extend as needed.
@@ -51,7 +51,6 @@
 .export uci_status_seen
 .export uci_status_leading_code
 .export uci_ack
-.export uci_wedged_ack
 
 .export uci_resp_dst
 .export uci_resp_max
@@ -190,6 +189,32 @@ uci_wait_idle:
         and #(UCI_STAT_STATE | UCI_STAT_CMD_BUSY)   ; $31
         beq @idle_done
 
+        ; ORPHAN CLEAR — the one place a stranded reply is accepted. Every
+        ; command passes this gate before its first byte. A reply is orphaned
+        ; when a wait or drain times out after its PUSH_CMD: the firmware
+        ; writes HANDSHAKE_ACCEPT_COMMAND only after parse_command returns,
+        ; then stages the reply (command_intf.cc:152-158), so it can land in
+        ; STATE 1x after the timed-out routine has returned C=1. An accept at
+        ; that exit would be wasted — in 01 it is gated off
+        ; (command_protocol.vhd:163) — so the exits do not ack, and this gate
+        ; does it instead. Left alone, 1x drops the next PUSH_CMD (:155-160)
+        ; while that command's bytes still advance command_pointer (:144-147),
+        ; which only the firmware's ACCEPT_COMMAND / RESET rewinds (:209-213),
+        ; so the command after that would run on a misaligned buffer.
+        ; One UCI_STATUS read decides:
+        ;   1x with CMD_BUSY 0 — write NEXT_DATA (:163-167). 10 -> 00. 11 -> 01,
+        ;     and the firmware stages the next block, which a later pass
+        ;     accepts in turn. Nothing is drained: the queues stop presenting
+        ;     once state(1) drops (:131-140).
+        ;   01, or CMD_BUSY 1 — the firmware still owns it: wait.
+        ; The single TOD budget below bounds the whole sequence, Data More
+        ; chains included: it ends in 00 or in $89.
+        cmp #UCI_STATE_DATA_LAST
+        bcc @wi_tick                ; STATE 0x: wait
+        lsr a                       ; C = CMD_BUSY
+        bcs @wi_tick
+        jsr uci_ack
+@wi_tick:
         ; Check TOD for elapsed tenths. Latch (HOUR) then read TENTHS.
         lda CIA_TOD_HOUR
         lda CIA_TOD_TENTHS
@@ -397,37 +422,6 @@ uci_ack:
         lda #UCI_CTRL_NEXT_DATA
         sta UCI_CONTROL
         uci_fence
-        rts
-
-; =============================================================================
-; uci_wedged_ack — exit for a transaction whose wait or drain timed out after
-; its PUSH_CMD: one best-effort accept, then C=1. net_last_error (already
-; UCI_ERR_WAIT_TIMEOUT) is not touched, and there is no wait: one register
-; write plus a fence.
-;
-; The accept is owed because the next PUSH_CMD outside state 00 is dropped
-; (error_busy, command_protocol.vhd:159) while its command bytes still
-; advance command_pointer (:144-147), which only the firmware's accept of a
-; command resets (:210-212). net_poll gates on CMD_BUSY alone, so it would
-; push into exactly that.
-;
-; It is safe in every state, per fpga/io/command_interface/vhdl_source/
-; command_protocol.vhd. UCI_CTRL_NEXT_DATA sets control bit 1 only, so the
-; clear-error (:149), push (:152) and abort (:168) arms are not taken, and
-; the accept arm is gated on state(1) (:163):
-;   00 Idle, 01 Command Busy — no effect: it cannot start a command and
-;      does not move command_pointer. A firmware still processing the
-;      command is left alone.
-;   10 Data Last — state 00. response_valid / status_valid follow state(1)
-;      (:131-140), so unread bytes are abandoned, not misread later.
-;   11 Data More — state 01 with handshake_in(1) set (:164): the firmware
-;      stages the next block of the SAME reply. Nothing new is started, and
-;      the interface stays non-idle exactly as it would without the accept.
-; Clobbers: A
-; =============================================================================
-uci_wedged_ack:
-        jsr uci_ack
-        sec
         rts
 
 ; =============================================================================

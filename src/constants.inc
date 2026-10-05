@@ -104,18 +104,17 @@ WG_DATA_OVERHEAD    = 32        ; 16 B Type-4 header + 16 B Poly1305 tag
 ; the 1440 MTU overflowed APP_BSS by ~1 KB; measured after #112 the ip65 1472
 ; build's APP_BSS spans $8800-$9E8B with 372 B of MAIN_AREA_HI free).
 ;
-; Two flags lift the cap from 892 to 1472; the default is 892 for BOTH
-; backends and a default build is byte-identical to a tree without them:
+; Either of two flags lifts the cap from 892 to 1472 (the Makefile picks the
+; defaults: WG_MTU1440 is 1 under ip65 and 0 under uci):
 ;   UCI_CHUNKED_WRITE — the UCI adapter's chunked ($16) send path, which is
 ;     what raises NET_UDP_SEND_MAX to 1472 (#70; the Makefile refuses the flag
-;     for ip65).
-;   WG_MTU1440 — generic opt-in (#70). ip65 advertises 1472/1472 natively, so
-;     under ip65 the flag alone yields WG_MTU = 1440; its RR-Net path is
-;     unmeasured at 1472 and #80 is open, hence opt-in. Under uci it is only
-;     meaningful together with UCI_CHUNKED_WRITE (without the chunked send
-;     NET_UDP_SEND_MAX stays 892, the min() below clamps WG_MTU back to 860
-;     and the flag is a silent no-op — the Makefile refuses that pairing so
-;     it is loud instead).
+;     for ip65). It lifts the cap by itself, so adding WG_MTU1440=1 to a
+;     chunked uci build assembles the same PRG.
+;   WG_MTU1440 — ip65 advertises 1472/1472 natively, so under ip65 the flag
+;     alone yields WG_MTU = 1440. Under uci it is only meaningful together
+;     with UCI_CHUNKED_WRITE (without the chunked send NET_UDP_SEND_MAX stays
+;     892, the min() below clamps WG_MTU back to 860 and the flag is a silent
+;     no-op — the Makefile refuses that pairing so it is loud instead).
 ; The §13.8 asserts and the linker refuse a cap the buffers cannot hold.
 .if .defined(UCI_CHUNKED_WRITE) || .defined(WG_MTU1440)
 WG_DATAGRAM_CAP     = 1472
