@@ -242,73 +242,103 @@ net_init:
 ; Interfaces are indexed in firmware registration order, which is not
 ; guaranteed. On the U64E, Ethernet registers at boot cable or not (index
 ; 0) and WiFi after it (index 1); a down interface answers OK + 0.0.0.0,
-; so a WiFi-only box reads 0.0.0.0 at index 0. We probe indices
-; 0..NET_DHCP_MAX_IFACE-1 and take the first non-zero lease. An index past
-; the interface count answers with the error bit (param_out_of_range): we
-; drain + ack it and advance.
+; so a WiFi-only box reads 0.0.0.0 at index 0. So: GET_IFACE_COUNT first,
+; then GET_IPADDR for indices 0..min(count, NET_DHCP_MAX_IFACE)-1, taking
+; the first non-zero lease. An index >= count must never be sent: fw
+; answers it with an EMPTY reply and status "82,PARAMETER(S) OUT OF RANGE"
+; but no error bit, which reads as a 1 s response timeout.
+; A reply that is not exactly 12 bytes counts as no answer, and the IP
+; bytes are zeroed before each probe, so a stale lease is never copied.
 ;
 ; Output: C=0, net_local_ip set, net_last_error = UCI_ERR_OK on success.
 ;         C=1 on failure, net_last_error =
-;           UCI_ERR_NO_IP        some interface answered, none had a lease
-;           UCI_ERR_CMD_FAILED   no index answered without the error bit
+;           UCI_ERR_NO_IP        an interface answered, none had a lease
+;                                (our use of $83: "every probed interface")
+;           UCI_ERR_CMD_FAILED   interface count refused, 0, or unreadable;
+;                                or no GET_IPADDR answered in full
 ;           UCI_ERR_WAIT_TIMEOUT the FPGA wedged (set by the wait helper)
 ; Clobbers: A, X, Y
 ; =============================================================================
-NET_DHCP_MAX_IFACE = 4          ; probe interface indices 0..3
+NET_DHCP_MAX_IFACE = 4          ; probe at most interface indices 0..3
 
 net_dhcp_acquire:
         lda #$00
-        sta @iface_idx
+        ldx #3
+@clr_ip:
+        sta net_local_ip,x      ; never leave a previous call's lease behind
+        dex
+        bpl @clr_ip
         lda #UCI_ERR_CMD_FAILED ; downgraded to NO_IP once any index answers
         sta net_last_error
+        jmp @count_go
+@count_err:                     ; count refused: clean up, fail with $82
+        jsr @drain_ack
+@fail_c:                        ; in branch range of the count block
+        sec
+        rts
 
-@next_iface:
+@count_go:
+        ; --- GET_IFACE_COUNT: one byte back ---
         jsr uci_wait_idle
-        bcs @dhcp_fail          ; FPGA wedged (net_last_error = WAIT_TIMEOUT)
-
+        bcs @fail_c          ; FPGA wedged (net_last_error = WAIT_TIMEOUT)
         lda #UCI_TARGET_NETWORK
         jsr uci_begin_cmd
+        lda #UCI_CMD_GET_IFACE_COUNT
+        jsr uci_put_byte
+        jsr uci_push_wait
+        bcs @fail_c
+        jsr uci_check_err
+        bcs @count_err
+        lda #$00
+        sta uci_ipaddr_resp
+        lda #1
+        jsr @read_resp
+        bcs @fail_c
+        lda uci_resp_count
+        cmp #1
+        bne @fail_c          ; no count byte: $82
+        lda uci_ipaddr_resp
+        beq @fail_c          ; zero interfaces: $82
+        cmp #NET_DHCP_MAX_IFACE
+        bcc @have_count
+        lda #NET_DHCP_MAX_IFACE
+@have_count:
+        sta @iface_n
+        lda #$00
+        sta @iface_idx
 
+@next_iface:
+        lda #$00
+        sta uci_ipaddr_resp+0
+        sta uci_ipaddr_resp+1
+        sta uci_ipaddr_resp+2
+        sta uci_ipaddr_resp+3
+
+        jsr uci_wait_idle
+        bcs @dhcp_fail
+        lda #UCI_TARGET_NETWORK
+        jsr uci_begin_cmd
         lda #UCI_CMD_GET_IPADDR
         jsr uci_put_byte
-
         lda @iface_idx
         jsr uci_put_byte
-
         jsr uci_push_wait
         bcs @dhcp_fail
 
         jsr uci_check_err
         bcc @no_err
-
-        ; Index out of range (or otherwise refused): clean up so the next
-        ; probe starts from idle, keep whichever error is already recorded.
-        jsr uci_drain_resp
+        jsr @drain_ack          ; refused: clean up, keep the recorded error
         bcs @dhcp_fail
-        jsr uci_drain_status
-        bcs @dhcp_fail
-        jsr uci_ack
         jmp @advance
 
-@iface_idx: .byte 0             ; code-resident local, as in uci_cmd.s
-
 @no_err:
-        ; Read the 12-byte response into uci_ipaddr_resp.
-        lda #<uci_ipaddr_resp
-        sta uci_resp_dst
-        lda #>uci_ipaddr_resp
-        sta uci_resp_dst+1
         lda #12
-        sta uci_resp_max
-        jsr uci_read_resp_bytes
-
-        jsr uci_drain_resp
+        jsr @read_resp
         bcs @dhcp_fail
-        jsr uci_drain_status
-        bcs @dhcp_fail
-        jsr uci_ack
+        lda uci_resp_count
+        cmp #12
+        bne @advance            ; not a full record: treat as no answer
 
-        ; Copy the first 4 bytes (IP) into net_local_ip.
         ldx #3
 @copy_ip:
         lda uci_ipaddr_resp,x
@@ -328,7 +358,7 @@ net_dhcp_acquire:
 @advance:
         inc @iface_idx
         lda @iface_idx
-        cmp #NET_DHCP_MAX_IFACE
+        cmp @iface_n
         bcc @next_iface
 @dhcp_fail:
         sec
@@ -339,6 +369,28 @@ net_dhcp_acquire:
         sta net_last_error
         clc
         rts
+
+; A = max bytes. Read the reply into uci_ipaddr_resp, then drain + ack.
+@read_resp:
+        sta uci_resp_max
+        lda #<uci_ipaddr_resp
+        sta uci_resp_dst
+        lda #>uci_ipaddr_resp
+        sta uci_resp_dst+1
+        jsr uci_read_resp_bytes
+; Drain whatever is left of the reply and status, then ack. C=1 if wedged.
+@drain_ack:
+        jsr uci_drain_resp
+        bcs @da_done
+        jsr uci_drain_status
+        bcs @da_done
+        jsr uci_ack
+        clc
+@da_done:
+        rts
+
+@iface_idx: .byte 0             ; code-resident locals, as in uci_cmd.s
+@iface_n:   .byte 0
 
 ; =============================================================================
 ; net_udp_listen — latch wg_local_port into state.
