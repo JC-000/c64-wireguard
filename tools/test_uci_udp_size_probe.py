@@ -629,6 +629,22 @@ def self_check() -> int:
     else:
         print("  PASS  a clean refusal is reported, not failed")
 
+    # The exit gate itself: _verdict must PASS a full clean run and FAIL
+    # an empty run and a run that never scored one SIZES entry.
+    full = [row(size=n, wire_len=n, rx_len=n, poison_stop=n, rx_hdr=n)
+            for n in SIZES]
+    for name, rows, want in (
+            ("_verdict: full clean run -> exit 0", full, 0),
+            ("_verdict: empty run -> exit 1", [], 1),
+            (f"_verdict: run omitting size {SIZES[0]} -> exit 1",
+             full[1:], 1)):
+        got = _verdict(rows, {"debug_trace": "self-check"})
+        if got != want:
+            print(f"  FAIL  {name}: got exit {got}")
+            failed += 1
+        else:
+            print(f"  PASS  {name}")
+
     if failed:
         print(f"\n{failed} alarm(s) did not fire. Do not trust a run of "
               f"this tool until they do.")
@@ -646,7 +662,9 @@ def main() -> int:
           f"(reproduce with TEST_SEED={KICK_SEED})", flush=True)
     host = os.environ.get("U64_HOST")
     if not host:
-        print("SKIP: U64_HOST not set", file=sys.stderr); return 77
+        print("ERROR: set U64_HOST=<ip> (the device address moves; there "
+              "is no default)", file=sys.stderr)
+        return 2
     if not os.environ.get("U64_ALLOW_MUTATE"):
         print("SKIP: U64_ALLOW_MUTATE not set", file=sys.stderr); return 77
 
@@ -715,8 +733,8 @@ def main() -> int:
         if not setup_ok:
             lock.release()
 
-    cap = DebugCapture(port=DEBUG_PORT)
-    responder = UDPSizeResponder(port=0)
+    cap = None
+    responder = None
     results: list[dict] = []
     # The 6510 bus trace is post-mortem evidence; no assertion reads it.
     # fw 3a1ff9ff refuses stream_debug_start with HTTP 500 "No Operational
@@ -725,6 +743,8 @@ def main() -> int:
     not_measured: dict[str, str] = {}
     stream_started = False
     try:
+        cap = DebugCapture(port=DEBUG_PORT)
+        responder = UDPSizeResponder(port=0)
         responder.start()
         log.info("size responder bound on %s:%d", local_ip, responder.port)
         cap.start()
@@ -781,18 +801,23 @@ def main() -> int:
                                            rng, poison))
 
     finally:
-        # Every stage has its own guard: teardown and lock.release() must
-        # run whatever raised before them.
+        # Every stage has its own guard, on BaseException so a second
+        # Ctrl-C cannot skip teardown_device or lock.release() either.
         try:
-            _finish_trace(client, cap, stream_started, not_measured)
-        except Exception as exc:
-            not_measured.setdefault("debug_trace", f"trace save raised: {exc}")
-            log.warning("debug_trace unavailable: %s", exc)
-        if orig_mode: _safe(set_debug_stream_mode, client, orig_mode)
+            if cap is not None:
+                _finish_trace(client, cap, stream_started, not_measured)
+        except BaseException as exc:                          # noqa: BLE001
+            not_measured.setdefault("debug_trace", f"trace save raised: {exc!r}")
+            log.warning("debug_trace unavailable: %r", exc)
         try:
-            responder.stop(); responder.join(timeout=1.0)
-        except Exception as exc:
-            log.warning("responder stop failed: %s", exc)
+            if orig_mode: _safe(set_debug_stream_mode, client, orig_mode)
+        except BaseException as exc:                          # noqa: BLE001
+            log.warning("debug stream mode restore failed: %r", exc)
+        try:
+            if responder is not None:
+                responder.stop(); responder.join(timeout=1.0)
+        except BaseException as exc:                          # noqa: BLE001
+            log.warning("responder stop failed: %r", exc)
         # Clock + REU + a VERIFIED reset (issue #134). This probe attaches
         # the REU and opens a UDP socket per size; without the reset it
         # strands one per run. We hold the lock, so pass the client.
