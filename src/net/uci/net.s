@@ -892,9 +892,11 @@ uci_send_part:
         ; without it the next PUSH_CMD is silently dropped (`else
         ; error_busy <= '1'`), and because command-byte writes are not
         ; state-gated a dropped command still advances the command pointer,
-        ; so every later command lands in a mis-positioned buffer — one
-        ; missing accept corrupts the interface from then on. Hence the
-        ; drains complete BEFORE the count is judged, whatever it says.
+        ; so later commands would land in a mis-positioned buffer.
+        ; uci_wait_idle's orphan clear repairs that before the next command
+        ; writes a byte, but it is there for the timeout exits; a completed
+        ; transaction accepts its own reply. Hence the drains complete
+        ; BEFORE the count is judged, whatever it says.
         lda #$00                ; pre-clear so a short read is detectable
         sta uci_write_resp+0
         sta uci_write_resp+1
