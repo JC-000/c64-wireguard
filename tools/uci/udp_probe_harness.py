@@ -23,7 +23,7 @@ from c64_test_harness.backends.ultimate64 import Ultimate64Transport
 from c64_test_harness.backends.ultimate64_client import Ultimate64Client
 
 
-HOST = os.environ.get("U64_HOST", "10.43.23.81")
+HOST = os.environ.get("U64_HOST")
 
 
 def _local_ip_for(remote_ip: str) -> str:
@@ -61,6 +61,10 @@ class EchoThread(threading.Thread):
 
 
 def main():
+    if not HOST:
+        print("ERROR: set U64_HOST=<ip> (the device address moves; there "
+              "is no default)", file=sys.stderr)
+        return 2
     # The lock comes FIRST. Everything below it touches the shared device,
     # and enable_uci is a config WRITE — running it before acquiring meant
     # this tool reconfigured a box another lane was mid-run on. The probe

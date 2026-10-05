@@ -152,17 +152,17 @@ you are the ones not using it.
 - [ ] **Physical power-cycle the U64E.** Not `client.reboot()` — it does
       not clear the UCI wedge state. The wedge budget below starts
       counting from power-on.
-- [ ] **Confirm the host address by probing, not by recall.** The older
-      tools default to `U64_HOST=10.43.23.81`; that is a home-LAN address
-      and the device moves (recorded away-LAN address: `192.168.2.81`).
+- [ ] **Confirm the host address by probing, not by recall.** The live
+      tools have no default host and exit 2 without `U64_HOST` / `--host`:
+      the device moves (`10.43.23.81` home LAN, `192.168.2.81` away, and
+      DHCP on WiFi hands it yet another address).
       A second, DIFFERENT device is also in play — a C64 Ultimate at
       `10.53.21.158`, which is not the U64E. Identify the machine by
       `GET /v1/info` — `unique_id`,
       `hostname`, `firmware_version` — and pass `U64_HOST` / `--host`
       explicitly. A stale address fails as "unreachable", which reads like
-      a dead device rather than a wrong flag. The newer tools
-      (`wg_chat.py`, `wg_demo.py`, `test_wire_encryption_live.py`) have no
-      default for exactly this reason.
+      a dead device rather than a wrong flag, and a stale default would
+      target the wrong lock key.
 - [ ] **Identify the IMAGE, not just the device.** `python3
       tools/u64_firmware.py <host>` reads `/v1/info`'s `git_commit_hash`
       (added upstream 2026-09-03, alongside `ethernet_mac` / `wifi_mac`).

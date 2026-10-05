@@ -41,7 +41,7 @@ rebase, so `verdict == "unknown"` is a warning, never an error.
 
 Run::
 
-    python3 tools/u64_firmware.py 10.43.23.81
+    python3 tools/u64_firmware.py <device-ip>
 
 Exit status: 0 = a verdict in ("chunked", "unknown", "no-hash"); 1 = any
 other verdict — today that means "unreachable", but describe_build returns

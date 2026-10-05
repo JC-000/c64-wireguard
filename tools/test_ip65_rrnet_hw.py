@@ -376,8 +376,6 @@ DNSMASQ_LEASEFILE = _rig_const("LEASEFILE")
 DNSMASQ_LOGFILE = _rig_const("LOGFILE")
 DEFAULT_PCAP = "/tmp/rrnet.pcap"
 
-DEFAULT_HOST = os.environ.get("U64_HOST", "10.43.23.81")
-
 # WireGuard. The C64 both listens and sends on 51820 (src/constants.inc
 # wg_default_port, latched into wg_local_port by src/boot.s), so the
 # responder binds the same port on the host side.
@@ -2632,10 +2630,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(
         description="ip65 / RR-Net end-to-end on real hardware, verified "
                     "from a packet capture.")
-    p.add_argument("--host", default=DEFAULT_HOST,
-                   help="Ultimate 64 control address (REST/DMA). This is the "
-                        "Ultimate's OWN ethernet and is unrelated to the "
-                        "RR-Net data path under test.")
+    p.add_argument("--host", default=os.environ.get("U64_HOST"),
+                   help="Ultimate 64 control address (REST/DMA), or "
+                        "U64_HOST; required. This is the Ultimate's OWN "
+                        "network and is unrelated to the RR-Net data path "
+                        "under test.")
     p.add_argument("--iface", default=DEFAULT_IFACE,
                    help="the Mac NIC cabled to the RR-Net (default en4)")
     p.add_argument("--turbo", type=int, default=48,
@@ -2672,6 +2671,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
     VERBOSE = args.verbose
+    if not args.host:
+        print("ERROR: pass --host <ip> or set U64_HOST", file=sys.stderr)
+        return 2
 
     seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
     rng = random.Random(seed)

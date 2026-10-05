@@ -6,10 +6,10 @@ on real hardware against a host-side UDP echo server, under a full
 debug-bus-cycle capture so any failure can be root-caused from the
 trace artifact.
 
-Gates: ``U64_HOST`` (default 10.43.23.81) and ``U64_ALLOW_MUTATE=1``.
-Skip exit is 77.  Run::
+Gates: ``U64_HOST`` (required, no default: exit 2 without it) and
+``U64_ALLOW_MUTATE=1``. Skip exit is 77.  Run::
 
-    U64_HOST=10.43.23.81 U64_ALLOW_MUTATE=1 \\
+    U64_HOST=<device-ip> U64_ALLOW_MUTATE=1 \\
         python3 tools/test_uci_udp_echo_live.py
 
 Issue #70 chunked-write sweep (build once, then never let the tool rebuild)::
@@ -78,7 +78,6 @@ from c64_test_harness.backends.ultimate64_helpers import (  # noqa: E402
     Ultimate64MeasurementEnvironmentError,
 )
 
-DEFAULT_HOST = "10.43.23.81"
 DEBUG_PORT = 11002
 
 # Trampoline + signal bytes (cassette buffer + scratch, free post-boot).
@@ -697,9 +696,11 @@ def main() -> int:
     print(f"Random seed: {seed} (reproduce with --seed {seed} or "
           f"TEST_SEED={seed})", flush=True)
 
-    host = os.environ.get("U64_HOST", DEFAULT_HOST)
+    host = os.environ.get("U64_HOST")
     if not host:
-        _skip("U64_HOST not set")
+        print("ERROR: set U64_HOST=<ip> (the device address moves; there "
+              "is no default)", file=sys.stderr)
+        return 2
     if os.environ.get("U64_ALLOW_MUTATE") != "1":
         _skip("U64_ALLOW_MUTATE=1 required (test mutates Turbo + Debug Stream Mode)")
     password = os.environ.get("U64_PASSWORD")

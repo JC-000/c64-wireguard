@@ -162,7 +162,7 @@ Backends (`--backend {uci,ip65}`, default uci — issue #70):
 
 Run::
 
-    WARP_PROFILE=/path/to/wgcf-profile.conf U64_HOST=10.43.23.81 \\
+    WARP_PROFILE=/path/to/wgcf-profile.conf U64_HOST=<device-ip> \\
         /Users/someone/.local/bin/python3 tools/test_warp_live.py
     ... --backend ip65        # RR-Net build, see "Backends" above
 """
@@ -204,7 +204,6 @@ log = logging.getLogger("warp_live")
 logging.basicConfig(level=logging.INFO,
                      format="%(asctime)s %(levelname)s %(message)s")
 
-DEFAULT_HOST = "10.43.23.81"
 WG_PUBKEY_BIN = "/opt/homebrew/bin/wg"
 
 # --- Cloudflare WARP peer (fixed by the task; NOT the private key) ---
@@ -2739,7 +2738,7 @@ def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
 # =============================================================================
 def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--host", default=os.environ.get("U64_HOST", DEFAULT_HOST))
+    p.add_argument("--host", default=os.environ.get("U64_HOST"))
     p.add_argument("--turbo", type=int, default=48)
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--rekey", type=int, default=0, metavar="N",
@@ -2787,6 +2786,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                         "the PRG beside it is what Stage A runs. Stage C "
                         "always uses build_msgport53/.")
     args = p.parse_args(argv)
+    if not args.host:
+        print("ERROR: pass --host <ip> or set U64_HOST", file=sys.stderr)
+        return 2
 
     seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
     log.info("Random seed: %d (reproduce with --seed %d)", seed, seed)
