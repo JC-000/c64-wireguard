@@ -102,8 +102,11 @@ KNOWN_BUILDS = {
     ),
     "3a1ff9ff": (
         "chunked",
-        "The image on device 601A96 on 2026-10-04, on WiFi only (Ethernet "
-        "registered but down). $16 OBSERVED TO DISPATCH: a UCI_CHUNKED_WRITE=1 "
+        "OUR fork's local branch esp-tls/m3-master: a merge of upstream "
+        "a1a1f44d with our GideonZ#835 chunked write. NOTE: unpublished "
+        "(local only, not pushed), so the image's code cannot be checked "
+        "against a public ref. The image on device 601A96 on 2026-10-04, on "
+        "WiFi only (Ethernet registered but down). $16 OBSERVED TO DISPATCH: a UCI_CHUNKED_WRITE=1 "
         "build sent every size from 888 to 1472 B and each arrived as ONE "
         "datagram, none answered $8E. REASSEMBLY-EVIDENCE: 1472B as 1 "
         "datagram on 2026-10-04. 1473 B was refused with $8C "
