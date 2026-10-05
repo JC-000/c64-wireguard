@@ -41,7 +41,7 @@ rebase, so `verdict == "unknown"` is a warning, never an error.
 
 Run::
 
-    python3 tools/u64_firmware.py 10.43.23.81
+    python3 tools/u64_firmware.py <device-ip>
 
 Exit status: 0 = a verdict in ("chunked", "unknown", "no-hash"); 1 = any
 other verdict — today that means "unreachable", but describe_build returns
@@ -99,6 +99,25 @@ KNOWN_BUILDS = {
         "declined to build chunked against it for weeks, having inferred "
         "absence of the capability from absence of an attestation. Probe, do "
         "not assume.",
+    ),
+    "3a1ff9ff": (
+        "chunked",
+        "OUR fork's local branch esp-tls/m3-master: a merge of upstream "
+        "a1a1f44d with our GideonZ#835 chunked write. NOTE: unpublished "
+        "(local only, not pushed), so the image's code cannot be checked "
+        "against a public ref. The image on device 601A96 on 2026-10-04, on "
+        "WiFi only (Ethernet registered but down). $16 OBSERVED TO DISPATCH: a UCI_CHUNKED_WRITE=1 "
+        "build sent every size from 888 to 1472 B and each arrived as ONE "
+        "datagram, none answered $8E. REASSEMBLY-EVIDENCE: 1472B as 1 "
+        "datagram on 2026-10-04. 1473 B was refused with $8C "
+        "(UCI_ERR_SEND_TOO_LONG) — our own pre-check, so it puts nothing on "
+        "the wire and says nothing about the firmware. Same caveat as "
+        "4011c97c: the hash is the builder's assertion, so this records "
+        "what a device reporting it did, not what the commit contains. "
+        "Streams need the wired Ethernet port (the VIC/audio/debug streams "
+        "are FPGA generators on the Ethernet MAC), so on WiFi only "
+        "/v1/streams/*:start answers HTTP 500 by design; only its text, "
+        "'No Operational Network Interface', is misleading.",
     ),
 }
 

@@ -376,8 +376,6 @@ DNSMASQ_LEASEFILE = _rig_const("LEASEFILE")
 DNSMASQ_LOGFILE = _rig_const("LOGFILE")
 DEFAULT_PCAP = "/tmp/rrnet.pcap"
 
-DEFAULT_HOST = os.environ.get("U64_HOST", "10.43.23.81")
-
 # WireGuard. The C64 both listens and sends on 51820 (src/constants.inc
 # wg_default_port, latched into wg_local_port by src/boot.s), so the
 # responder binds the same port on the host side.
@@ -2632,10 +2630,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(
         description="ip65 / RR-Net end-to-end on real hardware, verified "
                     "from a packet capture.")
-    p.add_argument("--host", default=DEFAULT_HOST,
-                   help="Ultimate 64 control address (REST/DMA). This is the "
-                        "Ultimate's OWN ethernet and is unrelated to the "
-                        "RR-Net data path under test.")
+    p.add_argument("--host", default=os.environ.get("U64_HOST"),
+                   help="Ultimate 64 control address (REST/DMA), or "
+                        "U64_HOST; required. This is the Ultimate's OWN "
+                        "network and is unrelated to the RR-Net data path "
+                        "under test.")
     p.add_argument("--iface", default=DEFAULT_IFACE,
                    help="the Mac NIC cabled to the RR-Net (default en4)")
     p.add_argument("--turbo", type=int, default=48,
@@ -2672,6 +2671,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
     VERBOSE = args.verbose
+    if not args.host:
+        print("ERROR: pass --host <ip> or set U64_HOST", file=sys.stderr)
+        return 2
 
     seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
     rng = random.Random(seed)
@@ -2759,13 +2761,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         log.warning("continuing WITHOUT a capture: %s", cap.note)
     run["capture"] = {"mode": cap.mode, "note": cap.note, "path": args.pcap}
 
-    probe = probe_u64(args.host)
-    if not probe.reachable:
-        log.error("device %s not reachable: %s", args.host, probe.error)
-        cap.stop()
-        return 1
-    log.info("probe: %s", probe)
-
     lock = DeviceLock(args.host)
     try:
         lock.acquire_or_raise(timeout=LOCK_TIMEOUT_S)
@@ -2779,7 +2774,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     client = None
     cart_prev: Optional[str] = None
     transport: dict = {}
+    # True once control is bound for stage_wire (completed body or caught
+    # abort), which then owns cap.stop(); see the finally below.
+    body_done = False
     try:
+        # Reachability is a REST read of the shared device: under the lock.
+        probe = probe_u64(args.host)
+        if not probe.reachable:
+            log.error("device %s not reachable: %s", args.host, probe.error)
+            return 1
+        log.info("probe: %s", probe)
         client = Ultimate64Client(host=args.host, timeout=30.0)
         tr = Ultimate64Transport(host=args.host, timeout=30.0, client=client)
         try:
@@ -2915,48 +2919,62 @@ def main(argv: Optional[list[str]] = None) -> int:
                 log.warning("host responder recorded %d error(s): %s",
                             len(peer.errors), peer.errors[:5])
             _snap_peer()
+        body_done = True
     except Exception as exc:                                  # noqa: BLE001
         log.error("run aborted: %s: %s", type(exc).__name__, exc)
         check(False, "the run completed without aborting", f"{exc}")
+        body_done = True        # an abort still reaches stage_wire
     finally:
-        # Restore, and restore on the ABORT path too — that is the path
-        # where it matters most, and the one where "restore" statements
-        # chained onto a successful teardown quietly do not run. Clock and
-        # REU in one try, the reset in its own: the reset is what leaves
-        # the command interface idle for whoever has the device next, and
-        # it must happen even when the clock restore is what failed.
-        if client is not None:
+        # lock.release() runs even if the restore raises. stage_wire stops
+        # the capture only when the body reached its end AND this cleanup
+        # finished without raising; every other exit stops it in the
+        # outermost finally here. The two cases are complements: no double stop.
+        cleaned_up = False
+        try:
             try:
-                set_turbo_mhz(client, 1)
-                time.sleep(1.0)
-                actual = get_turbo_mhz(client)
-                set_reu(client, False)
-                log.info("restore: turbo=%d MHz (restored=%s), REU off",
-                         actual, actual == 1)
-                run["restored_mhz"] = actual
-            except Exception as exc:                          # noqa: BLE001
-                log.error("clock/REU restore FAILED: %s — the device is "
-                          "shared, check it before you walk away", exc)
-            try:
-                if cart_prev:
-                    client.set_config_item(CAT_CART, ITEM_CART_PREF, cart_prev)
-                    log.info("restore: %s back to %r", ITEM_CART_PREF,
-                             cart_prev)
-            except Exception as exc:                          # noqa: BLE001
-                log.error("could not restore %s to %r: %s — the device is "
-                          "shared and this item is not covered by the "
-                          "harness's snapshot_state", ITEM_CART_PREF,
-                          cart_prev, exc)
-            try:
-                client.reset()
-                time.sleep(1.0)
-                log.info("restore: C64 reset")
-            except Exception as exc:                          # noqa: BLE001
-                log.error("reset FAILED: %s — our PRG may still be running "
-                          "and driving the command interface for the next "
-                          "lane", exc)
-        lock.release()
-        log.info("device lock released")
+                # Restore, and restore on the ABORT path too — that is the path
+                # where it matters most, and the one where "restore" statements
+                # chained onto a successful teardown quietly do not run. Clock and
+                # REU in one try, the reset in its own: the reset is what leaves
+                # the command interface idle for whoever has the device next, and
+                # it must happen even when the clock restore is what failed.
+                if client is not None:
+                    try:
+                        set_turbo_mhz(client, 1)
+                        time.sleep(1.0)
+                        actual = get_turbo_mhz(client)
+                        set_reu(client, False)
+                        log.info("restore: turbo=%d MHz (restored=%s), REU off",
+                                 actual, actual == 1)
+                        run["restored_mhz"] = actual
+                    except Exception as exc:                          # noqa: BLE001
+                        log.error("clock/REU restore FAILED: %s — the device is "
+                                  "shared, check it before you walk away", exc)
+                    try:
+                        if cart_prev:
+                            client.set_config_item(CAT_CART, ITEM_CART_PREF, cart_prev)
+                            log.info("restore: %s back to %r", ITEM_CART_PREF,
+                                     cart_prev)
+                    except Exception as exc:                          # noqa: BLE001
+                        log.error("could not restore %s to %r: %s — the device is "
+                                  "shared and this item is not covered by the "
+                                  "harness's snapshot_state", ITEM_CART_PREF,
+                                  cart_prev, exc)
+                    try:
+                        client.reset()
+                        time.sleep(1.0)
+                        log.info("restore: C64 reset")
+                    except Exception as exc:                          # noqa: BLE001
+                        log.error("reset FAILED: %s — our PRG may still be running "
+                                  "and driving the command interface for the next "
+                                  "lane", exc)
+            finally:
+                lock.release()
+                log.info("device lock released")
+            cleaned_up = True
+        finally:
+            if not (body_done and cleaned_up):
+                cap.stop()
 
     # stage_wire owns cap.stop(): the capture must be flushed and the run
     # window closed in one place, so the bracket it filters on is the same
