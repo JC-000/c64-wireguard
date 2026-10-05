@@ -737,9 +737,10 @@ def main() -> int:
     responder = None
     results: list[dict] = []
     # The 6510 bus trace is post-mortem evidence; no assertion reads it.
-    # fw 3a1ff9ff refuses stream_debug_start with HTTP 500 "No Operational
-    # Network Interface" when only WiFi is up (its stream code hardcodes
-    # interface 0), so a refusal is noted and the payload checks decide.
+    # The streams are FPGA generators on the Ethernet MAC, so with only WiFi
+    # up stream_debug_start is refused (HTTP 500 "No Operational Network
+    # Interface", by design); the refusal is noted and the payload checks
+    # decide.
     not_measured: dict[str, str] = {}
     stream_started = False
     try:

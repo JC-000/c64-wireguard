@@ -114,9 +114,10 @@ KNOWN_BUILDS = {
         "the wire and says nothing about the firmware. Same caveat as "
         "4011c97c: the hash is the builder's assertion, so this records "
         "what a device reporting it did, not what the commit contains. "
-        "KNOWN DEFECT on this image: the debug stream refuses to start on "
-        "WiFi (HTTP 500 'No Operational Network Interface'; its stream code "
-        "uses interface 0).",
+        "Streams need the wired Ethernet port (the VIC/audio/debug streams "
+        "are FPGA generators on the Ethernet MAC), so on WiFi only "
+        "/v1/streams/*:start answers HTTP 500 by design; only its text, "
+        "'No Operational Network Interface', is misleading.",
     ),
 }
 
