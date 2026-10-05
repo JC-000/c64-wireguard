@@ -147,12 +147,12 @@ STAGE2_ACTIVE_WAIT = 1800.0    # max wall-clock to wait for SESSION_ACTIVE
 
 # One net_poll JSR that may carry a datagram of `n` bytes. Measured on a
 # WiFi-only U64E at 1 MHz (2026-10-04): the poll that picks up the 92 B
-# Type-2 took ~1.97 s wall clock, and a flat 1.0 s failed n=2. The per-byte
-# term is the two uci_fences per received byte (~11 ms at 1 MHz,
-# test_uci_udp_echo_live.py:385) and is CPU-bound, so it scales with turbo;
-# the fixed term (command setup + the firmware's read) is not scaled. x2
-# margin, plus 1.0 s for ~6 REST round trips at the 155 ms WiFi max.
-# 92 B at 1 MHz -> 5.0 s; at 48 MHz -> 3.0 s.
+# Type-2 took ~1.97 s wall clock; a flat 1.0 s budget failed in both of two
+# runs. The per-byte term is DERIVED, not measured: two uci_fences per byte,
+# each 5 x 217 x 5 = 5425 cycles, ~11 ms at 1 MHz; CPU-bound, so it scales
+# with turbo. The fixed 1.0 s is that measurement minus the per-byte part
+# (1.97 - 92 x 0.011), not scaled. x2 margin, plus 1.0 s for ~6 REST round
+# trips at the 155 ms WiFi max. 92 B at 1 MHz -> 5.0 s; at 48 MHz -> 3.0 s.
 POLL_FIXED_S = 1.0
 POLL_PER_BYTE_S = 0.011
 POLL_REST_S = 1.0
@@ -920,6 +920,7 @@ def main(argv: list[str] | None = None) -> int:
     log.info("host=%s local_ip=%s responder_port=%d", args.host, local_ip, rt.port)
 
     rc = 1
+    skipped = False             # a _skip() inside the try: report SKIP, not FAIL
     # Bound before the try so the teardown in `finally` can test it: the
     # client is constructed further down, and an exception before that
     # point would otherwise raise NameError out of the cleanup and replace
@@ -1276,6 +1277,9 @@ def main(argv: list[str] | None = None) -> int:
                   tr.read_memory(L["wg_state"], 1)[0])
         return 1
 
+    except SystemExit as exc:
+        skipped = exc.code == 77
+        raise
     finally:
         try:
             rt.stop()
@@ -1309,7 +1313,9 @@ def main(argv: list[str] | None = None) -> int:
                 log.warning("teardown skipped (%r); device may be left at "
                             "turbo with the REU attached", exc)
         lock.release()
-        if rc == 0:
+        if skipped:
+            print("SKIP — UCI WireGuard handshake not run (exit 77)")
+        elif rc == 0:
             print("PASS — UCI WireGuard handshake stage", args.stage)
         else:
             print("FAIL — see log")
