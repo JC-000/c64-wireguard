@@ -600,7 +600,7 @@ def case_stale_after_success(ctx, res):
         # No interface answered with a record at all: that is $82
         # (CMD_FAILED), not $83 (an interface answered 0.0.0.0). An adapter
         # that reads a stale/short buffer as "0.0.0.0" reports $83 here.
-        want_err = ERR_CMD_FAILED if name == "all-not-available" else r2.err
+        want_err = ERR_CMD_FAILED           # both shapes: count 0 is $82 too
         res.check(r1.carry == 0 and r1.ip == lease[:4] and r2.carry == 1
                   and r2.ip != lease[:4] and r2.hung is None
                   and r2.err == want_err,
