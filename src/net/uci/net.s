@@ -132,6 +132,7 @@
 .import uci_status_seen
 .import uci_status_leading_code
 .import uci_ack
+.import uci_wedged_ack
 .import uci_resp_dst
 .import uci_resp_max
 .import uci_resp_count
@@ -277,6 +278,8 @@ net_dhcp_acquire:
 @fail_c:                        ; in branch range of the count block
         sec
         rts
+@wedged:                        ; $89 after a PUSH: accept, C=1
+        jmp uci_wedged_ack
 
 @count_go:
         ; --- GET_IFACE_COUNT: one byte back ---
@@ -287,7 +290,7 @@ net_dhcp_acquire:
         lda #UCI_CMD_GET_IFACE_COUNT
         jsr uci_put_byte
         jsr uci_push_wait
-        bcs @fail_c
+        bcs @wedged
         jsr uci_check_err
         bcs @count_err
         lda #1
@@ -316,7 +319,7 @@ net_dhcp_acquire:
         lda @iface_idx
         jsr uci_put_byte
         jsr uci_push_wait
-        bcs @dhcp_fail
+        bcs @wedged
 
         jsr uci_check_err
         bcc @no_err
@@ -371,16 +374,18 @@ net_dhcp_acquire:
         lda #>uci_ipaddr_resp
         sta uci_resp_dst+1
         jsr uci_read_resp_bytes
-; Drain whatever is left of the reply and status, then ack. C=1 if wedged.
+; Drain whatever is left of the reply and status, then ack. C=1 if wedged,
+; acked all the same (uci_wedged_ack).
 @drain_ack:
         jsr uci_drain_resp
-        bcs @da_done
+        bcs @da_wedged
         jsr uci_drain_status
-        bcs @da_done
+        bcs @da_wedged
         jsr uci_ack
         clc
-@da_done:
         rts
+@da_wedged:
+        jmp uci_wedged_ack
 
 @iface_idx: .byte 0             ; code-resident locals, as in uci_cmd.s
 @iface_n:   .byte 0
@@ -576,7 +581,8 @@ net_udp_send:
 ;
 ; Output: C=0 part accepted, uci_chunk_off advanced.
 ;         C=1 failure, net_last_error set ($85 / $87 / $89 / $8E as
-;         documented at net_udp_send); the transaction has been acked.
+;         documented at net_udp_send); the transaction has been acked
+;         (on a $89 by uci_wedged_ack).
 ; Clobbers: A, X, Y
 ; =============================================================================
 uci_send_part:
@@ -666,21 +672,18 @@ uci_send_part:
 
 @sp_push:
         jsr uci_push_wait
-        bcc :+
-        rts                     ; PUSH never went CMD_BUSY=0 — $89 already set
-:
+        bcc @sp_pushed
+@sp_wedged:
+        jmp uci_wedged_ack      ; a wait or drain timed out — $89 already set
+@sp_pushed:
         jsr uci_check_err
         bcc @sp_no_err
         ; Hardware ERROR bit. Drain and ack first (the accept is mandatory,
         ; see the plain path), then name the cause from the STATUS line.
         jsr uci_drain_resp
-        bcc :+
-        rts
-:
+        bcs @sp_wedged
         jsr uci_drain_status
-        bcc :+
-        rts
-:
+        bcs @sp_wedged
         jsr uci_ack
         lda #UCI_ERR_SEND_FAIL
         jmp @sp_status_err
@@ -707,13 +710,9 @@ uci_send_part:
         sta uci_resp_max
         jsr uci_read_resp_bytes
         jsr uci_drain_resp
-        bcc :+
-        rts
-:
+        bcs @sp_wedged
         jsr uci_drain_status
-        bcc :+
-        rts
-:
+        bcs @sp_wedged
         jsr uci_ack
         lda uci_resp_count
         cmp #$02
@@ -738,6 +737,8 @@ uci_send_part:
         sta net_last_error
         sec
         rts
+@sp_wedged_far:                 ; @sp_wedged, in branch range of @sp_more
+        jmp uci_wedged_ack
 
 @sp_more:
         ; NON-COMPLETING PART — capture whatever reply is already staged
@@ -759,13 +760,9 @@ uci_send_part:
         jsr uci_read_resp_bytes
 @sp_no_resp:
         jsr uci_drain_resp
-        bcc :+
-        rts
-:
+        bcs @sp_wedged_far
         jsr uci_drain_status
-        bcc :+
-        rts
-:
+        bcs @sp_wedged_far
         jsr uci_ack
         lda uci_status_seen
         cmp #$02
@@ -959,9 +956,9 @@ uci_send_part:
         ; The FPGA stopped responding mid-send. net_last_error is already
         ; UCI_ERR_WAIT_TIMEOUT. Report failure rather than letting the
         ; caller believe the datagram went out — silent send success is
-        ; exactly the failure mode issue #58 cost days to diagnose.
-        sec
-        rts
+        ; exactly the failure mode issue #58 cost days to diagnose. The
+        ; accept is still owed; uci_wedged_ack says why it is safe.
+        jmp uci_wedged_ack
 .endif ; UCI_CHUNKED_WRITE
 
 ; =============================================================================
@@ -1006,7 +1003,9 @@ uci_send_part:
 ; cleared regardless: if we cannot close it we must at least not go on
 ; believing we still own it.
 ;
-; Output: C=0 on success or nothing-to-do, C=1 if the command failed.
+; Output: C=0 on success or nothing-to-do, C=1 if the command failed
+;         (net_last_error = UCI_ERR_CMD_FAILED) or the interface wedged
+;         (UCI_ERR_WAIT_TIMEOUT, transaction acked by uci_wedged_ack).
 ; Clobbers: A, X, Y
 ; =============================================================================
 net_udp_close:
@@ -1014,15 +1013,7 @@ net_udp_close:
         beq @uc_none                ; nothing open — nothing to do
 
         jsr uci_wait_idle
-        bcc @uc_go
-        ; Wedged before we could issue the close. Drop our bookkeeping so a
-        ; later net_udp_send re-connects rather than writing to a handle we
-        ; can no longer manage, and report the timeout.
-        lda #$00
-        sta uci_socket_id
-        sta uci_socket_open
-        sec
-        rts
+        bcs @uc_drop            ; wedged before the close went out
 @uc_go:
         lda #UCI_TARGET_NETWORK
         jsr uci_begin_cmd
@@ -1034,12 +1025,15 @@ net_udp_close:
         jsr uci_put_byte
 
         jsr uci_push_wait
+        bcs @uc_wedged              ; $89 set; CMD_BUSY never cleared
 
         jsr uci_check_err
         php                         ; keep the command's verdict across the
                                     ; drains, which have a carry of their own
         jsr uci_drain_resp
+        bcs @uc_drain_wedged
         jsr uci_drain_status
+        bcs @uc_drain_wedged
         jsr uci_ack
 
         ; Clear local state whatever the firmware said.
@@ -1055,6 +1049,20 @@ net_udp_close:
         rts
 @uc_ok:
         clc
+        rts
+
+@uc_drain_wedged:
+        plp                         ; drop the verdict: the $89 outranks it
+@uc_wedged:
+        jsr uci_wedged_ack
+@uc_drop:
+        ; Wedged. Drop our bookkeeping so a later net_udp_send re-connects
+        ; rather than writing to a handle we can no longer manage, and report
+        ; the timeout ($89, set by the wait helper).
+        lda #$00
+        sta uci_socket_id
+        sta uci_socket_open
+        sec
         rts
 
 @uc_none:
@@ -1102,7 +1110,9 @@ uci_udp_connect:
         jsr uci_put_byte              ; explicit null terminator
 
         jsr uci_push_wait
-
+        bcc @uc_pushed
+        jmp uci_wedged_ack            ; $89; uci_socket_open stays clear
+@uc_pushed:
         jsr uci_check_err
         bcc @uc_no_err
 
@@ -1244,6 +1254,7 @@ net_poll:
         jsr uci_put_byte
 
         jsr uci_push_wait
+        bcs @poll_fail              ; $89 set; CMD_BUSY never cleared
 
         jsr uci_check_err
         bcc @no_err
@@ -1252,7 +1263,10 @@ net_poll:
         sta net_last_error
 @poll_fail:
         ; Shared error exit: net_last_error already holds the code. Also the
-        ; landing for a $89 from uci_wait_reply_staged below.
+        ; landing for a $89 from uci_push_wait above and uci_wait_reply_staged
+        ; below. After a push timeout STATE is 01, so the drains find nothing
+        ; and leave the $89 alone, and the accept is a no-op unless the reply
+        ; was staged meanwhile (see uci_wedged_ack).
         jsr uci_drain_resp
         jsr uci_drain_status
         jsr uci_ack

@@ -23,6 +23,7 @@
 ;   uci_drain_status   — drain remaining STAT_AV bytes to nowhere, ACKing each;
 ;                        TOD-bounded (5 s wall-clock), C=1 on expiry
 ;   uci_ack            — single NEXT_DATA pulse
+;   uci_wedged_ack     — uci_ack, then C=1: exit for a timed-out transaction
 ;
 ; Phase 2 only needs enough machinery for GET_IPADDR (12-byte response,
 ; one interface-index parameter). Later phases will extend as needed.
@@ -50,6 +51,7 @@
 .export uci_status_seen
 .export uci_status_leading_code
 .export uci_ack
+.export uci_wedged_ack
 
 .export uci_resp_dst
 .export uci_resp_max
@@ -395,6 +397,37 @@ uci_ack:
         lda #UCI_CTRL_NEXT_DATA
         sta UCI_CONTROL
         uci_fence
+        rts
+
+; =============================================================================
+; uci_wedged_ack — exit for a transaction whose wait or drain timed out after
+; its PUSH_CMD: one best-effort accept, then C=1. net_last_error (already
+; UCI_ERR_WAIT_TIMEOUT) is not touched, and there is no wait: one register
+; write plus a fence.
+;
+; The accept is owed because the next PUSH_CMD outside state 00 is dropped
+; (error_busy, command_protocol.vhd:159) while its command bytes still
+; advance command_pointer (:144-147), which only the firmware's accept of a
+; command resets (:210-212). net_poll gates on CMD_BUSY alone, so it would
+; push into exactly that.
+;
+; It is safe in every state, per fpga/io/command_interface/vhdl_source/
+; command_protocol.vhd. UCI_CTRL_NEXT_DATA sets control bit 1 only, so the
+; clear-error (:149), push (:152) and abort (:168) arms are not taken, and
+; the accept arm is gated on state(1) (:163):
+;   00 Idle, 01 Command Busy — no effect: it cannot start a command and
+;      does not move command_pointer. A firmware still processing the
+;      command is left alone.
+;   10 Data Last — state 00. response_valid / status_valid follow state(1)
+;      (:131-140), so unread bytes are abandoned, not misread later.
+;   11 Data More — state 01 with handshake_in(1) set (:164): the firmware
+;      stages the next block of the SAME reply. Nothing new is started, and
+;      the interface stays non-idle exactly as it would without the accept.
+; Clobbers: A
+; =============================================================================
+uci_wedged_ack:
+        jsr uci_ack
+        sec
         rts
 
 ; =============================================================================
