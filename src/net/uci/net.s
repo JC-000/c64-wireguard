@@ -247,8 +247,9 @@ net_init:
 ; the first non-zero lease. An index >= count must never be sent: fw
 ; answers it with an EMPTY reply and status "82,PARAMETER(S) OUT OF RANGE"
 ; but no error bit, which reads as a 1 s response timeout.
-; A reply that is not exactly 12 bytes counts as no answer, and the IP
-; bytes are zeroed before each probe, so a stale lease is never copied.
+; A reply that is not exactly 12 bytes (1 for the count) counts as no
+; answer: uci_read_resp_bytes stores from offset 0 up, so a full count
+; proves every byte came from this reply and a stale lease is never copied.
 ;
 ; Output: C=0, net_local_ip set, net_last_error = UCI_ERR_OK on success.
 ;         C=1 on failure, net_last_error =
@@ -289,8 +290,6 @@ net_dhcp_acquire:
         bcs @fail_c
         jsr uci_check_err
         bcs @count_err
-        lda #$00
-        sta uci_ipaddr_resp
         lda #1
         jsr @read_resp
         bcs @fail_c
@@ -308,12 +307,6 @@ net_dhcp_acquire:
         sta @iface_idx
 
 @next_iface:
-        lda #$00
-        sta uci_ipaddr_resp+0
-        sta uci_ipaddr_resp+1
-        sta uci_ipaddr_resp+2
-        sta uci_ipaddr_resp+3
-
         jsr uci_wait_idle
         bcs @dhcp_fail
         lda #UCI_TARGET_NETWORK
