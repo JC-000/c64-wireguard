@@ -718,6 +718,13 @@ def main() -> int:
     cap = DebugCapture(port=DEBUG_PORT)
     responder = UDPSizeResponder(port=0)
     results: list[dict] = []
+    # The 6510 bus trace is post-mortem evidence, not an input to
+    # score_results. fw 3a1ff9ff refuses stream_debug_start with HTTP 500
+    # "No Operational Network Interface" when only WiFi is up (its stream
+    # code hardcodes interface 0), so a refusal is recorded by name here
+    # and the payload checks still run and still gate.
+    not_measured: dict[str, str] = {}
+    stream_started = False
     try:
         responder.start()
         log.info("size responder bound on %s:%d", local_ip, responder.port)
@@ -731,7 +738,14 @@ def main() -> int:
             print(f"SKIP: {exc}"); return 77
         _safe(set_reu, client, True, "512 KB")
         time.sleep(0.5)
-        client.stream_debug_start(f"{local_ip}:{DEBUG_PORT}")
+        try:
+            client.stream_debug_start(f"{local_ip}:{DEBUG_PORT}")
+            stream_started = True
+        except Exception as exc:
+            not_measured["debug_trace"] = (
+                f"stream_debug_start refused: {exc}")
+            log.error("NOT MEASURED debug_trace: %s",
+                      not_measured["debug_trace"])
 
         prg = (PROJECT_ROOT / "build" / "wireguard.prg").read_bytes()
         client.run_prg(prg)
@@ -751,48 +765,81 @@ def main() -> int:
         # The buffer's real capacity, read structurally from the labels
         # (udp_recv_len is the field immediately after udp_recv_buf) rather
         # than assumed to be 1500.
-        cap = _recv_buf_capacity(L)
-        poison = poison_pattern(cap)
+        capacity = _recv_buf_capacity(L)
+        poison = poison_pattern(capacity)
         rng = random.Random(KICK_SEED)
         log.info("poison: %d bytes, P[i]=(i+$%02X)%%251, capacity read "
-                 "structurally from labels", cap, POISON_SEED)
+                 "structurally from labels", capacity, POISON_SEED)
         for size in SIZES:
-            if size > cap:
+            if size > capacity:
                 log.warning("skipping size=%d: larger than the %d-byte "
                             "udp_recv_buf, so the poison cannot cover it "
                             "and poison_stop would be unmeasurable",
-                            size, cap)
+                            size, capacity)
                 continue
             log.info("--- probing size=%d ---", size)
             results.append(_probe_one_size(tr, L, responder, size, True,
                                            rng, poison))
 
     finally:
-        try: client.stream_debug_stop()
-        except Exception: pass
-        time.sleep(0.3)
-        result = cap.stop()
-        ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
-        stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-        path = ARTIFACTS_DIR / f"uci_size_probe_{stamp}.txt"
-        log.info("trace persisted to %s (cycles=%d)", path, result.total_cycles)
-        with open(path, "w") as f:
-            f.write(f"# packets={result.packets_received} dropped={result.packets_dropped} "
-                    f"duration={result.duration_seconds:.3f} cycles={result.total_cycles}\n")
-            for i, cyc in enumerate(result.trace):
-                if not cyc.is_cpu: continue
-                f.write(f"{i:08d} {cyc.address:04X} "
-                        f"rw={'R' if cyc.is_read else 'W'} data={cyc.data:02X}\n")
+        # Every stage has its own guard: teardown and lock.release() must
+        # run whatever raised before them.
+        try:
+            _finish_trace(client, cap, stream_started, not_measured)
+        except Exception as exc:
+            not_measured.setdefault("debug_trace", f"trace save raised: {exc}")
+            log.error("NOT MEASURED debug_trace: %s", exc)
         if orig_mode: _safe(set_debug_stream_mode, client, orig_mode)
-        responder.stop(); responder.join(timeout=1.0)
+        try:
+            responder.stop(); responder.join(timeout=1.0)
+        except Exception as exc:
+            log.warning("responder stop failed: %s", exc)
         # Clock + REU + a VERIFIED reset (issue #134). This probe attaches
         # the REU and opens a UDP socket per size; without the reset it
         # strands one per run. We hold the lock, so pass the client.
-        from device_session import teardown_device
-        teardown_device(host, client=client,
-                        idle_mhz=orig_mhz if orig_mhz else 1, logger=log)
-        lock.release()
+        try:
+            from device_session import teardown_device
+            teardown_device(host, client=client,
+                            idle_mhz=orig_mhz if orig_mhz else 1, logger=log)
+        finally:
+            lock.release()
 
+    return _verdict(results, not_measured)
+
+
+def _finish_trace(client, cap, stream_started: bool,
+                  not_measured: dict[str, str]) -> None:
+    """Stop the stream and capture; persist the trace or record why not."""
+    if stream_started:
+        try: client.stream_debug_stop()
+        except Exception: pass
+        time.sleep(0.3)
+    result = cap.stop()
+    if not stream_started:
+        return
+    if not result.packets_received:
+        not_measured["debug_trace"] = (
+            "stream started but 0 packets arrived on the capture port")
+        log.error("NOT MEASURED debug_trace: %s", not_measured["debug_trace"])
+        return
+    ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    path = ARTIFACTS_DIR / f"uci_size_probe_{stamp}.txt"
+    log.info("trace persisted to %s (cycles=%d)", path, result.total_cycles)
+    with open(path, "w") as f:
+        f.write(f"# packets={result.packets_received} dropped={result.packets_dropped} "
+                f"duration={result.duration_seconds:.3f} cycles={result.total_cycles}\n")
+        for i, cyc in enumerate(result.trace):
+            if not cyc.is_cpu: continue
+            f.write(f"{i:08d} {cyc.address:04X} "
+                    f"rw={'R' if cyc.is_read else 'W'} data={cyc.data:02X}\n")
+
+
+def _verdict(results: list[dict], not_measured: dict[str, str]) -> int:
+    """Exit code. A missing measurement is INCONCLUSIVE, reported as FAIL
+    (the test_ip65_bss_corruption.py / test_warp_live.py convention): the
+    payload checks gate on their own, but the run never reads as PASS
+    while something it claims to record was not recorded."""
     _print_summary(results)
 
     if not results:
@@ -805,10 +852,19 @@ def main() -> int:
               f"size(s):")
         for f in failures:
             print(f"  - {f}")
+        for name, why in not_measured.items():
+            print(f"  NOT MEASURED  {name}: {why}")
         return 1
-    print(f"\nPASS: all {len(results)} size(s) delivered the exact bytes "
-          f"that crossed the wire, with poison_stop == udp_recv_len on "
-          f"every one.")
+    clean = (f"all {len(results)} size(s) delivered the exact bytes that "
+             f"crossed the wire, with poison_stop == udp_recv_len on every "
+             f"one.")
+    if not_measured:
+        print(f"\nINCOMPLETE (reported as FAIL): payload checks clean — "
+              f"{clean}")
+        for name, why in not_measured.items():
+            print(f"  NOT MEASURED  {name}: {why}")
+        return 1
+    print(f"\nPASS: {clean}")
     return 0
 
 
