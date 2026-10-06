@@ -10,7 +10,8 @@
 ;
 ;   uci_abort          — flush the state machine (write ABORT + short delay)
 ;   uci_wait_idle      — spin until (STATE==0 AND CMD_BUSY==0), accepting an
-;                        orphaned reply on the way; TOD-bounded
+;                        orphaned reply on the way and clearing a stale ERROR
+;                        at idle; TOD-bounded
 ;   uci_wait_not_busy  — spin until CMD_BUSY==0; TOD-bounded
 ;   uci_begin_cmd      — A = target id; writes target to UCI_CMD_DATA
 ;   uci_put_byte       — A = parameter byte; writes to UCI_CMD_DATA
@@ -236,6 +237,17 @@ uci_wait_idle:
         sec
         rts
 @idle_done:
+        ; A latched ERROR here predates the caller's push (error_busy is set
+        ; only by a refused push, command_protocol.vhd:159): clear it so the
+        ; next uci_check_err judges its own command. CLR_ERR does nothing
+        ; else (:149-151).
+        lda @wi_status
+        and #UCI_STAT_ERROR
+        beq @wi_clean
+        lda #UCI_CTRL_CLR_ERR
+        sta UCI_CONTROL
+        uci_fence
+@wi_clean:
         clc
         rts
 @wi_last_tenths: .byte 0
