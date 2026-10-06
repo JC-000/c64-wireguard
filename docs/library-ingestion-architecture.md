@@ -260,10 +260,10 @@ Authoritative ledger: `src/crypto/shared/reu_layout.inc`.
    other; read the Makefile's `SIBLING_ARCHIVES` comment before touching
    either.
 4. `python3 tools/check_abi_drift.py` — must exit 0.
-5. `python3 tools/run_regression.py` — must pass (52 suites as of the
-   `net_families` cross-repo drift suite, counted from
+5. `python3 tools/run_regression.py` — must pass (53 suites as of the
+   `uci_wait_carry` suite (#150/#148), counted from
    `tools/run_regression.py`'s own lists — `len(TESTS) + len(SERIAL_TESTS)`,
-   41 + 9, which is also the number the gate prints on its last line. This
+   42 + 11, which is also the number the gate prints on its last line. This
    figure and README's are now CHECKED against those lists by
    `run_regression.py --self-check`, so they cannot drift silently again —
    they had gone stale five times, the last when master moved 46 -> 47

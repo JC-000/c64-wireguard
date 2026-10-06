@@ -121,7 +121,6 @@
 .import uci_wait_idle
 .import uci_wait_reply_staged
 .import uci_tod_start
-.import uci_wait_not_busy
 .import uci_begin_cmd
 .import uci_put_byte
 .import uci_push_wait
@@ -893,9 +892,11 @@ uci_send_part:
         ; without it the next PUSH_CMD is silently dropped (`else
         ; error_busy <= '1'`), and because command-byte writes are not
         ; state-gated a dropped command still advances the command pointer,
-        ; so every later command lands in a mis-positioned buffer — one
-        ; missing accept corrupts the interface from then on. Hence the
-        ; drains complete BEFORE the count is judged, whatever it says.
+        ; so later commands would land in a mis-positioned buffer.
+        ; uci_wait_idle's orphan clear repairs that before the next command
+        ; writes a byte, but it is there for the timeout exits; a completed
+        ; transaction accepts its own reply. Hence the drains complete
+        ; BEFORE the count is judged, whatever it says.
         lda #$00                ; pre-clear so a short read is detectable
         sta uci_write_resp+0
         sta uci_write_resp+1
@@ -1006,7 +1007,9 @@ uci_send_part:
 ; cleared regardless: if we cannot close it we must at least not go on
 ; believing we still own it.
 ;
-; Output: C=0 on success or nothing-to-do, C=1 if the command failed.
+; Output: C=0 on success or nothing-to-do, C=1 if the command failed
+;         (net_last_error = UCI_ERR_CMD_FAILED) or a wait or drain timed out
+;         (UCI_ERR_WAIT_TIMEOUT).
 ; Clobbers: A, X, Y
 ; =============================================================================
 net_udp_close:
@@ -1014,16 +1017,7 @@ net_udp_close:
         beq @uc_none                ; nothing open — nothing to do
 
         jsr uci_wait_idle
-        bcc @uc_go
-        ; Wedged before we could issue the close. Drop our bookkeeping so a
-        ; later net_udp_send re-connects rather than writing to a handle we
-        ; can no longer manage, and report the timeout.
-        lda #$00
-        sta uci_socket_id
-        sta uci_socket_open
-        sec
-        rts
-@uc_go:
+        bcs @uc_wedged
         lda #UCI_TARGET_NETWORK
         jsr uci_begin_cmd
 
@@ -1034,12 +1028,15 @@ net_udp_close:
         jsr uci_put_byte
 
         jsr uci_push_wait
+        bcs @uc_wedged
 
         jsr uci_check_err
         php                         ; keep the command's verdict across the
                                     ; drains, which have a carry of their own
         jsr uci_drain_resp
+        bcs @uc_drain_wedged
         jsr uci_drain_status
+        bcs @uc_drain_wedged
         jsr uci_ack
 
         ; Clear local state whatever the firmware said.
@@ -1055,6 +1052,18 @@ net_udp_close:
         rts
 @uc_ok:
         clc
+        rts
+
+@uc_drain_wedged:
+        plp                         ; drop the verdict: the $89 outranks it
+@uc_wedged:
+        ; A wait or drain timed out ($89 set by it). Drop our bookkeeping so a
+        ; later net_udp_send re-connects rather than writing to a handle we
+        ; can no longer manage, and report the timeout.
+        lda #$00
+        sta uci_socket_id
+        sta uci_socket_open
+        sec
         rts
 
 @uc_none:
@@ -1102,7 +1111,9 @@ uci_udp_connect:
         jsr uci_put_byte              ; explicit null terminator
 
         jsr uci_push_wait
-
+        bcc @uc_pushed
+        rts                           ; $89; uci_socket_open stays clear
+@uc_pushed:
         jsr uci_check_err
         bcc @uc_no_err
 
@@ -1222,7 +1233,7 @@ net_poll:
         rts
 
 @do_poll:
-        jsr uci_wait_not_busy
+        jsr uci_wait_idle
         bcc @dp_go              ; wedged — surface as a poll error (§13.2:
         rts                     ; C=1 is reserved for real backend errors)
 @dp_go:
@@ -1244,7 +1255,9 @@ net_poll:
         jsr uci_put_byte
 
         jsr uci_push_wait
-
+        bcc @pushed
+        rts                     ; $89: CMD_BUSY never cleared
+@pushed:
         jsr uci_check_err
         bcc @no_err
 
@@ -1366,12 +1379,12 @@ net_poll:
         ; contrast c64-https, which caps on a stream because the remainder
         ; stays queued.
 
-        lda #UCI_ERR_LONG_READ
-        sta net_last_error
         jsr uci_drain_resp
         jsr uci_drain_status
         jsr uci_ack
-        sec
+        lda #UCI_ERR_LONG_READ      ; AFTER the drains: draining up to a block
+        sta net_last_error          ; at 1 MHz can outrun their budget, and
+        sec                         ; their $89 would hide the real cause
         rts
 
 @len_ok:

@@ -9,7 +9,9 @@
 ; Exported primitives (see the per-routine headers for calling conventions):
 ;
 ;   uci_abort          — flush the state machine (write ABORT + short delay)
-;   uci_wait_idle      — spin until (STATE==0 AND CMD_BUSY==0); TOD-bounded
+;   uci_wait_idle      — spin until (STATE==0 AND CMD_BUSY==0), accepting an
+;                        orphaned reply on the way and clearing a stale ERROR
+;                        at idle; TOD-bounded
 ;   uci_wait_not_busy  — spin until CMD_BUSY==0; TOD-bounded
 ;   uci_begin_cmd      — A = target id; writes target to UCI_CMD_DATA
 ;   uci_put_byte       — A = parameter byte; writes to UCI_CMD_DATA
@@ -185,9 +187,40 @@ uci_wait_idle:
 @wi_loop:
         lda UCI_STATUS
         uci_fence                   ; settle read before testing bits
+        sta @wi_status              ; the one read this pass decides on
         and #(UCI_STAT_STATE | UCI_STAT_CMD_BUSY)   ; $31
         beq @idle_done
 
+        ; ORPHAN CLEAR — the one place a stranded reply is accepted. Every
+        ; command passes this gate before its first byte, so the exits that
+        ; give up on a timed-out wait or drain leave the accept to it. After a
+        ; push timeout an accept could not work there anyway: the firmware
+        ; writes HANDSHAKE_ACCEPT_COMMAND only after parse_command returns and
+        ; then stages the reply (command_intf.cc:152-158), so the exit sees
+        ; STATE 01, where the accept is gated off (command_protocol.vhd:163),
+        ; and the reply lands in 1x later. Left alone, 1x drops the next
+        ; PUSH_CMD (:155-160) while that command's bytes still advance
+        ; command_pointer (:144-147), which only the firmware's ACCEPT_COMMAND
+        ; / RESET rewinds (:209-213), so the command after that would run on a
+        ; misaligned buffer. One UCI_STATUS read decides:
+        ;   1x, CMD_BUSY 0, DATA_ACC 0 — write NEXT_DATA (:163-167). 10 -> 00.
+        ;     11 -> 01, and the firmware stages the next block, which a later
+        ;     pass accepts in turn. Nothing is drained: the queues stop
+        ;     presenting once state(1) drops (:131-140).
+        ;   DATA_ACC 1 (:60) — wait. After a Data More accept the firmware
+        ;     stages the next block (VALIDATE -> 1x) BEFORE it clears DATA_ACC
+        ;     (command_intf.cc:130-138); an accept in that window drops the
+        ;     new block to 01 while setting no new DATA_ACC edge (:164), so
+        ;     nothing would ever stage the block after it.
+        ;   01, or CMD_BUSY 1 — the firmware still owns it: wait.
+        ; The single TOD budget below bounds the whole sequence, Data More
+        ; chains included: it ends in 00 or in $89.
+        lda @wi_status
+        and #(UCI_STATE_DATA_LAST | UCI_STAT_DATA_ACC | UCI_STAT_CMD_BUSY)
+        cmp #UCI_STATE_DATA_LAST
+        bne @wi_tick                ; not 1x with both handshake bits clear
+        jsr uci_ack
+@wi_tick:
         ; Check TOD for elapsed tenths. Latch (HOUR) then read TENTHS.
         lda CIA_TOD_HOUR
         lda CIA_TOD_TENTHS
@@ -204,10 +237,24 @@ uci_wait_idle:
         sec
         rts
 @idle_done:
+        ; A latched ERROR here predates the caller's push (error_busy is set
+        ; only by a refused push, command_protocol.vhd:159): clear it so the
+        ; next uci_check_err judges its own command. CLR_ERR does nothing
+        ; else (:149-151). The ERROR test is a cost guard, not a correctness
+        ; one: it keeps the write and its fence (~5.5 ms at 1 MHz) off every
+        ; gate call, and net_poll passes this gate on every main-loop pass.
+        lda @wi_status
+        and #UCI_STAT_ERROR
+        beq @wi_clean
+        lda #UCI_CTRL_CLR_ERR
+        sta UCI_CONTROL
+        uci_fence
+@wi_clean:
         clc
         rts
 @wi_last_tenths: .byte 0
 @wi_elapsed:     .byte 0
+@wi_status:      .byte 0
 
 ; =============================================================================
 ; uci_wait_not_busy — spin until CMD_BUSY==0 (ignore STATE), wall-clock bounded
@@ -542,8 +589,9 @@ uci_drain_resp:
         ; -> ONE DATA_ACC. Nothing is written to $DF1C between the two reads.
         ; That single accept is load-bearing, not optional: it releases the
         ; state machine back to idle, and without it the next PUSH_CMD lands on
-        ; `else error_busy <= '1'` and is silently dropped. net_poll and the
-        ; other command paths issue it once per exit via uci_ack.
+        ; `else error_busy <= '1'` and is silently dropped. Every completed
+        ; transaction issues it via uci_ack; an exit that gives up on a timed-
+        ; out wait or drain leaves it to uci_wait_idle's orphan clear.
 
         ; Check TOD for elapsed tenths. Latch (HOUR) then read TENTHS.
         lda CIA_TOD_HOUR

@@ -31,6 +31,8 @@ UCI_STAT_DATA_AV  = $80         ; response data available
 UCI_STAT_STAT_AV  = $40         ; status string available
 UCI_STAT_STATE    = $30         ; state field mask
 UCI_STAT_ERROR    = $08         ; command returned an error
+UCI_STAT_DATA_ACC = $02         ; our accept of a Data More block, not yet
+                                ; cleared by the firmware (command_protocol.vhd:60)
 UCI_STAT_CMD_BUSY = $01         ; command FIFO busy / command in flight
 
 ; The four values of the STATE field (bits 5..4), from the FPGA's own
