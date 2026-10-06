@@ -29,7 +29,7 @@ arm is gated off, command_protocol.vhd `state(1) = '1'`.)
 
 What this suite asserts
 -----------------------
-P (#150, every push site x ERROR set/clear): C=1 and $89; the site's own
+P (#150, every push site x err0/err1): C=1 and $89; the site's own
   bookkeeping; then the firmware completes LATE (the orphan), and the next
   call must accept the orphan at its gate — the $DF1C <- $02 write trapped,
   for that transaction, before the next command's first byte, which must be
@@ -45,6 +45,43 @@ M Data More orphans: a k-block orphan is accepted block by block at the gate
   within the gate's single budget, writing no command byte, not hanging.
 L `net_poll` @len_bad: a drain that times out behind an over-long header
   still reports $8A (UCI_ERR_LONG_READ), not the drain's $89.
+
+The ERROR axis (err0/err1). error_busy is written only at :150 (CLR_ERR),
+:159 (a REFUSED push) and :301 (reset); an accepted push never latches it
+and the firmware cannot set it. So:
+  P err1 — error_busy was left set by an earlier/foreign refused push BEFORE
+           the call (sticky across our later accepted push). On a tree whose
+           idle gate clears it (1c67912+) ERROR is clear again by the time
+           the push times out, so err1 and err0 meet the SAME timeout; what
+           err1 still distinguishes is whether the gate cleared it at all:
+           without that, the stale bit makes the NEXT command's
+           uci_check_err blame itself ($84 / $86). Those six next-* checks
+           are the guard's only killers.
+  D *-err-* — foreign software pushes WHILE our transaction is in flight;
+           that push is refused and latches error_busy after our gate, so
+           uci_check_err takes the post-push ERROR branch.
+
+Reachability, per check class (counts per speed; printed at the end too):
+  CONTROL     F, S (fixed), CTRL — the model and the instrument.
+  REACHABLE   P (push-timeout orphans), M finite Data More chains: firmware
+              latency past the 5 s budget. Reachable; how often is
+              HARDWARE-ONLY.
+  REACHABLE-1MHZ  L: a drain that outruns 5 s needs > ~440 B undrained at
+              1 MHz (~11.2 ms per fenced byte), which an over-long SOCKET_READ
+              can leave; modelled here by a stuck queue.
+  DEFENSIVE-STATUS  D/*-status (7 sites): IMPOSSIBLE in the RTL —
+              status_length is 8 bits (:235) and the pointer saturates at
+              base+255 (:183-185); 255 B x ~11.2 ms = ~2.85 s < 5 s.
+  DEFENSIVE-ERRBRANCH  D/sb-err-resp, D/sp-err-resp: the post-push ERROR
+              branches ($85 / uci_send_part's) are unreachable by our own
+              code behind the gate; only a foreign push mid-transaction gets
+              there.
+  DEFENSIVE-RESP  D/sb-ok-resp, sp-done-resp, sp-more-resp, close-resp,
+              dhcp-resp: resp-drain stalls on replies of <= 12 B need
+              response_length > 895 (pointer saturation) — firmware fault.
+  DEFENSIVE-FAULT  M/more-forever: a Data More chain that never ends.
+The DEFENSIVE checks pin what the adapter does if the impossible happens;
+they are NOT evidence that the reachable behaviour works.
 
 What runs, and why not VICE
 ---------------------------
@@ -82,17 +119,20 @@ Stall injection, selectable per transaction phase, TOD advancing throughout:
   resp       — DATA_AV never clears (response length beyond the pointer's
                reach, so the pointer saturates short of it).
   status     — STAT_AV never clears, likewise.
-optionally with the transport ERROR bit latched as the stall begins.
+and the ERROR axis described above.
 
 Speed axis. CIA1 TOD is wall time at the CPU clock under test (mhz*100 000
 cycles per tenth); device latencies are wall-clock µs converted the same
-way. Every case runs at each speed in --mhz (default 1,48). WHILE AN
-INJECTED STALL IS ACTIVE ONLY, TOD runs at the 1 MHz rate (100 000 cycles
-per tenth) so a 5 s budget costs 5 M interpreted cycles at 48 MHz rather
-than 240 M; a stalled phase never ends by itself, so nothing in it depends
-on how many polls fit in a tenth, and every healthy phase — the push, the
-accept, the staging, the orphan clear of a finite chain, the follow-up
-commands — keeps its 48 MHz timing.
+way. Every case runs at each speed in --mhz (default 1,48). TOD runs at
+the 1 MHz rate (100 000 cycles per tenth) ONLY while an injected stall is
+active or the interface is QUIESCENT (nothing scheduled in the firmware,
+nothing for the CPU to read, STATE != 00 — the next change can only come
+from a C64 write). Either way a 5 s budget costs 5 M interpreted cycles at
+48 MHz rather than 240 M. Neither state changes by itself, so nothing in
+it depends on polls per tenth; a correct gate leaves the quiescent state
+within one poll, and every healthy phase — push, accept, staging, block
+copies, drains with data present, follow-up commands — keeps its 48 MHz
+timing. Runtime: ~3-4 min GREEN; a broken tree is similar.
 
 Randomised: payload bytes, lengths, socket id, peer address/port, inbound
 datagrams, Data More chain lengths and device latencies come from a seeded
@@ -100,9 +140,8 @@ RNG (seed on the first line; reproduce with --seed / TEST_SEED). Outbound
 payload bytes are drawn from $00-$7F, inbound from $80-$FF, so an echo
 cannot pass a reply check.
 
-HARDWARE-ONLY: whether a real firmware ever stalls in any of these phases
-(#148 is filed SUSPECT for that reason). This suite proves what the adapter
-DOES when one occurs, not that one occurs.
+HARDWARE-ONLY: how often firmware latency outruns the budget (the
+REACHABLE class). The DEFENSIVE classes are answered by the RTL above.
 
 Usage:
     python3 tools/test_uci_wait_carry_drain_ack.py [--seed N] [--mhz 1,48]
@@ -177,6 +216,25 @@ CHECKS_LENBAD = 4                       # L group per speed
 CHECKS_FIXED = 3                        # fidelity + two structural
 
 
+def check_class(name):
+    """Reachability class of a check name (see the module docstring)."""
+    g = name.split("/")[0]
+    if g in ("F", "S", "CTRL"):
+        return "CONTROL"
+    if g == "P":
+        return "REACHABLE"
+    if g == "L":
+        return "REACHABLE-1MHZ"
+    if g == "M":
+        return "DEFENSIVE-FAULT" if name.startswith("M/more-forever") else "REACHABLE"
+    site = name.split("/")[1].split("@")[0]
+    if site.endswith("-status"):
+        return "DEFENSIVE-STATUS"
+    if "-err-" in site:
+        return "DEFENSIVE-ERRBRANCH"
+    return "DEFENSIVE-RESP"
+
+
 def checks_expected(n_speeds):
     push = 2 * sum(CHECKS_PER_PUSH.values())
     drain = (len(PLAIN_DRAIN_SITES) + len(CHUNK_DRAIN_SITES)) * CHECKS_PER_DRAIN_RUN
@@ -246,10 +304,14 @@ def load_labels(build: Path) -> dict:
 # RTL model of $DF1C-$DF1F + the firmware's network target
 # =============================================================================
 class Stall:
-    """Which transaction stalls, in which phase, with the ERROR bit or not.
+    """Which transaction stalls, and in which phase.
 
     `match(cmd)` selects the transaction by its command bytes (first match
-    only). `more`: Data More blocks before the last (push-more).
+    only). `more`: Data More blocks before the last (push-more). `err`:
+    FOREIGN software issues a PUSH_CMD while this transaction is in flight;
+    the FPGA refuses it (:159) and error_busy latches — the only way the
+    RTL sets it. Used by the D/*-err-* sites to reach the post-push ERROR
+    branches, which our own code cannot reach behind its gate.
     """
 
     def __init__(self, match, phase, err=0, more=0, race=False):
@@ -273,6 +335,7 @@ class RtlUci:
         self.cmd_busy = 0
         self.data_acc = 0                   # handshake_in(1)
         self.error = 0
+        self.foreign_pushes = 0
         self.abort = 0
         self.cmd_buf = bytearray()
         self.resp, self.resp_ptr, self.resp_stuck = b"", 0, False
@@ -307,6 +370,15 @@ class RtlUci:
         self._due.sort(key=lambda e: (e[0], e[1]))
 
     def stalling(self):
+        """True while TOD should tick at the 1 MHz rate: an injected stall,
+        or a QUIESCENT interface — nothing scheduled in the firmware, no
+        byte for the CPU to read, STATE != 00 — where the next change can
+        only come from a C64 write. A correct gate leaves that state within
+        one poll; a broken tree spins in it for its whole budget, which at
+        48 MHz would cost 240 M interpreted cycles per timeout."""
+        if (not self._due and self.state != STATE_IDLE
+                and not self.status() & (STAT_DATA_AV | STAT_STAT_AV)):
+            return True
         s = self.stall
         if s is None or s.tx is None:
             return False
@@ -388,8 +460,6 @@ class RtlUci:
         if hit:
             s.tx, s.cmd = len(self.accepted), cmd
             if s.phase.startswith("push"):
-                if s.err:
-                    self.error = 1
                 return                          # parse_command still running
         self._at(self.us(self.rng.randrange(100, 900)),
                  lambda: self._complete(cmd, hit))
@@ -403,7 +473,7 @@ class RtlUci:
         self.cmd_busy = 0
         phase = self.stall.phase if hit else None
         if hit and self.stall.err and not phase.startswith("push"):
-            self.error = 1
+            self.foreign_refused_push()         # STATE is still 01 here
 
         def validate():
             self.resp, self.resp_ptr = data, 0
@@ -421,6 +491,22 @@ class RtlUci:
             validate()                          # staged by the next status read
         else:
             self._at(self.us(self.rng.randrange(2, 40)), validate)
+
+    def foreign_refused_push(self):
+        """Another program writes PUSH_CMD ($01 to $DF1C) while STATE != 00:
+        command_protocol.vhd :152-160 refuses it and sets error_busy, and
+        does nothing else (no pointer move, no state change)."""
+        assert self.state != STATE_IDLE, "a push from 00 would be ACCEPTED"
+        self.foreign_pushes += 1
+        self.error = 1
+
+    def latch_stale_error(self):
+        """error_busy is written only at :150 (clear), :159 (refused push)
+        and :301 (reset), and is sticky across later accepted pushes. This
+        models a refused push by earlier or foreign software having left it
+        set before the call under test — not a state our own push creates."""
+        self.foreign_pushes += 1
+        self.error = 1
 
     def _data_accepted(self):
         """run_task on CMD_DATA_ACCEPTED (the rising edge of handshake_in(1)):
@@ -446,7 +532,11 @@ class RtlUci:
             self.state = STATE_DATA_LAST
 
     def _firmware_abort(self):
+        # HANDSHAKE_RESET ($87): bit 0 rewinds the pointer and clears
+        # handshake_in(0), bit 1 clears handshake_in(1), bit 2 the abort
+        # bit, bit 7 forces STATE 00.
         self.state, self.cmd_busy, self.abort = STATE_IDLE, 0, 0
+        self.data_acc = 0
         self.cmd_buf = bytearray()
         self.resp, self.stat = b"", b""
         self.resp_stuck = self.stat_stuck = False
@@ -852,15 +942,18 @@ def case_control(ctx, res, flavour, mhz):
 
 def case_push_stall(ctx, res, site, err, mhz):
     """#150: CMD_BUSY never clears at this site's push while the caller
-    waits (ERROR = err); the command completes afterwards — an orphan."""
+    waits; the command completes afterwards — an orphan. err=1: error_busy
+    was already latched by an earlier refused push when the call began."""
     rng = ctx["rng"]
     m = Machine(ctx["builds"]["plain"], "plain")
     sid, ip, port = peer(rng)
     tag = f"P/{site}/err{err}@{mhz}MHz"
     m.socket(sid, ip, port)
     if site == "close":
-        stall = Stall(is_op(CMD_SOCKET_CLOSE), "push", err)
+        stall = Stall(is_op(CMD_SOCKET_CLOSE), "push")
         dev = RtlUci(mhz=mhz, rng=rng, sid=sid, stall=stall)
+        if err:
+            dev.latch_stale_error()
         r = m.call(dev, "net_udp_close", mhz=mhz)
         opened = m.mem[m.sym["uci_socket_open"]]
         res.check(r.hung is None and opened == 0 and m.mem[m.sym["uci_socket_id"]] == 0
@@ -871,8 +964,10 @@ def case_push_stall(ctx, res, site, err, mhz):
                   f"'cleared regardless'); stall hit={stall.tx is not None} hung={r.hung}")
     elif site == "connect":
         m.socket(sid, ip, port, opened=False)
-        stall = Stall(is_op(CMD_UDP_CONNECT), "push", err)
+        stall = Stall(is_op(CMD_UDP_CONNECT), "push")
         dev = RtlUci(mhz=mhz, rng=rng, sid=sid, stall=stall)
+        if err:
+            dev.latch_stale_error()
         r = m.send(dev, out_payload(rng, 1, 300), mhz=mhz)
         opened = m.mem[m.sym["uci_socket_open"]]
         writes = [c for c in dev.accepted + dev.dropped + [bytes(dev.cmd_buf)]
@@ -883,8 +978,10 @@ def case_push_stall(ctx, res, site, err, mhz):
                   f"uci_socket_open={opened}, writes={len(writes)}, "
                   f"datagrams={len(dev.wire)}, stall hit={stall.tx is not None}")
     else:
-        stall = Stall(is_op(CMD_SOCKET_READ), "push", err)
+        stall = Stall(is_op(CMD_SOCKET_READ), "push")
         dev = RtlUci(mhz=mhz, rng=rng, sid=sid, stall=stall)
+        if err:
+            dev.latch_stale_error()
         dev.inbound.append(in_payload(rng, 1, 200))
         r = m.call(dev, "net_poll", mhz=mhz)
         ready = m.mem[m.sym["udp_recv_ready"]]
@@ -895,8 +992,9 @@ def case_push_stall(ctx, res, site, err, mhz):
     res.check(r.hung is None and r.carry == 1 and r.err == ERR_WAIT_TIMEOUT,
               f"{tag}/C1-WAIT_TIMEOUT",
               f"C={r.carry} net_last_error=${r.err:02X} (want C=1 "
-              f"${ERR_WAIT_TIMEOUT:02X}: CMD_BUSY never cleared, the ERROR bit "
-              f"was {'SET' if err else 'CLEAR'} at the timeout) hung={r.hung}; "
+              f"${ERR_WAIT_TIMEOUT:02X}: CMD_BUSY never cleared; ERROR "
+              f"{'latched by an earlier refused push' if err else 'clear'} "
+              f"before the call) hung={r.hung}; "
               f"{dev.describe()}")
     dev.release()                           # the firmware completes: orphan
     if site == "poll":
@@ -1115,6 +1213,11 @@ def main(argv=None):
         expected = checks_expected(len(speeds))
         print(f"\nResults: {res.passed} passed, {res.failed} failed — {total} checks "
               f"(seed {seed})")
+        for cls in ("CONTROL", "REACHABLE", "REACHABLE-1MHZ", "DEFENSIVE-STATUS",
+                    "DEFENSIVE-ERRBRANCH", "DEFENSIVE-RESP", "DEFENSIVE-FAULT"):
+            n = sum(1 for x in res.names if check_class(x) == cls)
+            f = sum(1 for x in res.failures if check_class(x) == cls)
+            print(f"  {cls:20s} {n - f:3d}/{n:3d} passed")
         if res.failures:
             print("FAILED: " + ", ".join(res.failures))
         if not args.only and total != expected:

@@ -369,10 +369,14 @@ SERIAL_TESTS = [
     # Issues #150 and #148: a wedged UCI wait or drain. The real net.s
     # routines on the host 6502 against a command_protocol.vhd model whose
     # CMD_BUSY / DATA_AV / STAT_AV can be stalled per transaction phase:
-    # every push timeout must return C=1 $89 whatever the ERROR bit says,
-    # every drain timeout must still issue the accept, and the NEXT
-    # SOCKET_READ / SOCKET_WRITE must arrive at a correctly positioned
-    # command pointer (counted at the wire tap). At 1 and 48 MHz. Serial:
+    # every push or drain timeout must return C=1 $89 (no exit accept: in
+    # STATE 01 it is gated off), the reply the firmware stages AFTER the
+    # caller gave up (the orphan) must be accepted at the NEXT call's idle
+    # gate before its first command byte, and that call's SOCKET_READ /
+    # UDP_CONNECT / SOCKET_WRITE must arrive at a correctly positioned
+    # command pointer (counted at the wire tap). Checks are labelled
+    # REACHABLE vs DEFENSIVE (RTL-impossible) in its docstring and summary.
+    # At 1 and 48 MHz. Serial:
     # builds `make BACKEND=uci` AND `... UCI_CHUNKED_WRITE=1` itself and
     # restores the default tree. Unseeded; the seed is on its first line.
     ("uci_wait_carry", ["tools/test_uci_wait_carry_drain_ack.py"]),
