@@ -240,7 +240,9 @@ uci_wait_idle:
         ; A latched ERROR here predates the caller's push (error_busy is set
         ; only by a refused push, command_protocol.vhd:159): clear it so the
         ; next uci_check_err judges its own command. CLR_ERR does nothing
-        ; else (:149-151).
+        ; else (:149-151). The ERROR test is a cost guard, not a correctness
+        ; one: it keeps the write and its fence (~5.5 ms at 1 MHz) off every
+        ; gate call, and net_poll passes this gate on every main-loop pass.
         lda @wi_status
         and #UCI_STAT_ERROR
         beq @wi_clean
