@@ -1,0 +1,71 @@
+==========================================================
+=== SESSION 1 / 5 (mimicking issue's repeated invocations) ===
+==========================================================
+2026-05-19 19:05:03,645 INFO    uci_wedge_repro: PRG sent — waiting for boot
+2026-05-19 19:05:12,643 INFO    uci_wedge_repro: boot complete
+2026-05-19 19:05:14,908 INFO    uci_wedge_repro: net_init: carry=0 nle=$00 dt=0.21s
+2026-05-19 19:05:15,485 INFO    uci_wedge_repro: net_dhcp: carry=0 nle=$00 dt=0.21s
+2026-05-19 19:05:15,994 INFO    uci_wedge_repro: net_udp_listen: carry=0 dt=0.19s
+UCI WEDGE REPRO — mode=uci-only  iters=10
+net_udp_send dt:  min=0.22  p50=0.30  p95=0.55  max=0.49  (seconds)
+listener-arrived: 10/10
+wedges (dt>5.0s): 0
+--- end session 1 ---
+==========================================================
+=== SESSION 2 / 5 (mimicking issue's repeated invocations) ===
+==========================================================
+2026-05-19 19:05:31,261 INFO    uci_wedge_repro: PRG sent — waiting for boot
+2026-05-19 19:05:40,378 INFO    uci_wedge_repro: boot complete
+2026-05-19 19:05:41,500 INFO    uci_wedge_repro: net_init: carry=0 nle=$00 dt=0.11s
+2026-05-19 19:05:42,414 INFO    uci_wedge_repro: net_dhcp: carry=0 nle=$00 dt=0.65s
+2026-05-19 19:05:42,735 INFO    uci_wedge_repro: net_udp_listen: carry=0 dt=0.11s
+UCI WEDGE REPRO — mode=uci-only  iters=10
+net_udp_send dt:  min=0.27  p50=0.34  p95=0.64  max=0.59  (seconds)
+listener-arrived: 10/10
+wedges (dt>5.0s): 0
+--- end session 2 ---
+==========================================================
+=== SESSION 3 / 5 (mimicking issue's repeated invocations) ===
+==========================================================
+2026-05-19 19:05:58,696 INFO    uci_wedge_repro: PRG sent — waiting for boot
+2026-05-19 19:06:07,719 INFO    uci_wedge_repro: boot complete
+2026-05-19 19:06:08,991 INFO    uci_wedge_repro: net_init: carry=0 nle=$00 dt=0.10s
+2026-05-19 19:06:09,357 INFO    uci_wedge_repro: net_dhcp: carry=0 nle=$00 dt=0.15s
+2026-05-19 19:06:09,872 INFO    uci_wedge_repro: net_udp_listen: carry=0 dt=0.31s
+UCI WEDGE REPRO — mode=uci-only  iters=10
+net_udp_send dt:  min=0.21  p50=0.28  p95=0.32  max=0.32  (seconds)
+listener-arrived: 10/10
+wedges (dt>5.0s): 0
+--- end session 3 ---
+==========================================================
+=== SESSION 4 / 5 (mimicking issue's repeated invocations) ===
+==========================================================
+2026-05-19 19:06:24,606 INFO    uci_wedge_repro: PRG sent — waiting for boot
+2026-05-19 19:06:33,667 INFO    uci_wedge_repro: boot complete
+2026-05-19 19:06:34,751 INFO    uci_wedge_repro: net_init: carry=0 nle=$00 dt=0.08s
+2026-05-19 19:06:35,365 INFO    uci_wedge_repro: net_dhcp: carry=0 nle=$00 dt=0.31s
+2026-05-19 19:06:35,670 INFO    uci_wedge_repro: net_udp_listen: carry=0 dt=0.16s
+2026-05-19 19:09:35,168 WARNING uci_wedge_repro: iter   0  dt=178.12s  carry=0  nle=$00  send_lo=$20  arrived=False
+2026-05-19 19:09:35,168 WARNING uci_wedge_repro: --max-wedges=1 reached; bailing
+UCI WEDGE REPRO — mode=uci-only  iters=1
+net_udp_send dt:  min=178.12  p50=178.12  p95=178.12  max=178.12  (seconds)
+listener-arrived: 0/1
+wedges (dt>5.0s): 1
+first wedge at iter 0; dts of wedged iters: i0=178.1s
+--- end session 4 ---
+==========================================================
+=== SESSION 5 / 5 (mimicking issue's repeated invocations) ===
+==========================================================
+2026-05-19 19:09:40,804 INFO    uci_wedge_repro: PRG sent — waiting for boot
+2026-05-19 19:09:49,839 INFO    uci_wedge_repro: boot complete
+2026-05-19 19:09:51,387 INFO    uci_wedge_repro: net_init: carry=0 nle=$00 dt=0.11s
+2026-05-19 19:09:51,922 INFO    uci_wedge_repro: net_dhcp: carry=0 nle=$00 dt=0.26s
+2026-05-19 19:09:52,521 INFO    uci_wedge_repro: net_udp_listen: carry=0 dt=0.22s
+2026-05-19 19:12:52,381 WARNING uci_wedge_repro: iter   0  dt=178.32s  carry=0  nle=$00  send_lo=$20  arrived=False
+2026-05-19 19:12:52,381 WARNING uci_wedge_repro: --max-wedges=1 reached; bailing
+UCI WEDGE REPRO — mode=uci-only  iters=1
+net_udp_send dt:  min=178.32  p50=178.32  p95=178.32  max=178.32  (seconds)
+listener-arrived: 0/1
+wedges (dt>5.0s): 1
+first wedge at iter 0; dts of wedged iters: i0=178.3s
+--- end session 5 ---

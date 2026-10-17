@@ -62,8 +62,10 @@ size cannot distinguish variants — verify by SHA-256 before flashing**:
 | chacha-sibling | `make BACKEND=uci USE_CHACHA_SIBLING=1` | `44651e787c3ddf1ef9ad157737b1b2123f0f28de1afe85c9e81056d05b6caef7` |
 | both siblings | `make BACKEND=uci USE_X25519_SIBLING=1 USE_CHACHA_SIBLING=1` | `669f20de37e6c43f542feafc59d5b19809c4b5f37b2b938da4a2d416df853b2b` |
 
-Prebuilt copies (PRG + map) are in `artifacts/wireguard-uci-<variant>.{prg,map}`
-— these files do still exist, and are the only way to obtain rows 2 and 3.
+Prebuilt copies (PRG + map) are committed in
+`docs/evidence/prebuilt/wireguard-uci-<variant>.{prg,map}` (copied there from
+the gitignored `artifacts/` on 2026-10-17; the PRG hashes match the table) —
+they are the only way to obtain rows 2 and 3.
 Always `make clean` between variants — the build system does not
 track toggle flags in object files.
 
@@ -216,8 +218,8 @@ you are the ones not using it.
       retracted (see §2). Left visible rather than deleted because a
       standing "check whether X has landed" instruction is exactly the kind
       nobody re-checks.
-- [ ] Preserve `artifacts/aead_diag*.log` from 2026-05-17 (the one good
-      post-fix-1 dump). Do not overwrite or delete.
+- [x] Preserve the 2026-05-17 `aead_diag*.log` (the one good post-fix-1
+      dump). Done 2026-10-17: committed as `docs/evidence/aead_diag*.log`.
 
 ### Device quirks that will bite you (measured on firmware 3.14d)
 
@@ -504,7 +506,7 @@ symptoms as baseline is **not** a D failure — that's Bug #2 (§5).
 Background: after the Bug #1 fix (PR #32), stage 2 still fails — the
 C64's `hs_h`/`aead_key` at AEAD-verify totally diverge from the
 responder's (every byte differs; see the 2026-05-17 dump in
-`artifacts/aead_diag2_*.log`). The v0.6.0 x25519 sibling has different
+`docs/evidence/aead_diag2_*.log`). The v0.6.0 x25519 sibling has different
 fe25519 mul/sqr implementations — if the in-tree arithmetic was subtly
 wrong, the sibling build may simply *fix* stage 2.
 

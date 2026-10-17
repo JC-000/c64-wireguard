@@ -1,0 +1,179 @@
+2026-05-19 19:02:11,682 INFO    uci.udp_echo_listener: UDPEchoListener bound on 0.0.0.0:61775
+2026-05-19 19:02:11,682 INFO    uci_wedge_repro: listener bound on <bench-host>:61775
+2026-05-19 19:02:14,744 INFO    uci_wedge_repro: PRG sent — waiting for boot
+2026-05-19 19:02:23,768 INFO    uci_wedge_repro: boot complete
+2026-05-19 19:02:25,197 INFO    uci_wedge_repro: net_init: carry=0 nle=$00 dt=0.09s
+2026-05-19 19:02:25,654 INFO    uci_wedge_repro: net_dhcp: carry=0 nle=$00 dt=0.25s
+2026-05-19 19:02:26,025 INFO    uci_wedge_repro: net_udp_listen: carry=0 dt=0.10s
+2026-05-19 19:02:26,025 INFO    uci_wedge_repro: rest-stress thread started: 10.0 Hz x 64 B writemem to $CF00
+2026-05-19 19:02:26,025 INFO    uci_wedge_repro: === STRESS LOOP: 80 net_udp_send calls (mode=rest-stress) ===
+2026-05-19 19:02:26,520 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=000042434445464748494a4b4c4d4e4f
+2026-05-19 19:02:26,981 INFO    uci_wedge_repro: iter   0  dt=  0.38s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:27,547 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=000142434445464748494a4b4c4d4e4f
+2026-05-19 19:02:27,912 INFO    uci_wedge_repro: iter   1  dt=  0.31s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:28,471 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=000242434445464748494a4b4c4d4e4f
+2026-05-19 19:02:29,036 INFO    uci_wedge_repro: iter   2  dt=  0.43s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:29,547 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=000342434445464748494a4b4c4d4e4f
+2026-05-19 19:02:29,858 INFO    uci_wedge_repro: iter   3  dt=  0.22s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:30,453 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=000442434445464748494a4b4c4d4e4f
+2026-05-19 19:02:30,650 INFO    uci_wedge_repro: iter   4  dt=  0.22s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:31,138 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=000542434445464748494a4b4c4d4e4f
+2026-05-19 19:02:31,450 INFO    uci_wedge_repro: iter   5  dt=  0.21s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:31,956 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=000642434445464748494a4b4c4d4e4f
+2026-05-19 19:02:32,372 INFO    uci_wedge_repro: iter   6  dt=  0.40s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:32,873 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=000742434445464748494a4b4c4d4e4f
+2026-05-19 19:02:33,340 INFO    uci_wedge_repro: iter   7  dt=  0.35s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:33,851 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=000842434445464748494a4b4c4d4e4f
+2026-05-19 19:02:34,154 INFO    uci_wedge_repro: iter   8  dt=  0.22s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:34,728 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=000942434445464748494a4b4c4d4e4f
+2026-05-19 19:02:35,121 INFO    uci_wedge_repro: iter   9  dt=  0.30s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:35,645 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=000a42434445464748494a4b4c4d4e4f
+2026-05-19 19:02:36,043 INFO    uci_wedge_repro: iter  10  dt=  0.32s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:36,556 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=000b42434445464748494a4b4c4d4e4f
+2026-05-19 19:02:37,115 INFO    uci_wedge_repro: iter  11  dt=  0.31s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:37,640 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=000c42434445464748494a4b4c4d4e4f
+2026-05-19 19:02:38,212 INFO    uci_wedge_repro: iter  12  dt=  0.41s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:38,714 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=000d42434445464748494a4b4c4d4e4f
+2026-05-19 19:02:39,119 INFO    uci_wedge_repro: iter  13  dt=  0.40s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:39,631 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=000e42434445464748494a4b4c4d4e4f
+2026-05-19 19:02:40,148 INFO    uci_wedge_repro: iter  14  dt=  0.30s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:40,660 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=000f42434445464748494a4b4c4d4e4f
+2026-05-19 19:02:40,915 INFO    uci_wedge_repro: iter  15  dt=  0.22s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:41,677 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=001042434445464748494a4b4c4d4e4f
+2026-05-19 19:02:42,042 INFO    uci_wedge_repro: iter  16  dt=  0.30s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:42,758 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=001142434445464748494a4b4c4d4e4f
+2026-05-19 19:02:43,015 INFO    uci_wedge_repro: iter  17  dt=  0.28s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:43,523 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=001242434445464748494a4b4c4d4e4f
+2026-05-19 19:02:43,887 INFO    uci_wedge_repro: iter  18  dt=  0.31s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:44,453 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=001342434445464748494a4b4c4d4e4f
+2026-05-19 19:02:44,966 INFO    uci_wedge_repro: iter  19  dt=  0.32s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:45,468 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=001442434445464748494a4b4c4d4e4f
+2026-05-19 19:02:45,921 INFO    uci_wedge_repro: iter  20  dt=  0.40s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:46,495 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=001542434445464748494a4b4c4d4e4f
+2026-05-19 19:02:47,101 INFO    uci_wedge_repro: iter  21  dt=  0.37s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:47,825 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=001642434445464748494a4b4c4d4e4f
+2026-05-19 19:02:48,167 INFO    uci_wedge_repro: iter  22  dt=  0.31s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:48,568 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=001742434445464748494a4b4c4d4e4f
+2026-05-19 19:02:48,756 INFO    uci_wedge_repro: iter  23  dt=  0.20s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:49,257 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=001842434445464748494a4b4c4d4e4f
+2026-05-19 19:02:49,617 INFO    uci_wedge_repro: iter  24  dt=  0.31s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:50,116 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=001942434445464748494a4b4c4d4e4f
+2026-05-19 19:02:50,481 INFO    uci_wedge_repro: iter  25  dt=  0.27s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:51,055 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=001a42434445464748494a4b4c4d4e4f
+2026-05-19 19:02:51,607 INFO    uci_wedge_repro: iter  26  dt=  0.46s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:52,133 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=001b42434445464748494a4b4c4d4e4f
+2026-05-19 19:02:52,478 INFO    uci_wedge_repro: iter  27  dt=  0.26s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:52,997 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=001c42434445464748494a4b4c4d4e4f
+2026-05-19 19:02:53,351 INFO    uci_wedge_repro: iter  28  dt=  0.27s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:53,861 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=001d42434445464748494a4b4c4d4e4f
+2026-05-19 19:02:54,277 INFO    uci_wedge_repro: iter  29  dt=  0.26s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:54,923 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=001e42434445464748494a4b4c4d4e4f
+2026-05-19 19:02:55,459 INFO    uci_wedge_repro: iter  30  dt=  0.37s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:56,123 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=001f42434445464748494a4b4c4d4e4f
+2026-05-19 19:02:56,470 INFO    uci_wedge_repro: iter  31  dt=  0.34s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:57,048 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=002042434445464748494a4b4c4d4e4f
+2026-05-19 19:02:57,562 INFO    uci_wedge_repro: iter  32  dt=  0.35s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:58,474 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=002142434445464748494a4b4c4d4e4f
+2026-05-19 19:02:58,687 INFO    uci_wedge_repro: iter  33  dt=  0.20s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:02:59,094 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=002242434445464748494a4b4c4d4e4f
+2026-05-19 19:02:59,495 INFO    uci_wedge_repro: iter  34  dt=  0.30s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:00,005 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=002342434445464748494a4b4c4d4e4f
+2026-05-19 19:03:00,451 INFO    uci_wedge_repro: iter  35  dt=  0.41s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:00,930 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=002442434445464748494a4b4c4d4e4f
+2026-05-19 19:03:01,564 INFO    uci_wedge_repro: iter  36  dt=  0.61s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:02,158 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=002542434445464748494a4b4c4d4e4f
+2026-05-19 19:03:02,679 INFO    uci_wedge_repro: iter  37  dt=  0.51s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:03,083 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=002642434445464748494a4b4c4d4e4f
+2026-05-19 19:03:03,697 INFO    uci_wedge_repro: iter  38  dt=  0.40s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:04,208 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=002742434445464748494a4b4c4d4e4f
+2026-05-19 19:03:04,719 INFO    uci_wedge_repro: iter  39  dt=  0.39s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:05,231 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=002842434445464748494a4b4c4d4e4f
+2026-05-19 19:03:05,652 INFO    uci_wedge_repro: iter  40  dt=  0.35s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:06,162 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=002942434445464748494a4b4c4d4e4f
+2026-05-19 19:03:06,440 INFO    uci_wedge_repro: iter  41  dt=  0.28s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:06,870 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=002a42434445464748494a4b4c4d4e4f
+2026-05-19 19:03:07,190 INFO    uci_wedge_repro: iter  42  dt=  0.28s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:07,692 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=002b42434445464748494a4b4c4d4e4f
+2026-05-19 19:03:07,977 INFO    uci_wedge_repro: iter  43  dt=  0.29s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:08,534 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=002c42434445464748494a4b4c4d4e4f
+2026-05-19 19:03:08,955 INFO    uci_wedge_repro: iter  44  dt=  0.30s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:09,544 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=002d42434445464748494a4b4c4d4e4f
+2026-05-19 19:03:09,849 INFO    uci_wedge_repro: iter  45  dt=  0.31s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:10,454 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=002e42434445464748494a4b4c4d4e4f
+2026-05-19 19:03:10,770 INFO    uci_wedge_repro: iter  46  dt=  0.33s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:11,687 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=002f42434445464748494a4b4c4d4e4f
+2026-05-19 19:03:12,148 INFO    uci_wedge_repro: iter  47  dt=  0.39s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:13,016 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=003042434445464748494a4b4c4d4e4f
+2026-05-19 19:03:13,874 INFO    uci_wedge_repro: iter  48  dt=  0.67s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:14,502 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=003142434445464748494a4b4c4d4e4f
+2026-05-19 19:03:14,853 INFO    uci_wedge_repro: iter  49  dt=  0.25s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:15,300 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=003242434445464748494a4b4c4d4e4f
+2026-05-19 19:03:15,673 INFO    uci_wedge_repro: iter  50  dt=  0.28s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:16,191 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=003342434445464748494a4b4c4d4e4f
+2026-05-19 19:03:16,751 INFO    uci_wedge_repro: iter  51  dt=  0.43s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:17,669 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=003442434445464748494a4b4c4d4e4f
+2026-05-19 19:03:18,140 INFO    uci_wedge_repro: iter  52  dt=  0.22s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:18,642 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=003542434445464748494a4b4c4d4e4f
+2026-05-19 19:03:18,959 INFO    uci_wedge_repro: iter  53  dt=  0.25s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:19,463 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=003642434445464748494a4b4c4d4e4f
+2026-05-19 19:03:20,033 INFO    uci_wedge_repro: iter  54  dt=  0.47s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:20,714 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=003742434445464748494a4b4c4d4e4f
+2026-05-19 19:03:21,615 INFO    uci_wedge_repro: iter  55  dt=  0.35s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:22,233 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=003842434445464748494a4b4c4d4e4f
+2026-05-19 19:03:22,592 INFO    uci_wedge_repro: iter  56  dt=  0.26s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:23,045 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=003942434445464748494a4b4c4d4e4f
+2026-05-19 19:03:23,812 INFO    uci_wedge_repro: iter  57  dt=  0.49s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:24,482 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=003a42434445464748494a4b4c4d4e4f
+2026-05-19 19:03:24,948 INFO    uci_wedge_repro: iter  58  dt=  0.41s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:25,517 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=003b42434445464748494a4b4c4d4e4f
+2026-05-19 19:03:26,179 INFO    uci_wedge_repro: iter  59  dt=  0.60s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:27,048 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=003c42434445464748494a4b4c4d4e4f
+2026-05-19 19:03:27,348 INFO    uci_wedge_repro: iter  60  dt=  0.29s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:27,862 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=003d42434445464748494a4b4c4d4e4f
+2026-05-19 19:03:28,112 INFO    uci_wedge_repro: iter  61  dt=  0.21s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:28,623 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=003e42434445464748494a4b4c4d4e4f
+2026-05-19 19:03:28,821 INFO    uci_wedge_repro: iter  62  dt=  0.20s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:29,383 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=003f42434445464748494a4b4c4d4e4f
+2026-05-19 19:03:29,739 INFO    uci_wedge_repro: iter  63  dt=  0.22s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:30,234 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=004042434445464748494a4b4c4d4e4f
+2026-05-19 19:03:30,532 INFO    uci_wedge_repro: iter  64  dt=  0.26s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:31,153 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=004142434445464748494a4b4c4d4e4f
+2026-05-19 19:03:31,709 INFO    uci_wedge_repro: iter  65  dt=  0.36s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:32,117 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=004242434445464748494a4b4c4d4e4f
+2026-05-19 19:03:32,526 INFO    uci_wedge_repro: iter  66  dt=  0.26s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:33,086 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=004342434445464748494a4b4c4d4e4f
+2026-05-19 19:03:33,822 INFO    uci_wedge_repro: iter  67  dt=  0.71s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:34,324 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=004442434445464748494a4b4c4d4e4f
+2026-05-19 19:03:34,626 INFO    uci_wedge_repro: iter  68  dt=  0.25s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:35,139 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=004542434445464748494a4b4c4d4e4f
+2026-05-19 19:03:35,586 INFO    uci_wedge_repro: iter  69  dt=  0.34s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:36,110 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=004642434445464748494a4b4c4d4e4f
+2026-05-19 19:03:36,390 INFO    uci_wedge_repro: iter  70  dt=  0.21s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:36,873 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=004742434445464748494a4b4c4d4e4f
+2026-05-19 19:03:37,135 INFO    uci_wedge_repro: iter  71  dt=  0.21s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:37,591 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=004842434445464748494a4b4c4d4e4f
+2026-05-19 19:03:37,996 INFO    uci_wedge_repro: iter  72  dt=  0.30s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:38,615 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=004942434445464748494a4b4c4d4e4f
+2026-05-19 19:03:38,828 INFO    uci_wedge_repro: iter  73  dt=  0.21s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:39,231 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=004a42434445464748494a4b4c4d4e4f
+2026-05-19 19:03:39,444 INFO    uci_wedge_repro: iter  74  dt=  0.24s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:39,971 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=004b42434445464748494a4b4c4d4e4f
+2026-05-19 19:03:40,308 INFO    uci_wedge_repro: iter  75  dt=  0.27s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:40,870 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=004c42434445464748494a4b4c4d4e4f
+2026-05-19 19:03:41,216 INFO    uci_wedge_repro: iter  76  dt=  0.25s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:41,895 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=004d42434445464748494a4b4c4d4e4f
+2026-05-19 19:03:42,180 INFO    uci_wedge_repro: iter  77  dt=  0.29s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:42,715 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=004e42434445464748494a4b4c4d4e4f
+2026-05-19 19:03:43,012 INFO    uci_wedge_repro: iter  78  dt=  0.25s  carry=0  nle=$00  send_lo=$20  arrived=True
+2026-05-19 19:03:43,756 INFO    uci.udp_echo_listener: echo from 10.43.23.81:62512 len=32 first16=004f42434445464748494a4b4c4d4e4f
+2026-05-19 19:03:44,076 INFO    uci_wedge_repro: iter  79  dt=  0.19s  carry=0  nle=$00  send_lo=$20  arrived=True
+
+======================================================================
+UCI WEDGE REPRO — mode=rest-stress  iters=80
+======================================================================
+net_udp_send dt:  min=0.19  p50=0.30  p95=0.60  max=0.71  (seconds)
+listener-arrived: 80/80
+wedges (dt>5.0s): 0
+writemem POSTs:   ok=651  errors=0
+
+Detailed log: /Users/someone/Documents/c64-wireguard/artifacts/uci_wedge_rest-stress_20260519_190344.txt
