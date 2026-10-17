@@ -178,7 +178,7 @@ matching the responder's `split()` output — `wg_state` reached
 `SESSION_ACTIVE`. This is the first end-to-end WireGuard handshake
 completed by a Commodore 64. (Hardware session details, including the
 new C64 Ultimate device profile and the full Bug #2 investigation, are
-in `artifacts/hw_session_20260719_ledger.md`.)
+in `docs/hw_session_20260719_ledger.md`.)
 
 ## What's still ahead
 

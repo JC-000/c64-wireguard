@@ -1,0 +1,96 @@
+2026-05-17 06:07:25,249 INFO    uci_handshake: U64E 10.43.23.81 ok (5.7 ms)
+2026-05-17 06:07:25,249 INFO    uci_udp_echo: make clean && make BACKEND=uci
+2026-05-17 06:07:25,391 INFO    uci_handshake: label main_loop                  = $083A
+2026-05-17 06:07:25,391 INFO    uci_handshake: label net_init                   = $2000
+2026-05-17 06:07:25,391 INFO    uci_handshake: label net_dhcp                   = $203B
+2026-05-17 06:07:25,391 INFO    uci_handshake: label net_udp_listen             = $2099
+2026-05-17 06:07:25,391 INFO    uci_handshake: label net_poll                   = $222F
+2026-05-17 06:07:25,391 INFO    uci_handshake: label do_handshake               = $0922
+2026-05-17 06:07:25,391 INFO    uci_handshake: label session_handle_packet      = $5769
+2026-05-17 06:07:25,391 INFO    uci_handshake: label mul_dma_hi                 = $6700
+2026-05-17 06:07:25,391 INFO    uci_handshake: label wg_state                   = $7912
+2026-05-17 06:07:25,391 INFO    uci_handshake: label wg_peer_ip                 = $71FF
+2026-05-17 06:07:25,391 INFO    uci_handshake: label wg_peer_port               = $7203
+2026-05-17 06:07:25,391 INFO    uci_handshake: label wg_local_port              = $7205
+2026-05-17 06:07:25,391 INFO    uci_handshake: label udp_recv_ready             = $71FE
+2026-05-17 06:07:25,391 INFO    uci_handshake: label net_last_error             = $7ACC
+2026-05-17 06:07:25,391 INFO    uci_handshake: label net_local_ip               = $7AC8
+2026-05-17 06:07:25,391 INFO    uci_handshake: label cfg_static_priv            = $7913
+2026-05-17 06:07:25,391 INFO    uci_handshake: label cfg_static_pub             = $7933
+2026-05-17 06:07:25,391 INFO    uci_handshake: label cfg_peer_pub               = $7953
+2026-05-17 06:07:25,391 INFO    uci_handshake: label cfg_peer_endpoint_ip       = $7973
+2026-05-17 06:07:25,391 INFO    uci_handshake: label cfg_peer_endpoint_port     = $7977
+2026-05-17 06:07:25,391 INFO    uci_handshake: label cfg_preshared_key          = $7979
+2026-05-17 06:07:25,391 INFO    uci_handshake: label tunnel_ip                  = $7999
+2026-05-17 06:07:25,391 INFO    uci_handshake: label ping_target_ip             = $799D
+2026-05-17 06:07:25,391 INFO    uci_handshake: label tai64n_base_time           = $7A62
+2026-05-17 06:07:25,392 INFO    uci_handshake: keys: c64_pub=d34d416e38ed85e61641c13f5b920c4c64f4cdec40df5c4b0c8866a493140714 resp_pub=93affc59b70b224d790cf3a11e556abb3c77a4b45e880e1726a94810c2744f70 psk=zero
+2026-05-17 06:07:25,393 INFO    uci_handshake: responder bound on 0.0.0.0:51406
+2026-05-17 06:07:25,393 INFO    uci_handshake: host=10.43.23.81 local_ip=<bench-host> responder_port=51406
+2026-05-17 06:07:27,238 INFO    uci_handshake: enabling UCI via REST
+2026-05-17 06:07:30,578 INFO    uci_handshake: PRG sent (37889 B); waiting for boot...
+2026-05-17 06:07:40,093 INFO    uci_udp_echo: boot complete — mul_dma_hi[255]=$FE (reu_mul_init done)
+2026-05-17 06:07:40,183 INFO    uci_udp_echo: hijack installed @ $083A = 4c3403
+2026-05-17 06:07:40,300 INFO    uci_udp_echo: step $11 done; carry=0
+2026-05-17 06:07:40,510 INFO    uci_udp_echo: step $22 done; carry=0
+2026-05-17 06:07:40,615 INFO    uci_udp_echo: step $33 done; carry=0
+2026-05-17 06:07:40,866 INFO    uci_handshake: cfg staged: c64_pub=d34d416e... resp_pub=93affc59... peer=<bench-host>:51406 tai64=1779016070
+2026-05-17 06:07:40,910 INFO    uci_handshake: driving do_handshake (timeout 1800s)...
+2026-05-17 06:08:11,862 INFO    uci_handshake: step $66 still running (31s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$B1 send_len_lo=$00 net_err=$00]
+2026-05-17 06:08:42,848 INFO    uci_handshake: step $66 still running (62s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$00]
+2026-05-17 06:09:13,874 INFO    uci_handshake: step $66 still running (93s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$00]
+2026-05-17 06:09:44,738 INFO    uci_handshake: step $66 still running (124s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$AE send_len_lo=$00 net_err=$00]
+2026-05-17 06:10:15,616 INFO    uci_handshake: step $66 still running (155s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$00]
+FAIL — see log
+Traceback (most recent call last):
+  File "/Users/someone/Documents/c64-wireguard/tools/test_uci_handshake_live.py", line 607, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File "/Users/someone/Documents/c64-wireguard/tools/test_uci_handshake_live.py", line 481, in main
+    carry = _run_step_slow(tr, step_id=STEP_HS_INIT,
+                           target=L["do_handshake"],
+                           timeout=HS_INIT_TIMEOUT, probes=probes)
+  File "/Users/someone/Documents/c64-wireguard/tools/test_uci_handshake_live.py", line 182, in _run_step_slow
+    return _wait_step(tr, step_id=step_id, timeout=timeout,
+                      poll_interval=poll_interval, probes=probes,
+                      start_time=started)
+  File "/Users/someone/Documents/c64-wireguard/tools/test_uci_handshake_live.py", line 146, in _wait_step
+    if tr.read_memory(SENTINEL, 1)[0] == step_id:
+       ~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "/Users/someone/Documents/c64-test-harness/src/c64_test_harness/backends/ultimate64.py", line 89, in read_memory
+    return self._client.read_mem(addr, length)
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/Users/someone/Documents/c64-test-harness/src/c64_test_harness/backends/ultimate64_client.py", line 423, in read_mem
+    _, data = self._request("GET", "/v1/machine:readmem", query=query)
+              ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/someone/Documents/c64-test-harness/src/c64_test_harness/backends/ultimate64_client.py", line 215, in _request
+    with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13/Frameworks/Python.framework/Versions/3.13/lib/python3.13/urllib/request.py", line 189, in urlopen
+    return opener.open(url, data, timeout)
+           ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13/Frameworks/Python.framework/Versions/3.13/lib/python3.13/urllib/request.py", line 489, in open
+    response = self._open(req, data)
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13/Frameworks/Python.framework/Versions/3.13/lib/python3.13/urllib/request.py", line 506, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+                              '_open', req)
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13/Frameworks/Python.framework/Versions/3.13/lib/python3.13/urllib/request.py", line 466, in _call_chain
+    result = func(*args)
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13/Frameworks/Python.framework/Versions/3.13/lib/python3.13/urllib/request.py", line 1348, in http_open
+    return self.do_open(http.client.HTTPConnection, req)
+           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13/Frameworks/Python.framework/Versions/3.13/lib/python3.13/urllib/request.py", line 1323, in do_open
+    r = h.getresponse()
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13/Frameworks/Python.framework/Versions/3.13/lib/python3.13/http/client.py", line 1450, in getresponse
+    response.begin()
+    ~~~~~~~~~~~~~~^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13/Frameworks/Python.framework/Versions/3.13/lib/python3.13/http/client.py", line 336, in begin
+    version, status, reason = self._read_status()
+                              ~~~~~~~~~~~~~~~~~^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13/Frameworks/Python.framework/Versions/3.13/lib/python3.13/http/client.py", line 297, in _read_status
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+               ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13/Frameworks/Python.framework/Versions/3.13/lib/python3.13/socket.py", line 719, in readinto
+    return self._sock.recv_into(b)
+           ~~~~~~~~~~~~~~~~~~~~^^^
+ConnectionResetError: [Errno 54] Connection reset by peer

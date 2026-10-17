@@ -1,0 +1,119 @@
+2026-07-21 12:24:08,120 INFO    uci_handshake: U64E 10.53.21.158 ok (16.0 ms)
+2026-07-21 12:24:08,120 INFO    uci_udp_echo: C64_SKIP_BUILD set — skipping make
+2026-07-21 12:24:08,122 INFO    uci_handshake: label main_loop                  = $083A
+2026-07-21 12:24:08,122 INFO    uci_handshake: label net_init                   = $2000
+2026-07-21 12:24:08,122 INFO    uci_handshake: label net_dhcp                   = $203B
+2026-07-21 12:24:08,122 INFO    uci_handshake: label net_udp_listen             = $2099
+2026-07-21 12:24:08,122 INFO    uci_handshake: label net_poll                   = $222F
+2026-07-21 12:24:08,122 INFO    uci_handshake: label do_handshake               = $0922
+2026-07-21 12:24:08,122 INFO    uci_handshake: label session_handle_packet      = $5C65
+2026-07-21 12:24:08,122 INFO    uci_handshake: label mul_dma_hi                 = $9A00
+2026-07-21 12:24:08,122 INFO    uci_handshake: label wg_state                   = $9392
+2026-07-21 12:24:08,122 INFO    uci_handshake: label wg_peer_ip                 = $8C7F
+2026-07-21 12:24:08,122 INFO    uci_handshake: label wg_peer_port               = $8C83
+2026-07-21 12:24:08,122 INFO    uci_handshake: label wg_local_port              = $8C85
+2026-07-21 12:24:08,122 INFO    uci_handshake: label udp_recv_ready             = $8C7E
+2026-07-21 12:24:08,122 INFO    uci_handshake: label net_last_error             = $68E7
+2026-07-21 12:24:08,122 INFO    uci_handshake: label net_local_ip               = $68E3
+2026-07-21 12:24:08,122 INFO    uci_handshake: label cfg_static_priv            = $9393
+2026-07-21 12:24:08,122 INFO    uci_handshake: label cfg_static_pub             = $93B3
+2026-07-21 12:24:08,122 INFO    uci_handshake: label cfg_peer_pub               = $93D3
+2026-07-21 12:24:08,122 INFO    uci_handshake: label cfg_peer_endpoint_ip       = $93F3
+2026-07-21 12:24:08,122 INFO    uci_handshake: label cfg_peer_endpoint_port     = $93F7
+2026-07-21 12:24:08,122 INFO    uci_handshake: label cfg_preshared_key          = $93F9
+2026-07-21 12:24:08,122 INFO    uci_handshake: label tunnel_ip                  = $9419
+2026-07-21 12:24:08,122 INFO    uci_handshake: label ping_target_ip             = $941D
+2026-07-21 12:24:08,122 INFO    uci_handshake: label tai64n_base_time           = $94E2
+2026-07-21 12:24:08,122 INFO    uci_handshake: label hs_h                       = $8420
+2026-07-21 12:24:08,122 INFO    uci_handshake: label hs_c                       = $8400
+2026-07-21 12:24:08,122 INFO    uci_handshake: label aead_key                   = $688C
+2026-07-21 12:24:08,122 INFO    uci_handshake: label kdf_out1                   = $66B0
+2026-07-21 12:24:08,122 INFO    uci_handshake: label kdf_out2                   = $66D0
+2026-07-21 12:24:08,122 INFO    uci_handshake: label kdf_out3                   = $66F0
+2026-07-21 12:24:08,122 INFO    uci_handshake: label hs_resp_packet             = $85C4
+2026-07-21 12:24:08,122 INFO    uci_handshake: label hs_ephem_pub               = $84C0
+2026-07-21 12:24:08,122 INFO    uci_handshake: label do_send_test               = $08F9
+2026-07-21 12:24:08,122 INFO    uci_handshake: label tp_send_counter            = $8C88
+2026-07-21 12:24:08,122 INFO    uci_handshake: label tp_packet                  = $8CA8
+2026-07-21 12:24:08,122 INFO    uci_handshake: label tp_packet_len              = $9284
+2026-07-21 12:24:08,122 INFO    uci_handshake: label tp_payload_len             = $8CA6
+2026-07-21 12:24:08,127 INFO    uci_handshake: keys: c64_pub=d62cbb9dde81708309c27b81e7e3968ca04b750a65b61eff3409688de7222f29 resp_pub=65c08c9103c36254fc2ed7d13d894466fbbe50b6d9a404e7a25852bde2a36044 psk=zero
+2026-07-21 12:24:08,127 INFO    uci_handshake: responder bound on 0.0.0.0:50943
+2026-07-21 12:24:08,127 INFO    uci_handshake: host=10.53.21.158 local_ip=<bench-host> responder_port=50943
+2026-07-21 12:24:13,008 INFO    uci_handshake: PRG sent (37889 B); waiting for boot...
+2026-07-21 12:24:25,677 INFO    uci_udp_echo: boot complete — mul_dma_hi[128,255]=($FF,$FC) (x25519-sibling reu_mul_init done)
+2026-07-21 12:24:25,868 INFO    uci_udp_echo: hijack installed @ $083A = 4c3403
+2026-07-21 12:24:26,083 INFO    uci_udp_echo: step $11 done; carry=0
+2026-07-21 12:24:26,384 INFO    uci_udp_echo: step $22 done; carry=1
+2026-07-21 12:24:26,449 WARNING uci_handshake: net_dhcp failed (net_last_error=$83) — continuing: socket path does not need the local IP on this firmware
+2026-07-21 12:24:26,674 INFO    uci_udp_echo: step $33 done; carry=0
+2026-07-21 12:24:27,148 INFO    uci_handshake: cfg staged: c64_pub=d62cbb9d... resp_pub=65c08c91... peer=<bench-host>:50943 tai64=1784654677
+2026-07-21 12:24:27,248 INFO    uci_handshake: driving do_handshake (timeout 1800s)...
+2026-07-21 12:24:58,116 INFO    uci_handshake: step $66 still running (31s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$83]
+2026-07-21 12:25:28,735 INFO    uci_handshake: step $66 still running (61s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$83]
+2026-07-21 12:25:59,125 INFO    uci_handshake: step $66 still running (92s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$16 send_len_lo=$00 net_err=$83]
+2026-07-21 12:26:30,045 INFO    uci_handshake: step $66 still running (123s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$83]
+2026-07-21 12:27:02,040 INFO    uci_handshake: step $66 still running (153s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$83]
+2026-07-21 12:27:30,945 INFO    uci_handshake: step $66 still running (183s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$83]
+2026-07-21 12:28:01,768 INFO    uci_handshake: step $66 still running (214s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$83]
+2026-07-21 12:28:32,546 INFO    uci_handshake: step $66 still running (245s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$83]
+2026-07-21 12:29:03,532 INFO    uci_handshake: step $66 still running (276s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$80 send_len_lo=$00 net_err=$83]
+2026-07-21 12:29:34,312 INFO    uci_handshake: step $66 still running (307s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$5D send_len_lo=$00 net_err=$83]
+2026-07-21 12:30:06,035 INFO    uci_handshake: step $66 still running (337s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$83]
+2026-07-21 12:30:35,919 INFO    uci_handshake: step $66 still running (368s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$52 send_len_lo=$00 net_err=$83]
+2026-07-21 12:31:06,754 INFO    uci_handshake: step $66 still running (399s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$83]
+2026-07-21 12:31:37,864 INFO    uci_handshake: step $66 still running (430s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$83]
+2026-07-21 12:32:07,811 INFO    uci_handshake: step $66 still running (460s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$83]
+2026-07-21 12:32:38,530 INFO    uci_handshake: step $66 still running (491s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$20 send_len_lo=$00 net_err=$83]
+2026-07-21 12:33:09,422 INFO    uci_handshake: step $66 still running (522s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$83]
+2026-07-21 12:33:39,467 INFO    uci_handshake: step $66 still running (552s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$5C send_len_lo=$00 net_err=$83]
+2026-07-21 12:34:10,417 INFO    uci_handshake: step $66 still running (583s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$02 send_len_lo=$00 net_err=$83]
+2026-07-21 12:34:40,536 INFO    uci_handshake: step $66 still running (613s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$C5 send_len_lo=$00 net_err=$83]
+2026-07-21 12:35:11,517 INFO    uci_handshake: step $66 still running (644s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$83]
+2026-07-21 12:35:41,602 INFO    uci_handshake: step $66 still running (674s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$37 send_len_lo=$00 net_err=$83]
+2026-07-21 12:36:12,617 INFO    uci_handshake: step $66 still running (705s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$3F send_len_lo=$00 net_err=$83]
+2026-07-21 12:36:43,512 INFO    uci_handshake: step $66 still running (736s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$A9 send_len_lo=$00 net_err=$83]
+2026-07-21 12:37:14,256 INFO    uci_handshake: step $66 still running (767s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$FD send_len_lo=$00 net_err=$83]
+2026-07-21 12:37:45,209 INFO    uci_handshake: step $66 still running (798s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$83]
+2026-07-21 12:38:15,248 INFO    uci_handshake: responder: rx 148B from 10.53.21.158:62511 type=0x01 first16=01000000f05f6899c4403a328846f923
+2026-07-21 12:38:15,253 INFO    uci_handshake: responder: Type-1 OK (c64_sender_idx=2573754352); sending Type-2 (92B)
+2026-07-21 12:38:15,967 INFO    uci_handshake: step $66 done; carry=0 (828.7s)
+2026-07-21 12:38:15,967 INFO    uci_handshake: do_handshake returned in 828.7s (carry=0)
+2026-07-21 12:38:16,003 INFO    uci_handshake: wg_state = SESSION_HS_SENT ✓
+2026-07-21 12:38:16,004 INFO    uci_handshake: STAGE 1 ✓ — Type-1 accepted by responder
+2026-07-21 12:38:16,004 INFO    uci_handshake: stage 2: waiting for Type-2 + session_handle_packet → ACTIVE (timeout 1800s)
+2026-07-21 12:38:16,862 INFO    uci_udp_echo: step $55 done; carry=0
+2026-07-21 12:38:16,893 INFO    uci_handshake: udp_recv_ready set after 1 polls — driving session_handle_packet
+2026-07-21 12:38:47,728 INFO    uci_handshake: step $77 still running (31s elapsed)
+2026-07-21 12:39:18,416 INFO    uci_handshake: step $77 still running (62s elapsed)
+2026-07-21 12:39:49,151 INFO    uci_handshake: step $77 still running (92s elapsed)
+2026-07-21 12:40:20,112 INFO    uci_handshake: step $77 still running (123s elapsed)
+2026-07-21 12:40:50,859 INFO    uci_handshake: step $77 still running (154s elapsed)
+2026-07-21 12:41:21,791 INFO    uci_handshake: step $77 still running (185s elapsed)
+2026-07-21 12:41:52,392 INFO    uci_handshake: step $77 still running (215s elapsed)
+2026-07-21 12:42:22,429 INFO    uci_handshake: step $77 still running (246s elapsed)
+2026-07-21 12:42:53,085 INFO    uci_handshake: step $77 still running (276s elapsed)
+2026-07-21 12:43:23,749 INFO    uci_handshake: step $77 still running (307s elapsed)
+2026-07-21 12:43:54,490 INFO    uci_handshake: step $77 still running (338s elapsed)
+2026-07-21 12:44:25,143 INFO    uci_handshake: step $77 still running (368s elapsed)
+2026-07-21 12:44:55,739 INFO    uci_handshake: step $77 still running (399s elapsed)
+2026-07-21 12:45:26,456 INFO    uci_handshake: step $77 still running (430s elapsed)
+2026-07-21 12:45:57,101 INFO    uci_handshake: step $77 still running (460s elapsed)
+2026-07-21 12:46:27,970 INFO    uci_handshake: step $77 still running (491s elapsed)
+2026-07-21 12:46:58,561 INFO    uci_handshake: step $77 still running (522s elapsed)
+2026-07-21 12:47:29,135 INFO    uci_handshake: step $77 still running (552s elapsed)
+2026-07-21 12:47:33,403 INFO    uci_handshake: step $77 done; carry=0 (556.5s)
+2026-07-21 12:47:33,403 INFO    uci_handshake: session_handle_packet returned in 556.5s (carry=0)
+2026-07-21 12:47:33,439 INFO    uci_handshake: wg_state = 2
+2026-07-21 12:47:33,439 INFO    uci_handshake: STAGE 2 ✓ — SESSION_ACTIVE reached
+2026-07-21 12:47:33,503 INFO    uci_handshake: stage 3 forward: JSR do_send_test (encrypt + send Type-4)...
+2026-07-21 12:47:34,271 INFO    uci_handshake: responder: rx 47B from 10.53.21.158:62511 type=0x04 first16=040000008ace02f70000000000000000
+2026-07-21 12:47:34,271 INFO    uci_handshake: responder: Type-4 OK (15B plaintext, first16=48454c4c4f20574952454755415244)
+2026-07-21 12:47:34,805 INFO    uci_handshake: step $88 done; carry=0 (1.3s)
+2026-07-21 12:47:34,896 INFO    uci_handshake: do_send_test carry=0 tp_send_counter 0000000000000000->0100000000000000 tp_packet_len=47
+2026-07-21 12:47:34,896 INFO    uci_handshake: STAGE 3 forward ✓ — responder decrypted the C64's Type-4 transport packet (tunnel carries data)
+2026-07-21 12:47:34,896 INFO    uci_handshake: stage 3 reverse: sent 48B Type-4 to C64; polling...
+2026-07-21 12:47:35,490 INFO    uci_udp_echo: step $55 done; carry=0
+2026-07-21 12:47:36,854 INFO    uci_handshake: step $99 done; carry=0 (1.3s)
+2026-07-21 12:47:36,944 INFO    uci_handshake: STAGE 3 reverse ✓ — C64 decrypted responder Type-4: b'PONG-FROM-PY-C64' (tp_payload_len=16)
+PASS — UCI WireGuard handshake stage 3

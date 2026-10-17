@@ -1,0 +1,80 @@
+2026-05-17 10:35:15,387 INFO    uci_handshake: U64E 10.43.23.81 ok (6.0 ms)
+2026-05-17 10:35:15,387 INFO    uci_udp_echo: make clean && make BACKEND=uci
+2026-05-17 10:35:15,518 INFO    uci_handshake: label main_loop                  = $083A
+2026-05-17 10:35:15,518 INFO    uci_handshake: label net_init                   = $2000
+2026-05-17 10:35:15,518 INFO    uci_handshake: label net_dhcp                   = $203B
+2026-05-17 10:35:15,518 INFO    uci_handshake: label net_udp_listen             = $2099
+2026-05-17 10:35:15,518 INFO    uci_handshake: label net_poll                   = $222F
+2026-05-17 10:35:15,518 INFO    uci_handshake: label do_handshake               = $0922
+2026-05-17 10:35:15,518 INFO    uci_handshake: label session_handle_packet      = $5773
+2026-05-17 10:35:15,518 INFO    uci_handshake: label mul_dma_hi                 = $6800
+2026-05-17 10:35:15,518 INFO    uci_handshake: label wg_state                   = $7A12
+2026-05-17 10:35:15,518 INFO    uci_handshake: label wg_peer_ip                 = $72FF
+2026-05-17 10:35:15,518 INFO    uci_handshake: label wg_peer_port               = $7303
+2026-05-17 10:35:15,518 INFO    uci_handshake: label wg_local_port              = $7305
+2026-05-17 10:35:15,518 INFO    uci_handshake: label udp_recv_ready             = $72FE
+2026-05-17 10:35:15,518 INFO    uci_handshake: label net_last_error             = $7BCC
+2026-05-17 10:35:15,518 INFO    uci_handshake: label net_local_ip               = $7BC8
+2026-05-17 10:35:15,518 INFO    uci_handshake: label cfg_static_priv            = $7A13
+2026-05-17 10:35:15,518 INFO    uci_handshake: label cfg_static_pub             = $7A33
+2026-05-17 10:35:15,518 INFO    uci_handshake: label cfg_peer_pub               = $7A53
+2026-05-17 10:35:15,518 INFO    uci_handshake: label cfg_peer_endpoint_ip       = $7A73
+2026-05-17 10:35:15,518 INFO    uci_handshake: label cfg_peer_endpoint_port     = $7A77
+2026-05-17 10:35:15,518 INFO    uci_handshake: label cfg_preshared_key          = $7A79
+2026-05-17 10:35:15,518 INFO    uci_handshake: label tunnel_ip                  = $7A99
+2026-05-17 10:35:15,518 INFO    uci_handshake: label ping_target_ip             = $7A9D
+2026-05-17 10:35:15,518 INFO    uci_handshake: label tai64n_base_time           = $7B62
+2026-05-17 10:35:15,518 INFO    uci_handshake: label hs_h                       = $6AA0
+2026-05-17 10:35:15,518 INFO    uci_handshake: label hs_c                       = $6A80
+2026-05-17 10:35:15,518 INFO    uci_handshake: label aead_key                   = $654F
+2026-05-17 10:35:15,518 INFO    uci_handshake: label kdf_out1                   = $6373
+2026-05-17 10:35:15,518 INFO    uci_handshake: label kdf_out2                   = $6393
+2026-05-17 10:35:15,518 INFO    uci_handshake: label kdf_out3                   = $63B3
+2026-05-17 10:35:15,518 INFO    uci_handshake: label hs_resp_packet             = $6C44
+2026-05-17 10:35:15,518 INFO    uci_handshake: label hs_ephem_pub               = $6B40
+2026-05-17 10:35:15,519 INFO    uci_handshake: keys: c64_pub=725cf55172e38ff9207bff8f6039f2de9b81de555810e33f746c51d635b62545 resp_pub=04515de9638bd0d3879368a5e28588ba79aaea8ee9d59bdbffcbb2592842545d psk=zero
+2026-05-17 10:35:15,519 INFO    uci_handshake: responder bound on 0.0.0.0:57512
+2026-05-17 10:35:15,519 INFO    uci_handshake: host=10.43.23.81 local_ip=<bench-host> responder_port=57512
+2026-05-17 10:35:20,159 INFO    uci_handshake: PRG sent (37889 B); waiting for boot...
+2026-05-17 10:35:29,700 INFO    uci_udp_echo: boot complete — mul_dma_hi[255]=$FE (reu_mul_init done)
+2026-05-17 10:35:29,788 INFO    uci_udp_echo: hijack installed @ $083A = 4c3403
+2026-05-17 10:35:29,879 INFO    uci_udp_echo: step $11 done; carry=0
+2026-05-17 10:35:30,088 INFO    uci_udp_echo: step $22 done; carry=0
+2026-05-17 10:35:30,185 INFO    uci_udp_echo: step $33 done; carry=0
+2026-05-17 10:35:30,390 INFO    uci_handshake: cfg staged: c64_pub=725cf551... resp_pub=04515de9... peer=<bench-host>:57512 tai64=1779032140
+2026-05-17 10:35:30,423 INFO    uci_handshake: driving do_handshake (timeout 1800s)...
+2026-05-17 10:36:00,709 INFO    uci_handshake: step $66 still running (30s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$00]
+2026-05-17 10:36:30,746 INFO    uci_handshake: step $66 still running (60s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$C3 send_len_lo=$00 net_err=$00]
+2026-05-17 10:37:00,759 INFO    uci_handshake: step $66 still running (90s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$FF send_len_lo=$00 net_err=$00]
+2026-05-17 10:37:30,823 INFO    uci_handshake: step $66 still running (120s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$7A send_len_lo=$00 net_err=$00]
+2026-05-17 10:38:00,824 INFO    uci_handshake: step $66 still running (150s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$00]
+2026-05-17 10:38:30,907 INFO    uci_handshake: step $66 still running (180s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$00]
+2026-05-17 10:39:00,998 INFO    uci_handshake: step $66 still running (210s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$00]
+2026-05-17 10:39:31,060 INFO    uci_handshake: step $66 still running (241s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$00]
+2026-05-17 10:40:01,119 INFO    uci_handshake: step $66 still running (271s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$00]
+2026-05-17 10:40:31,209 INFO    uci_handshake: step $66 still running (301s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$00]
+2026-05-17 10:41:01,321 INFO    uci_handshake: step $66 still running (331s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$00]
+2026-05-17 10:41:31,309 INFO    uci_handshake: step $66 still running (361s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$A2 send_len_lo=$00 net_err=$00]
+2026-05-17 10:42:01,447 INFO    uci_handshake: step $66 still running (391s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$D7 send_len_lo=$00 net_err=$00]
+2026-05-17 10:42:31,575 INFO    uci_handshake: step $66 still running (421s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$2D send_len_lo=$00 net_err=$00]
+2026-05-17 10:43:01,674 INFO    uci_handshake: step $66 still running (451s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$FB send_len_lo=$00 net_err=$00]
+2026-05-17 10:43:31,702 INFO    uci_handshake: step $66 still running (481s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$00]
+2026-05-17 10:44:01,734 INFO    uci_handshake: step $66 still running (511s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$7B send_len_lo=$00 net_err=$00]
+2026-05-17 10:44:31,915 INFO    uci_handshake: step $66 still running (541s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$E4 send_len_lo=$00 net_err=$00]
+2026-05-17 10:45:02,085 INFO    uci_handshake: step $66 still running (572s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$00]
+2026-05-17 10:45:32,204 INFO    uci_handshake: step $66 still running (602s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$21 send_len_lo=$00 net_err=$00]
+2026-05-17 10:46:02,241 INFO    uci_handshake: step $66 still running (632s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$00]
+2026-05-17 10:46:32,347 INFO    uci_handshake: step $66 still running (662s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$00]
+2026-05-17 10:47:02,649 INFO    uci_handshake: step $66 still running (692s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$48 send_len_lo=$00 net_err=$00]
+2026-05-17 10:47:32,725 INFO    uci_handshake: step $66 still running (722s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$00 net_err=$00]
+2026-05-17 10:48:02,811 INFO    uci_handshake: step $66 still running (752s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$94 net_err=$00]
+2026-05-17 10:48:32,858 INFO    uci_handshake: step $66 still running (782s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$94 net_err=$00]
+2026-05-17 10:49:02,961 INFO    uci_handshake: step $66 still running (812s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$94 net_err=$00]
+2026-05-17 10:49:33,034 INFO    uci_handshake: step $66 still running (843s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$94 net_err=$00]
+2026-05-17 10:50:03,108 INFO    uci_handshake: step $66 still running (873s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$94 net_err=$00]
+2026-05-17 10:50:33,158 INFO    uci_handshake: step $66 still running (903s elapsed) [wg_state=$00 x25_bit=$01 fe_loop=$00 send_len_lo=$94 net_err=$00]
+2026-05-17 10:50:49,741 INFO    uci_handshake: step $66 done; carry=0 (919.4s)
+2026-05-17 10:50:49,741 INFO    uci_handshake: do_handshake returned in 919.4s (carry=0)
+2026-05-17 10:50:49,760 INFO    uci_handshake: wg_state = SESSION_HS_SENT ✓
+2026-05-17 10:51:50,157 ERROR   uci_handshake: responder never saw Type-1 (timeout)
+FAIL — see log

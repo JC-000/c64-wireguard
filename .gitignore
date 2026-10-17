@@ -21,3 +21,6 @@ __pycache__/
 artifacts/
 .serena/
 .claude/settings.local.json
+# Prebuilt sibling-variant builds kept as evidence (hardware-validation-runbook.md §1)
+!docs/evidence/prebuilt/wireguard-uci-*.prg
+!docs/evidence/prebuilt/wireguard-uci-*.map

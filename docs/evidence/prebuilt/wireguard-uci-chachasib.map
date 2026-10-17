@@ -1,0 +1,1071 @@
+Modules list:
+-------------
+loadaddr.o:
+    LOADADDR          Offs=000000  Size=000002  Align=00001  Fill=0000
+boot.o:
+    CODE              Offs=000000  Size=000213  Align=00001  Fill=0000
+    EXEHDR            Offs=000000  Size=00000C  Align=00001  Fill=0000
+exports.o:
+entropy.o:
+    CRYPTO_CODE       Offs=000000  Size=00002C  Align=00001  Fill=0000
+blake2s.o:
+    CRYPTO_RODATA     Offs=000000  Size=0000E0  Align=00001  Fill=0000
+    CRYPTO_BSS        Offs=000000  Size=00000D  Align=00001  Fill=0000
+    CRYPTO_CODE       Offs=00002C  Size=00033F  Align=00001  Fill=0000
+blake2s_kdf.o:
+    CRYPTO_CODE       Offs=00036B  Size=00015A  Align=00001  Fill=0000
+    CRYPTO_RODATA     Offs=0000E0  Size=000003  Align=00001  Fill=0000
+    CRYPTO_BSS        Offs=00000D  Size=000021  Align=00001  Fill=0000
+fe25519.o:
+    CRYPTO_CODE       Offs=0004C5  Size=00089A  Align=00001  Fill=0000
+    CRYPTO_BSS        Offs=00002E  Size=000005  Align=00001  Fill=0000
+x25519.o:
+    CRYPTO_CODE       Offs=000D5F  Size=0002F0  Align=00001  Fill=0000
+timer.o:
+    APP_CODE          Offs=000000  Size=0000BB  Align=00001  Fill=0000
+tai64n.o:
+    APP_CODE          Offs=0000BB  Size=000129  Align=00001  Fill=0000
+cookie.o:
+    APP_DATA          Offs=000000  Size=000008  Align=00001  Fill=0000
+    APP_CODE          Offs=0001E4  Size=000137  Align=00001  Fill=0000
+config.o:
+    APP_CODE          Offs=00031B  Size=000047  Align=00001  Fill=0000
+data.o:
+    CRYPTO_RODATA     Offs=0000E3  Size=000448  Align=00001  Fill=0000
+    APP_DATA          Offs=000008  Size=00001D  Align=00001  Fill=0000
+    CRYPTO_BSS        Offs=000100  Size=000780  Align=00100  Fill=00CD
+    APP_BSS           Offs=000000  Size=001134  Align=00001  Fill=0000
+strings.o:
+    APP_DATA          Offs=000025  Size=0001F5  Align=00001  Fill=0000
+handshake.o:
+    APP_DATA          Offs=00021A  Size=000049  Align=00001  Fill=0000
+    APP_CODE          Offs=000362  Size=00044F  Align=00001  Fill=0000
+transport.o:
+    APP_CODE          Offs=0007B1  Size=000381  Align=00001  Fill=0000
+session.o:
+    APP_CODE          Offs=000B32  Size=0001AD  Align=00001  Fill=0000
+ip_build.o:
+    APP_CODE          Offs=000CDF  Size=0001D0  Align=00001  Fill=0000
+disk_config.o:
+    APP_CODE          Offs=000EAF  Size=0001EE  Align=00001  Fill=0000
+    APP_BSS           Offs=001134  Size=000010  Align=00001  Fill=0000
+net.o:
+    UCI_CODE          Offs=000000  Size=00043B  Align=00001  Fill=0000
+    UCI_BSS           Offs=000000  Size=000021  Align=00001  Fill=0000
+uci_cmd.o:
+    UCI_CODE          Offs=00043B  Size=0001ED  Align=00001  Fill=0000
+    UCI_BSS           Offs=000021  Size=000004  Align=00001  Fill=0000
+build/lib/chacha20poly1305.a(word32_lib_raw.o):
+    CHACHA_CODE       Offs=000000  Size=000219  Align=00001  Fill=0000
+build/lib/chacha20poly1305.a(chacha20_lib_raw.o):
+    CHACHA_CODE       Offs=000219  Size=000E2F  Align=00001  Fill=0000
+build/lib/chacha20poly1305.a(poly1305_lib_raw.o):
+    CHACHA_CODE       Offs=001100  Size=000C23  Align=00100  Fill=00B8
+build/lib/chacha20poly1305.a(chacha20poly1305_lib_raw.o):
+    CHACHA_CODE       Offs=001D23  Size=000233  Align=00001  Fill=0000
+build/lib/chacha20poly1305.a(data_lib_raw.o):
+    CHACHA_BSS        Offs=000000  Size=000127  Align=00001  Fill=0000
+    CHACHA_RODATA     Offs=000000  Size=000200  Align=00100  Fill=0000
+
+
+Segment list:
+-------------
+Name                   Start     End    Size  Align
+----------------------------------------------------
+LOADADDR              0007FF  000800  000002  00001
+EXEHDR                000801  00080C  00000C  00001
+CODE                  00080D  000A1F  000213  00001
+CRYPTO_RODATA         000A20  000F4A  00052B  00001
+CHACHA_RODATA         001000  0011FF  000200  00100
+UCI_CODE              002000  002627  000628  00001
+CRYPTO_CODE           0032F0  00433E  00104F  00001
+APP_CODE              00433F  0053DB  00109D  00001
+APP_DATA              0053DC  00563E  000263  00001
+CRYPTO_BSS            005700  005F7F  000880  00100
+UCI_BSS               005F80  005FA4  000025  00001
+CHACHA_CODE           005FA5  007EFA  001F56  00100
+APP_BSS               008400  009543  001144  00001
+CHACHA_BSS            009544  00966A  000127  00001
+
+
+Exports list by name:
+---------------------
+SESSION_ACTIVE            000002 REZ    SESSION_IDLE              000000 REZ    
+add32_to_dst              005FC4 RLA    aead_aad_len              009645 RLA    
+aead_aad_ptr              009643 RLA    aead_data_len             009648 RLA    
+aead_data_ptr             009646 RLA    aead_decrypt              007CE7 RLA    
+aead_encrypt              007CC8 RLA    aead_key                  009617 RLA    
+aead_nonce                009637 RLA    aead_scratch              00965A RLA    
+aead_tag                  00964A RLA    b2s_block                 005961 RLA    
+b2s_buf_len               0059AA RLA    b2s_f                     0059A9 RLA    
+b2s_h                     005901 RLA    b2s_hash                  0059AB RLA    
+b2s_out_len               005400 RLA    b2s_t                     0059A1 RLA    
+b2s_t1                    0059A5 RLA    b2s_v                     005921 RLA    
+blake2s_final             0033DD RLA    blake2s_init              00331C RLA    
+blake2s_update            00338A RLA    cc20_buf_pos              000019 REZ    
+cc20_counter              0095B0 RLA    cc20_data_ptr             000016 REZ    
+cc20_key                  009584 RLA    cc20_keystream            000040 REZ    
+cc20_nonce                0095A4 RLA    cc20_qr_idx               000015 REZ    
+cc20_remain               000018 REZ    cc20_remain_hi            0095B4 RLA    
+cc20_round                000014 REZ    cc20_state                009544 RLA    
+cc20_work                 000040 REZ    cfg_err_msg               0055AD RLA    
+cfg_loading_msg           00558F RLA    cfg_ok_msg                0055A2 RLA    
+cfg_peer_endpoint_ip      0093F3 RLA    cfg_peer_endpoint_port    0093F7 RLA    
+cfg_peer_pub              0093D3 RLA    cfg_preshared_key         0093F9 RLA    
+cfg_static_priv           009393 RLA    cfg_static_pub            0093B3 RLA    
+chacha20_block            006360 RLA    chacha20_encrypt          006FA6 RLA    
+chacha20_init             006333 RLA    chacha20_quarter_round    0061EE RLA    
+chacha_nibswap_hi_tab     001000 RLA    chacha_nibswap_lo_tab     001100 RLA    
+config_filename           0053FA RLA    config_filename_len       000006 REA    
+config_load               00465A RLA    config_read_file          0051EE RLA    
+cookie_buf                0094A2 RLA    cookie_handle_type3       00455F RLA    
+cookie_recv_msg           0055BB RLA    cookie_valid              0094DA RLA    
+ct_diff_raw               00001E REZ    ct_sign_mask              00001F REZ    
+decrypt_fail_msg          005546 RLA    dhcp_err_msg              0054AA RLA    
+entropy_fill              00330F RLA    entropy_init              0032F0 RLA    
+fe25519_add               0037D3 RLA    fe25519_copy              0037B5 RLA    
+fe25519_cswap             003846 RLA    fe25519_inv               003D59 RLA    
+fe25519_mul               003935 RLA    fe25519_mul_a24           003C4C RLA    
+fe25519_one               0037C9 RLA    fe25519_sqr               003AF4 RLA    
+fe25519_sub               0037FA RLA    fe25519_zero              0037BF RLA    
+fe_p                      000B03 RLA    fe_tmp1                   005B3C RLA    
+fe_tmp2                   005B5C RLA    fe_tmp3                   005B7C RLA    
+fe_tmp4                   005B9C RLA    fe_wide                   005AFC RLA    
+hmac_data_len             005AFB RLA    hmac_data_ptr             005AF9 RLA    
+hmac_inner_hash           005A53 RLA    hmac_ipad                 0059D3 RLA    
+hmac_key_len              005AF8 RLA    hmac_key_ptr              005AF6 RLA    
+hmac_opad                 005A13 RLA    hs_c                      008400 RLA    
+hs_create_initiation      00474D RLA    hs_dh_result              0084E0 RLA    
+hs_ephem_priv             0084A0 RLA    hs_ephem_pub              0084C0 RLA    
+hs_fail_msg               005534 RLA    hs_h                      008420 RLA    
+hs_mac1_key               008510 RLA    hs_ok_msg                 005526 RLA    
+hs_packet                 008530 RLA    hs_preshared_key          008660 RLA    
+hs_process_response       00496D RLA    hs_resp_packet            0085C4 RLA    
+hs_resp_pub               008480 RLA    hs_sender_idx             008500 RLA    
+hs_set_mac2               00461B RLA    hs_start_msg              00550F RLA    
+hs_static_priv            008440 RLA    hs_static_pub             008460 RLA    
+hs_timestamp              008504 RLA    hs_transport_recv         008640 RLA    
+hs_transport_send         008620 RLA    icmp_build_echo           005056 RLA    
+icmp_parse_reply          0050F8 RLA    input_buffer              005800 RLA    
+ip_cksum_result           009423 RLA    ip_hdr_template           0053E4 RLA    
+ip_packet_buf             009451 RLA    ip_pkt_len                0094A1 RLA    
+kdf_1                     003709 RLA    kdf_2                     00374D RLA    
+kdf_3                     003781 RLA    kdf_input_len             005AF5 RLA    
+kdf_input_ptr             005AF3 RLA    kdf_out1                  005A73 RLA    
+kdf_out2                  005A93 RLA    kdf_out3                  005AB3 RLA    
+kdf_prk                   005AD3 RLA    keepalive_msg             0055EB RLA    
+last_send_jiffy           0094DE RLA    msg_input_buf             009425 RLA    
+msg_input_len             00944D RLA    msg_port                  0053F8 RLA    
+msg_prompt                005583 RLA    msg_recv_hdr              005589 RLA    
+msg_recv_len              009450 RLA    msg_recv_ptr              00944E RLA    
+mul38_hi_tab              000E23 RLA    mul38_lo_tab              000D23 RLA    
+mul_8x8                   0071A9 RLA    mul_cached_a              005BDC RLA    
+mul_dma_hi                005D00 RLA    mul_dma_lo                005C00 RLA    
+mul_src2_buf              005BBC RLA    net_dhcp                  00203B RLA    
+net_dhcp_msg              00546D RLA    net_err_msg               005495 RLA    
+net_init                  002000 RLA    net_init_msg              005454 RLA    
+net_initialized           008C87 RLA    net_listen_err_msg        0054D0 RLA    
+net_listen_msg            0054B7 RLA    net_ok_msg                005481 RLA    
+net_poll                  00222F RLA    net_print_ip              002387 RLA    
+net_udp_listen            002099 RLA    net_udp_send              0020A1 RLA    
+not_active_msg            005577 RLA    ping_reply_msg            005568 RLA    
+ping_sent_msg             00555D RLA    ping_seq                  009421 RLA    
+ping_target_ip            00941D RLA    poly1305_block            007B6F RLA    
+poly1305_final            007C65 RLA    poly1305_init             0070B3 RLA    
+poly1305_tag              009607 RLA    poly_carry                00001C REZ    
+poly_h                    0095B5 RLA    poly_i                    00001A REZ    
+poly_j                    00001B REZ    poly_prod_hi              0071A8 RLA    
+poly_prod_lo              0071A7 RLA    poly_product              0095E6 RLA    
+poly_r                    0095C6 RLA    poly_s                    0095D6 RLA    
+poly_tmp                  00001D REZ    print_string              000A0F RLA    
+recv_data_msg             005556 RLA    rekey_msg                 0055CC RLA    
+rekey_pending             0094E1 RLA    reu_mul_init              003F89 RLA    
+rotl32_12                 00616D RLA    rotl32_7                  006192 RLA    
+rotl32_8                  0060EB RLA    rotr32_12                 006067 RLA    
+rotr32_16                 00601F RLA    rotr32_7                  0060C9 RLA    
+rotr32_8                  006044 RLA    rw_bit_mask               000F43 RLA    
+rw_bitmap                 009287 RLA    rw_counter_max            009387 RLA    
+rw_new_counter            009391 RLA    rw_shift_hi               009390 RLA    
+rw_shift_lo               00938F RLA    send_err_msg              0054F3 RLA    
+send_ok_msg               0054E3 RLA    session_expired_msg       0055DA RLA    
+session_handle_packet     004EAB RLA    session_initiate          004E71 RLA    
+session_start_jiffy       0094DB RLA    sqtab2_hi                 000C23 RLA    
+sqtab2_lo                 000B23 RLA    sqtab_hi                  008200 REA    
+sqtab_init                007107 RLA    sqtab_lo                  008000 REA    
+sqtab_ready               00966A RLA    tai64n_base_time          0094E2 RLA    
+tai64n_increment          0044F2 RLA    tai64n_init               0043FA RLA    
+tai64n_init_jiffy         0094EA RLA    tai64n_seq                0094ED RLA    
+test_payload              005500 RLA    test_payload_len          00000F REA    
+timer_check               004358 RLA    timer_mark_send           0043C7 RLA    
+timer_session_start       00433F RLA    title_msg                 005401 RLA    
+tp_encrypt_error          009286 RLA    tp_packet                 008CA8 RLA    
+tp_packet_len             009284 RLA    tp_payload_len            008CA6 RLA    
+tp_payload_ptr            008CA4 RLA    tp_peer_recv_idx          008CA0 RLA    
+tp_recv_counter           008C90 RLA    tp_recv_counter_tmp       008C98 RLA    
+tp_send_counter           008C88 RLA    transport_decrypt         004C6D RLA    
+transport_init            004AF0 RLA    transport_send            004E5A RLA    
+tunnel_ip                 009419 RLA    uci_abort                 00243B RLA    
+uci_ack                   002509 RLA    uci_begin_cmd             00248F RLA    
+uci_check_err             0024D7 RLA    uci_drain_resp            002590 RLA    
+uci_drain_status          0025DC RLA    uci_push_wait             0024B9 RLA    
+uci_put_byte              0024A4 RLA    uci_read_resp_bytes       002520 RLA    
+uci_resp_dst              005FA1 RLA    uci_resp_max              005FA3 RLA    
+uci_wait_idle             002457 RLA    uci_wait_not_busy         002473 RLA    
+udp_recv_buf              00869A RLA    udp_recv_len              008C76 RLA    
+udp_recv_ready            008C7E RLA    udp_recv_src_ip           008C78 RLA    
+udp_recv_src_port         008C7C RLA    udp_send_len_local        005F82 RLA    
+udp_tunnel_build          005118 RLA    udp_tunnel_parse          0051BE RLA    
+w32_dst                   000008 REZ    w32_src1                  000004 REZ    
+w32_src2                  000006 REZ    wg_local_port             008C85 RLA    
+wg_peer_ip                008C7F RLA    wg_peer_port              008C83 RLA    
+wg_state                  009392 RLA    x25519_base               004325 RLA    
+x25519_clamp              00404F RLA    x25519_scalarmult         004062 RLA    
+x25_a                     005EE0 RLA    x25_b                     005F00 RLA    
+x25_basepoint             000F23 RLA    x25_cb                    005F40 RLA    
+x25_da                    005F20 RLA    x25_e                     005F60 RLA    
+x25_result                005E40 RLA    x25_scalar                005E00 RLA    
+x25_u                     005E20 RLA    x25_x2                    005E60 RLA    
+x25_x3                    005EA0 RLA    x25_z2                    005E80 RLA    
+x25_z3                    005EC0 RLA    xor32_in_place            006001 RLA    
+zp_ptr1                   0000FB REZ    zp_tmp1                   000002 REZ    
+zp_tmp2                   000003 REZ    
+
+
+Exports list by value:
+----------------------
+SESSION_IDLE              000000 REZ    SESSION_ACTIVE            000002 REZ    
+zp_tmp1                   000002 REZ    zp_tmp2                   000003 REZ    
+w32_src1                  000004 REZ    config_filename_len       000006 REA    
+w32_src2                  000006 REZ    w32_dst                   000008 REZ    
+test_payload_len          00000F REA    cc20_round                000014 REZ    
+cc20_qr_idx               000015 REZ    cc20_data_ptr             000016 REZ    
+cc20_remain               000018 REZ    cc20_buf_pos              000019 REZ    
+poly_i                    00001A REZ    poly_j                    00001B REZ    
+poly_carry                00001C REZ    poly_tmp                  00001D REZ    
+ct_diff_raw               00001E REZ    ct_sign_mask              00001F REZ    
+cc20_keystream            000040 REZ    cc20_work                 000040 REZ    
+zp_ptr1                   0000FB REZ    print_string              000A0F RLA    
+fe_p                      000B03 RLA    sqtab2_lo                 000B23 RLA    
+sqtab2_hi                 000C23 RLA    mul38_lo_tab              000D23 RLA    
+mul38_hi_tab              000E23 RLA    x25_basepoint             000F23 RLA    
+rw_bit_mask               000F43 RLA    chacha_nibswap_hi_tab     001000 RLA    
+chacha_nibswap_lo_tab     001100 RLA    net_init                  002000 RLA    
+net_dhcp                  00203B RLA    net_udp_listen            002099 RLA    
+net_udp_send              0020A1 RLA    net_poll                  00222F RLA    
+net_print_ip              002387 RLA    uci_abort                 00243B RLA    
+uci_wait_idle             002457 RLA    uci_wait_not_busy         002473 RLA    
+uci_begin_cmd             00248F RLA    uci_put_byte              0024A4 RLA    
+uci_push_wait             0024B9 RLA    uci_check_err             0024D7 RLA    
+uci_ack                   002509 RLA    uci_read_resp_bytes       002520 RLA    
+uci_drain_resp            002590 RLA    uci_drain_status          0025DC RLA    
+entropy_init              0032F0 RLA    entropy_fill              00330F RLA    
+blake2s_init              00331C RLA    blake2s_update            00338A RLA    
+blake2s_final             0033DD RLA    kdf_1                     003709 RLA    
+kdf_2                     00374D RLA    kdf_3                     003781 RLA    
+fe25519_copy              0037B5 RLA    fe25519_zero              0037BF RLA    
+fe25519_one               0037C9 RLA    fe25519_add               0037D3 RLA    
+fe25519_sub               0037FA RLA    fe25519_cswap             003846 RLA    
+fe25519_mul               003935 RLA    fe25519_sqr               003AF4 RLA    
+fe25519_mul_a24           003C4C RLA    fe25519_inv               003D59 RLA    
+reu_mul_init              003F89 RLA    x25519_clamp              00404F RLA    
+x25519_scalarmult         004062 RLA    x25519_base               004325 RLA    
+timer_session_start       00433F RLA    timer_check               004358 RLA    
+timer_mark_send           0043C7 RLA    tai64n_init               0043FA RLA    
+tai64n_increment          0044F2 RLA    cookie_handle_type3       00455F RLA    
+hs_set_mac2               00461B RLA    config_load               00465A RLA    
+hs_create_initiation      00474D RLA    hs_process_response       00496D RLA    
+transport_init            004AF0 RLA    transport_decrypt         004C6D RLA    
+transport_send            004E5A RLA    session_initiate          004E71 RLA    
+session_handle_packet     004EAB RLA    icmp_build_echo           005056 RLA    
+icmp_parse_reply          0050F8 RLA    udp_tunnel_build          005118 RLA    
+udp_tunnel_parse          0051BE RLA    config_read_file          0051EE RLA    
+ip_hdr_template           0053E4 RLA    msg_port                  0053F8 RLA    
+config_filename           0053FA RLA    b2s_out_len               005400 RLA    
+title_msg                 005401 RLA    net_init_msg              005454 RLA    
+net_dhcp_msg              00546D RLA    net_ok_msg                005481 RLA    
+net_err_msg               005495 RLA    dhcp_err_msg              0054AA RLA    
+net_listen_msg            0054B7 RLA    net_listen_err_msg        0054D0 RLA    
+send_ok_msg               0054E3 RLA    send_err_msg              0054F3 RLA    
+test_payload              005500 RLA    hs_start_msg              00550F RLA    
+hs_ok_msg                 005526 RLA    hs_fail_msg               005534 RLA    
+decrypt_fail_msg          005546 RLA    recv_data_msg             005556 RLA    
+ping_sent_msg             00555D RLA    ping_reply_msg            005568 RLA    
+not_active_msg            005577 RLA    msg_prompt                005583 RLA    
+msg_recv_hdr              005589 RLA    cfg_loading_msg           00558F RLA    
+cfg_ok_msg                0055A2 RLA    cfg_err_msg               0055AD RLA    
+cookie_recv_msg           0055BB RLA    rekey_msg                 0055CC RLA    
+session_expired_msg       0055DA RLA    keepalive_msg             0055EB RLA    
+input_buffer              005800 RLA    b2s_h                     005901 RLA    
+b2s_v                     005921 RLA    b2s_block                 005961 RLA    
+b2s_t                     0059A1 RLA    b2s_t1                    0059A5 RLA    
+b2s_f                     0059A9 RLA    b2s_buf_len               0059AA RLA    
+b2s_hash                  0059AB RLA    hmac_ipad                 0059D3 RLA    
+hmac_opad                 005A13 RLA    hmac_inner_hash           005A53 RLA    
+kdf_out1                  005A73 RLA    kdf_out2                  005A93 RLA    
+kdf_out3                  005AB3 RLA    kdf_prk                   005AD3 RLA    
+kdf_input_ptr             005AF3 RLA    kdf_input_len             005AF5 RLA    
+hmac_key_ptr              005AF6 RLA    hmac_key_len              005AF8 RLA    
+hmac_data_ptr             005AF9 RLA    hmac_data_len             005AFB RLA    
+fe_wide                   005AFC RLA    fe_tmp1                   005B3C RLA    
+fe_tmp2                   005B5C RLA    fe_tmp3                   005B7C RLA    
+fe_tmp4                   005B9C RLA    mul_src2_buf              005BBC RLA    
+mul_cached_a              005BDC RLA    mul_dma_lo                005C00 RLA    
+mul_dma_hi                005D00 RLA    x25_scalar                005E00 RLA    
+x25_u                     005E20 RLA    x25_result                005E40 RLA    
+x25_x2                    005E60 RLA    x25_z2                    005E80 RLA    
+x25_x3                    005EA0 RLA    x25_z3                    005EC0 RLA    
+x25_a                     005EE0 RLA    x25_b                     005F00 RLA    
+x25_da                    005F20 RLA    x25_cb                    005F40 RLA    
+x25_e                     005F60 RLA    udp_send_len_local        005F82 RLA    
+uci_resp_dst              005FA1 RLA    uci_resp_max              005FA3 RLA    
+add32_to_dst              005FC4 RLA    xor32_in_place            006001 RLA    
+rotr32_16                 00601F RLA    rotr32_8                  006044 RLA    
+rotr32_12                 006067 RLA    rotr32_7                  0060C9 RLA    
+rotl32_8                  0060EB RLA    rotl32_12                 00616D RLA    
+rotl32_7                  006192 RLA    chacha20_quarter_round    0061EE RLA    
+chacha20_init             006333 RLA    chacha20_block            006360 RLA    
+chacha20_encrypt          006FA6 RLA    poly1305_init             0070B3 RLA    
+sqtab_init                007107 RLA    poly_prod_lo              0071A7 RLA    
+poly_prod_hi              0071A8 RLA    mul_8x8                   0071A9 RLA    
+poly1305_block            007B6F RLA    poly1305_final            007C65 RLA    
+aead_encrypt              007CC8 RLA    aead_decrypt              007CE7 RLA    
+sqtab_lo                  008000 REA    sqtab_hi                  008200 REA    
+hs_c                      008400 RLA    hs_h                      008420 RLA    
+hs_static_priv            008440 RLA    hs_static_pub             008460 RLA    
+hs_resp_pub               008480 RLA    hs_ephem_priv             0084A0 RLA    
+hs_ephem_pub              0084C0 RLA    hs_dh_result              0084E0 RLA    
+hs_sender_idx             008500 RLA    hs_timestamp              008504 RLA    
+hs_mac1_key               008510 RLA    hs_packet                 008530 RLA    
+hs_resp_packet            0085C4 RLA    hs_transport_send         008620 RLA    
+hs_transport_recv         008640 RLA    hs_preshared_key          008660 RLA    
+udp_recv_buf              00869A RLA    udp_recv_len              008C76 RLA    
+udp_recv_src_ip           008C78 RLA    udp_recv_src_port         008C7C RLA    
+udp_recv_ready            008C7E RLA    wg_peer_ip                008C7F RLA    
+wg_peer_port              008C83 RLA    wg_local_port             008C85 RLA    
+net_initialized           008C87 RLA    tp_send_counter           008C88 RLA    
+tp_recv_counter           008C90 RLA    tp_recv_counter_tmp       008C98 RLA    
+tp_peer_recv_idx          008CA0 RLA    tp_payload_ptr            008CA4 RLA    
+tp_payload_len            008CA6 RLA    tp_packet                 008CA8 RLA    
+tp_packet_len             009284 RLA    tp_encrypt_error          009286 RLA    
+rw_bitmap                 009287 RLA    rw_counter_max            009387 RLA    
+rw_shift_lo               00938F RLA    rw_shift_hi               009390 RLA    
+rw_new_counter            009391 RLA    wg_state                  009392 RLA    
+cfg_static_priv           009393 RLA    cfg_static_pub            0093B3 RLA    
+cfg_peer_pub              0093D3 RLA    cfg_peer_endpoint_ip      0093F3 RLA    
+cfg_peer_endpoint_port    0093F7 RLA    cfg_preshared_key         0093F9 RLA    
+tunnel_ip                 009419 RLA    ping_target_ip            00941D RLA    
+ping_seq                  009421 RLA    ip_cksum_result           009423 RLA    
+msg_input_buf             009425 RLA    msg_input_len             00944D RLA    
+msg_recv_ptr              00944E RLA    msg_recv_len              009450 RLA    
+ip_packet_buf             009451 RLA    ip_pkt_len                0094A1 RLA    
+cookie_buf                0094A2 RLA    cookie_valid              0094DA RLA    
+session_start_jiffy       0094DB RLA    last_send_jiffy           0094DE RLA    
+rekey_pending             0094E1 RLA    tai64n_base_time          0094E2 RLA    
+tai64n_init_jiffy         0094EA RLA    tai64n_seq                0094ED RLA    
+cc20_state                009544 RLA    cc20_key                  009584 RLA    
+cc20_nonce                0095A4 RLA    cc20_counter              0095B0 RLA    
+cc20_remain_hi            0095B4 RLA    poly_h                    0095B5 RLA    
+poly_r                    0095C6 RLA    poly_s                    0095D6 RLA    
+poly_product              0095E6 RLA    poly1305_tag              009607 RLA    
+aead_key                  009617 RLA    aead_nonce                009637 RLA    
+aead_aad_ptr              009643 RLA    aead_aad_len              009645 RLA    
+aead_data_ptr             009646 RLA    aead_data_len             009648 RLA    
+aead_tag                  00964A RLA    aead_scratch              00965A RLA    
+sqtab_ready               00966A RLA    
+
+
+Imports list:
+-------------
+SESSION_ACTIVE (session.o):
+    timer.o                   src/wg/timer.s(31)
+    boot.o                    src/boot.s(60)
+SESSION_IDLE (session.o):
+    timer.o                   src/wg/timer.s(32)
+add32_to_dst (word32_lib_raw.o):
+    chacha20_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20_lib_raw.s(20)
+    blake2s.o                 src/crypto/blake2s.s(28)
+aead_aad_len (data_lib_raw.o):
+    chacha20poly1305_lib_raw.o /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20poly1305_lib_raw.s(38)
+    transport.o               src/wg/transport.s(37)
+    handshake.o               src/wg/handshake.s(114)
+    cookie.o                  src/wg/cookie.s(57)
+aead_aad_ptr (data_lib_raw.o):
+    chacha20poly1305_lib_raw.o /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20poly1305_lib_raw.s(38)
+    handshake.o               src/wg/handshake.s(113)
+    cookie.o                  src/wg/cookie.s(56)
+aead_data_len (data_lib_raw.o):
+    chacha20poly1305_lib_raw.o /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20poly1305_lib_raw.s(39)
+    transport.o               src/wg/transport.s(40)
+    handshake.o               src/wg/handshake.s(116)
+    cookie.o                  src/wg/cookie.s(59)
+aead_data_ptr (data_lib_raw.o):
+    chacha20poly1305_lib_raw.o /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20poly1305_lib_raw.s(39)
+    transport.o               src/wg/transport.s(39)
+    handshake.o               src/wg/handshake.s(115)
+    cookie.o                  src/wg/cookie.s(58)
+aead_decrypt (chacha20poly1305_lib_raw.o):
+    transport.o               src/wg/transport.s(31)
+    handshake.o               src/wg/handshake.s(69)
+    cookie.o                  src/wg/cookie.s(32)
+aead_encrypt (chacha20poly1305_lib_raw.o):
+    transport.o               src/wg/transport.s(30)
+    handshake.o               src/wg/handshake.s(68)
+aead_key (data_lib_raw.o):
+    chacha20poly1305_lib_raw.o /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20poly1305_lib_raw.s(38)
+    transport.o               src/wg/transport.s(35)
+    handshake.o               src/wg/handshake.s(111)
+    cookie.o                  src/wg/cookie.s(54)
+aead_nonce (data_lib_raw.o):
+    chacha20poly1305_lib_raw.o /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20poly1305_lib_raw.s(38)
+    transport.o               src/wg/transport.s(36)
+    handshake.o               src/wg/handshake.s(112)
+    cookie.o                  src/wg/cookie.s(55)
+aead_scratch (data_lib_raw.o):
+    chacha20poly1305_lib_raw.o /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20poly1305_lib_raw.s(37)
+    poly1305_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/poly1305_lib_raw.s(27)
+aead_tag (data_lib_raw.o):
+    chacha20poly1305_lib_raw.o /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20poly1305_lib_raw.s(39)
+    transport.o               src/wg/transport.s(41)
+    handshake.o               src/wg/handshake.s(117)
+    cookie.o                  src/wg/cookie.s(60)
+b2s_block (data.o):
+    blake2s.o                 src/crypto/blake2s.s(38)
+b2s_buf_len (data.o):
+    blake2s.o                 src/crypto/blake2s.s(42)
+b2s_f (data.o):
+    blake2s.o                 src/crypto/blake2s.s(41)
+b2s_h (data.o):
+    blake2s.o                 src/crypto/blake2s.s(36)
+b2s_hash (data.o):
+    handshake.o               src/wg/handshake.s(102)
+    cookie.o                  src/wg/cookie.s(51)
+    blake2s_kdf.o             src/crypto/blake2s_kdf.s(32)
+    blake2s.o                 src/crypto/blake2s.s(44)
+b2s_out_len (data.o):
+    handshake.o               src/wg/handshake.s(103)
+    cookie.o                  src/wg/cookie.s(50)
+    blake2s.o                 src/crypto/blake2s.s(43)
+b2s_t (data.o):
+    blake2s.o                 src/crypto/blake2s.s(39)
+b2s_t1 (data.o):
+    blake2s.o                 src/crypto/blake2s.s(40)
+b2s_v (data.o):
+    blake2s.o                 src/crypto/blake2s.s(37)
+blake2s_final (blake2s.o):
+    handshake.o               src/wg/handshake.s(57)
+    cookie.o                  src/wg/cookie.s(31)
+    blake2s_kdf.o             src/crypto/blake2s_kdf.s(29)
+blake2s_init (blake2s.o):
+    handshake.o               src/wg/handshake.s(55)
+    cookie.o                  src/wg/cookie.s(29)
+    blake2s_kdf.o             src/crypto/blake2s_kdf.s(27)
+blake2s_update (blake2s.o):
+    handshake.o               src/wg/handshake.s(56)
+    cookie.o                  src/wg/cookie.s(30)
+    blake2s_kdf.o             src/crypto/blake2s_kdf.s(28)
+cc20_buf_pos (exports.o):
+    chacha20_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(27)
+cc20_counter (data_lib_raw.o):
+    chacha20poly1305_lib_raw.o /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20poly1305_lib_raw.s(36)
+    chacha20_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20_lib_raw.s(24)
+    cookie.o                  src/wg/cookie.s(45)
+cc20_data_ptr (exports.o):
+    chacha20poly1305_lib_raw.o /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(27)
+    chacha20_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(27)
+cc20_key (data_lib_raw.o):
+    chacha20poly1305_lib_raw.o /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20poly1305_lib_raw.s(36)
+    chacha20_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20_lib_raw.s(24)
+    cookie.o                  src/wg/cookie.s(44)
+cc20_keystream (exports.o):
+    chacha20poly1305_lib_raw.o /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(32)
+    chacha20_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(32)
+cc20_nonce (data_lib_raw.o):
+    chacha20poly1305_lib_raw.o /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20poly1305_lib_raw.s(36)
+    chacha20_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20_lib_raw.s(24)
+    cookie.o                  src/wg/cookie.s(46)
+cc20_qr_idx (exports.o):
+    chacha20_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(27)
+cc20_remain (exports.o):
+    chacha20poly1305_lib_raw.o /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(27)
+    poly1305_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(27)
+    chacha20_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(27)
+cc20_remain_hi (data_lib_raw.o):
+    chacha20poly1305_lib_raw.o /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20poly1305_lib_raw.s(36)
+    chacha20_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20_lib_raw.s(24)
+cc20_round (exports.o):
+    chacha20_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(27)
+cc20_state (data_lib_raw.o):
+    chacha20_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20_lib_raw.s(24)
+    cookie.o                  src/wg/cookie.s(36)
+cc20_work (exports.o):
+    chacha20_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(32)
+cfg_err_msg (strings.o):
+    boot.o                    src/boot.s(55)
+cfg_loading_msg (strings.o):
+    boot.o                    src/boot.s(53)
+cfg_ok_msg (strings.o):
+    boot.o                    src/boot.s(54)
+cfg_peer_endpoint_ip (data.o):
+    disk_config.o             src/wg/disk_config.s(34)
+    config.o                  src/wg/config.s(15)
+cfg_peer_endpoint_port (data.o):
+    disk_config.o             src/wg/disk_config.s(35)
+    config.o                  src/wg/config.s(16)
+cfg_peer_pub (data.o):
+    disk_config.o             src/wg/disk_config.s(33)
+    config.o                  src/wg/config.s(14)
+    cookie.o                  src/wg/cookie.s(63)
+cfg_preshared_key (data.o):
+    disk_config.o             src/wg/disk_config.s(36)
+    config.o                  src/wg/config.s(17)
+cfg_static_priv (data.o):
+    disk_config.o             src/wg/disk_config.s(31)
+    config.o                  src/wg/config.s(12)
+cfg_static_pub (data.o):
+    disk_config.o             src/wg/disk_config.s(32)
+    config.o                  src/wg/config.s(13)
+chacha20_block (chacha20_lib_raw.o):
+    chacha20poly1305_lib_raw.o /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20poly1305_lib_raw.s(30)
+chacha20_encrypt (chacha20_lib_raw.o):
+    chacha20poly1305_lib_raw.o /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20poly1305_lib_raw.s(30)
+chacha20_init (chacha20_lib_raw.o):
+    chacha20poly1305_lib_raw.o /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20poly1305_lib_raw.s(30)
+    cookie.o                  src/wg/cookie.s(27)
+chacha20_quarter_round (chacha20_lib_raw.o):
+    cookie.o                  src/wg/cookie.s(28)
+chacha_nibswap_hi_tab (data_lib_raw.o):
+    chacha20_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20_lib_raw.s(28)
+chacha_nibswap_lo_tab (data_lib_raw.o):
+    chacha20_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20_lib_raw.s(28)
+config_filename (data.o):
+    disk_config.o             src/wg/disk_config.s(40)
+config_filename_len (data.o):
+    disk_config.o             src/wg/disk_config.s(41)
+config_load (config.o):
+    session.o                 src/wg/session.s(41)
+config_read_file (disk_config.o):
+    boot.o                    src/boot.s(66)
+cookie_buf (data.o):
+    cookie.o                  src/wg/cookie.s(65)
+cookie_handle_type3 (cookie.o):
+    session.o                 src/wg/session.s(51)
+cookie_recv_msg (strings.o):
+    session.o                 src/wg/session.s(89)
+cookie_valid (data.o):
+    handshake.o               src/wg/handshake.s(124)
+    cookie.o                  src/wg/cookie.s(66)
+ct_diff_raw (exports.o):
+    poly1305_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(40)
+ct_sign_mask (exports.o):
+    poly1305_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(40)
+decrypt_fail_msg (strings.o):
+    session.o                 src/wg/session.s(92)
+dhcp_err_msg (strings.o):
+    boot.o                    src/boot.s(41)
+entropy_fill (entropy.o):
+    session.o                 src/wg/session.s(42)
+entropy_init (entropy.o):
+    boot.o                    src/boot.s(67)
+fe25519_add (fe25519.o):
+    x25519.o                  src/crypto/x25519.s(38)
+fe25519_copy (fe25519.o):
+    x25519.o                  src/crypto/x25519.s(35)
+fe25519_cswap (fe25519.o):
+    x25519.o                  src/crypto/x25519.s(40)
+fe25519_inv (fe25519.o):
+    x25519.o                  src/crypto/x25519.s(44)
+fe25519_mul (fe25519.o):
+    x25519.o                  src/crypto/x25519.s(41)
+fe25519_mul_a24 (fe25519.o):
+    x25519.o                  src/crypto/x25519.s(43)
+fe25519_one (fe25519.o):
+    x25519.o                  src/crypto/x25519.s(37)
+fe25519_sqr (fe25519.o):
+    x25519.o                  src/crypto/x25519.s(42)
+fe25519_sub (fe25519.o):
+    x25519.o                  src/crypto/x25519.s(39)
+fe25519_zero (fe25519.o):
+    x25519.o                  src/crypto/x25519.s(36)
+fe_p (data.o):
+    fe25519.o                 src/crypto/fe25519.s(58)
+fe_tmp1 (data.o):
+    x25519.o                  src/crypto/x25519.s(62)
+    fe25519.o                 src/crypto/fe25519.s(55)
+fe_tmp2 (data.o):
+    x25519.o                  src/crypto/x25519.s(63)
+    fe25519.o                 src/crypto/fe25519.s(56)
+fe_tmp3 (data.o):
+    x25519.o                  src/crypto/x25519.s(64)
+    fe25519.o                 src/crypto/fe25519.s(57)
+fe_tmp4 (data.o):
+    x25519.o                  src/crypto/x25519.s(65)
+fe_wide (data.o):
+    fe25519.o                 src/crypto/fe25519.s(54)
+hmac_data_len (data.o):
+    blake2s_kdf.o             src/crypto/blake2s_kdf.s(39)
+hmac_data_ptr (data.o):
+    blake2s_kdf.o             src/crypto/blake2s_kdf.s(38)
+hmac_inner_hash (data.o):
+    blake2s_kdf.o             src/crypto/blake2s_kdf.s(35)
+hmac_ipad (data.o):
+    blake2s_kdf.o             src/crypto/blake2s_kdf.s(33)
+hmac_key_len (data.o):
+    blake2s_kdf.o             src/crypto/blake2s_kdf.s(37)
+hmac_key_ptr (data.o):
+    blake2s_kdf.o             src/crypto/blake2s_kdf.s(36)
+hmac_opad (data.o):
+    blake2s_kdf.o             src/crypto/blake2s_kdf.s(34)
+hs_c (data.o):
+    handshake.o               src/wg/handshake.s(76)
+hs_create_initiation (handshake.o):
+    session.o                 src/wg/session.s(45)
+hs_dh_result (data.o):
+    handshake.o               src/wg/handshake.s(83)
+hs_ephem_priv (data.o):
+    session.o                 src/wg/session.s(64)
+    handshake.o               src/wg/handshake.s(81)
+hs_ephem_pub (data.o):
+    handshake.o               src/wg/handshake.s(82)
+hs_fail_msg (strings.o):
+    session.o                 src/wg/session.s(91)
+hs_h (data.o):
+    handshake.o               src/wg/handshake.s(77)
+hs_mac1_key (data.o):
+    handshake.o               src/wg/handshake.s(86)
+hs_ok_msg (strings.o):
+    session.o                 src/wg/session.s(90)
+hs_packet (data.o):
+    session.o                 src/wg/session.s(66)
+    handshake.o               src/wg/handshake.s(87)
+    cookie.o                  src/wg/cookie.s(67)
+hs_preshared_key (data.o):
+    handshake.o               src/wg/handshake.s(91)
+    config.o                  src/wg/config.s(21)
+hs_process_response (handshake.o):
+    session.o                 src/wg/session.s(46)
+hs_resp_packet (data.o):
+    session.o                 src/wg/session.s(67)
+    transport.o               src/wg/transport.s(47)
+    handshake.o               src/wg/handshake.s(88)
+hs_resp_pub (data.o):
+    handshake.o               src/wg/handshake.s(80)
+    config.o                  src/wg/config.s(20)
+hs_sender_idx (data.o):
+    session.o                 src/wg/session.s(65)
+    handshake.o               src/wg/handshake.s(84)
+hs_set_mac2 (cookie.o):
+    handshake.o               src/wg/handshake.s(72)
+hs_start_msg (strings.o):
+    boot.o                    src/boot.s(49)
+hs_static_priv (data.o):
+    handshake.o               src/wg/handshake.s(78)
+    config.o                  src/wg/config.s(18)
+hs_static_pub (data.o):
+    handshake.o               src/wg/handshake.s(79)
+    config.o                  src/wg/config.s(19)
+hs_timestamp (data.o):
+    handshake.o               src/wg/handshake.s(85)
+    tai64n.o                  src/wg/tai64n.s(17)
+hs_transport_recv (data.o):
+    transport.o               src/wg/transport.s(49)
+    handshake.o               src/wg/handshake.s(90)
+hs_transport_send (data.o):
+    transport.o               src/wg/transport.s(48)
+    handshake.o               src/wg/handshake.s(89)
+icmp_build_echo (ip_build.o):
+    boot.o                    src/boot.s(64)
+icmp_parse_reply (ip_build.o):
+    session.o                 src/wg/session.s(57)
+input_buffer (data.o):
+    handshake.o               src/wg/handshake.s(123)
+    cookie.o                  src/wg/cookie.s(68)
+    blake2s.o                 src/crypto/blake2s.s(45)
+ip_cksum_result (data.o):
+    ip_build.o                src/wg/ip_build.s(20)
+ip_hdr_template (data.o):
+    ip_build.o                src/wg/ip_build.s(19)
+ip_packet_buf (data.o):
+    ip_build.o                src/wg/ip_build.s(18)
+    boot.o                    src/boot.s(31)
+ip_pkt_len (data.o):
+    ip_build.o                src/wg/ip_build.s(21)
+    boot.o                    src/boot.s(32)
+kdf_1 (blake2s_kdf.o):
+    handshake.o               src/wg/handshake.s(58)
+kdf_2 (blake2s_kdf.o):
+    handshake.o               src/wg/handshake.s(59)
+kdf_3 (blake2s_kdf.o):
+    handshake.o               src/wg/handshake.s(60)
+kdf_input_len (data.o):
+    handshake.o               src/wg/handshake.s(99)
+    blake2s_kdf.o             src/crypto/blake2s_kdf.s(45)
+kdf_input_ptr (data.o):
+    handshake.o               src/wg/handshake.s(98)
+    blake2s_kdf.o             src/crypto/blake2s_kdf.s(44)
+kdf_out1 (data.o):
+    handshake.o               src/wg/handshake.s(95)
+    blake2s_kdf.o             src/crypto/blake2s_kdf.s(40)
+kdf_out2 (data.o):
+    handshake.o               src/wg/handshake.s(96)
+    blake2s_kdf.o             src/crypto/blake2s_kdf.s(41)
+kdf_out3 (data.o):
+    handshake.o               src/wg/handshake.s(97)
+    blake2s_kdf.o             src/crypto/blake2s_kdf.s(42)
+kdf_prk (data.o):
+    handshake.o               src/wg/handshake.s(94)
+    blake2s_kdf.o             src/crypto/blake2s_kdf.s(43)
+keepalive_msg (strings.o):
+    timer.o                   src/wg/timer.s(47)
+last_send_jiffy (data.o):
+    timer.o                   src/wg/timer.s(38)
+msg_input_buf (data.o):
+    boot.o                    src/boot.s(33)
+msg_input_len (data.o):
+    boot.o                    src/boot.s(34)
+msg_port (data.o):
+    ip_build.o                src/wg/ip_build.s(25)
+msg_prompt (strings.o):
+    boot.o                    src/boot.s(52)
+msg_recv_hdr (strings.o):
+    session.o                 src/wg/session.s(95)
+msg_recv_len (data.o):
+    ip_build.o                src/wg/ip_build.s(27)
+    session.o                 src/wg/session.s(86)
+msg_recv_ptr (data.o):
+    ip_build.o                src/wg/ip_build.s(26)
+    session.o                 src/wg/session.s(85)
+mul38_hi_tab (data.o):
+    fe25519.o                 src/crypto/fe25519.s(51)
+mul38_lo_tab (data.o):
+    fe25519.o                 src/crypto/fe25519.s(50)
+mul_8x8 (poly1305_lib_raw.o):
+    fe25519.o                 src/crypto/fe25519.s(41)
+mul_cached_a (data.o):
+    fe25519.o                 src/crypto/fe25519.s(45)
+mul_dma_hi (data.o):
+    fe25519.o                 src/crypto/fe25519.s(43)
+mul_dma_lo (data.o):
+    fe25519.o                 src/crypto/fe25519.s(42)
+mul_src2_buf (data.o):
+    fe25519.o                 src/crypto/fe25519.s(44)
+net_dhcp (net.o):
+    boot.o                    src/net_abi.inc(23)
+net_dhcp_msg (strings.o):
+    boot.o                    src/boot.s(40)
+net_err_msg (strings.o):
+    boot.o                    src/boot.s(39)
+net_init (net.o):
+    boot.o                    src/net_abi.inc(22)
+net_init_msg (strings.o):
+    boot.o                    src/boot.s(38)
+net_initialized (data.o):
+    boot.o                    src/boot.s(25)
+net_listen_err_msg (strings.o):
+    boot.o                    src/boot.s(44)
+net_listen_msg (strings.o):
+    boot.o                    src/boot.s(43)
+net_ok_msg (strings.o):
+    boot.o                    src/boot.s(42)
+net_poll (net.o):
+    boot.o                    src/net_abi.inc(24)
+net_print_ip (net.o):
+    boot.o                    src/net_abi.inc(37)
+net_udp_listen (net.o):
+    boot.o                    src/net_abi.inc(27)
+net_udp_send (net.o):
+    session.o                 src/wg/session.s(55)
+    transport.o               src/wg/transport.s(32)
+not_active_msg (strings.o):
+    boot.o                    src/boot.s(51)
+ping_reply_msg (strings.o):
+    session.o                 src/wg/session.s(94)
+ping_sent_msg (strings.o):
+    boot.o                    src/boot.s(50)
+ping_seq (data.o):
+    ip_build.o                src/wg/ip_build.s(24)
+ping_target_ip (data.o):
+    disk_config.o             src/wg/disk_config.s(38)
+    ip_build.o                src/wg/ip_build.s(23)
+poly1305_block (poly1305_lib_raw.o):
+    chacha20poly1305_lib_raw.o /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20poly1305_lib_raw.s(33)
+poly1305_final (poly1305_lib_raw.o):
+    chacha20poly1305_lib_raw.o /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20poly1305_lib_raw.s(33)
+poly1305_init (poly1305_lib_raw.o):
+    chacha20poly1305_lib_raw.o /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20poly1305_lib_raw.s(33)
+poly1305_tag (data_lib_raw.o):
+    chacha20poly1305_lib_raw.o /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20poly1305_lib_raw.s(37)
+    poly1305_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/poly1305_lib_raw.s(26)
+    transport.o               src/wg/transport.s(44)
+    handshake.o               src/wg/handshake.s(120)
+poly_carry (exports.o):
+    chacha20poly1305_lib_raw.o /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(35)
+    poly1305_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(35)
+poly_h (data_lib_raw.o):
+    poly1305_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/poly1305_lib_raw.s(26)
+poly_i (exports.o):
+    poly1305_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(35)
+poly_j (exports.o):
+    poly1305_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(35)
+poly_prod_hi (poly1305_lib_raw.o):
+    fe25519.o                 src/crypto/fe25519.s(53)
+poly_prod_lo (poly1305_lib_raw.o):
+    fe25519.o                 src/crypto/fe25519.s(52)
+poly_product (data_lib_raw.o):
+    poly1305_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/poly1305_lib_raw.s(26)
+poly_r (data_lib_raw.o):
+    chacha20poly1305_lib_raw.o /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20poly1305_lib_raw.s(37)
+    poly1305_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/poly1305_lib_raw.s(26)
+poly_s (data_lib_raw.o):
+    chacha20poly1305_lib_raw.o /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20poly1305_lib_raw.s(37)
+    poly1305_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/poly1305_lib_raw.s(26)
+poly_tmp (exports.o):
+    poly1305_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(35)
+print_string (boot.o):
+    session.o                 src/wg/session.s(60)
+    timer.o                   src/wg/timer.s(43)
+recv_data_msg (strings.o):
+    session.o                 src/wg/session.s(93)
+rekey_msg (strings.o):
+    timer.o                   src/wg/timer.s(46)
+rekey_pending (data.o):
+    transport.o               src/wg/transport.s(76)
+    timer.o                   src/wg/timer.s(36)
+reu_mul_init (fe25519.o):
+    boot.o                    src/crypto_abi.inc(72)
+rotl32_12 (word32_lib_raw.o):
+    chacha20_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20_lib_raw.s(21)
+rotl32_7 (word32_lib_raw.o):
+    chacha20_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20_lib_raw.s(21)
+rotl32_8 (word32_lib_raw.o):
+    chacha20_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20_lib_raw.s(21)
+rotr32_12 (word32_lib_raw.o):
+    blake2s.o                 src/crypto/blake2s.s(31)
+rotr32_16 (word32_lib_raw.o):
+    chacha20_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20_lib_raw.s(21)
+    blake2s.o                 src/crypto/blake2s.s(30)
+rotr32_7 (word32_lib_raw.o):
+    blake2s.o                 src/crypto/blake2s.s(33)
+rotr32_8 (word32_lib_raw.o):
+    blake2s.o                 src/crypto/blake2s.s(32)
+rw_bit_mask (data.o):
+    transport.o               src/wg/transport.s(70)
+rw_bitmap (data.o):
+    transport.o               src/wg/transport.s(68)
+rw_counter_max (data.o):
+    transport.o               src/wg/transport.s(69)
+rw_new_counter (data.o):
+    transport.o               src/wg/transport.s(73)
+rw_shift_hi (data.o):
+    transport.o               src/wg/transport.s(72)
+rw_shift_lo (data.o):
+    transport.o               src/wg/transport.s(71)
+send_err_msg (strings.o):
+    boot.o                    src/boot.s(46)
+send_ok_msg (strings.o):
+    boot.o                    src/boot.s(45)
+session_expired_msg (strings.o):
+    timer.o                   src/wg/timer.s(45)
+session_handle_packet (session.o):
+    boot.o                    src/boot.s(58)
+session_initiate (session.o):
+    boot.o                    src/boot.s(59)
+session_start_jiffy (data.o):
+    timer.o                   src/wg/timer.s(37)
+sqtab2_hi (data.o):
+    fe25519.o                 src/crypto/fe25519.s(49)
+sqtab2_lo (data.o):
+    fe25519.o                 src/crypto/fe25519.s(48)
+sqtab_hi (exports.o):
+    fe25519.o                 src/crypto/fe25519.s(47)
+sqtab_init (poly1305_lib_raw.o):
+    boot.o                    src/crypto_abi.inc(71)
+sqtab_lo (exports.o):
+    fe25519.o                 src/crypto/fe25519.s(46)
+sqtab_ready (data_lib_raw.o):
+    poly1305_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/poly1305_lib_raw.s(27)
+tai64n_base_time (data.o):
+    disk_config.o             src/wg/disk_config.s(39)
+    tai64n.o                  src/wg/tai64n.s(14)
+tai64n_increment (tai64n.o):
+    session.o                 src/wg/session.s(43)
+tai64n_init (tai64n.o):
+    config.o                  src/wg/config.s(24)
+tai64n_init_jiffy (data.o):
+    tai64n.o                  src/wg/tai64n.s(15)
+tai64n_seq (data.o):
+    tai64n.o                  src/wg/tai64n.s(16)
+test_payload (strings.o):
+    boot.o                    src/boot.s(47)
+test_payload_len (strings.o):
+    boot.o                    src/boot.s(48)
+timer_check (timer.o):
+    boot.o                    src/boot.s(61)
+timer_mark_send (timer.o):
+    boot.o                    src/boot.s(62)
+timer_session_start (timer.o):
+    session.o                 src/wg/session.s(53)
+title_msg (strings.o):
+    boot.o                    src/boot.s(37)
+tp_encrypt_error (data.o):
+    transport.o               src/wg/transport.s(65)
+tp_packet (data.o):
+    ip_build.o                src/wg/ip_build.s(28)
+    session.o                 src/wg/session.s(81)
+    transport.o               src/wg/transport.s(63)
+tp_packet_len (data.o):
+    session.o                 src/wg/session.s(82)
+    transport.o               src/wg/transport.s(64)
+tp_payload_len (data.o):
+    session.o                 src/wg/session.s(83)
+    transport.o               src/wg/transport.s(62)
+    timer.o                   src/wg/timer.s(39)
+    boot.o                    src/boot.s(30)
+tp_payload_ptr (data.o):
+    transport.o               src/wg/transport.s(61)
+    boot.o                    src/boot.s(29)
+tp_peer_recv_idx (data.o):
+    transport.o               src/wg/transport.s(60)
+tp_recv_counter (data.o):
+    transport.o               src/wg/transport.s(58)
+tp_recv_counter_tmp (data.o):
+    transport.o               src/wg/transport.s(59)
+tp_send_counter (data.o):
+    transport.o               src/wg/transport.s(57)
+transport_decrypt (transport.o):
+    session.o                 src/wg/session.s(49)
+transport_init (transport.o):
+    session.o                 src/wg/session.s(48)
+transport_send (transport.o):
+    timer.o                   src/wg/timer.s(41)
+    boot.o                    src/boot.s(63)
+tunnel_ip (data.o):
+    disk_config.o             src/wg/disk_config.s(37)
+    ip_build.o                src/wg/ip_build.s(22)
+uci_abort (uci_cmd.o):
+    net.o                     src/net/uci/net.s(53)
+uci_ack (uci_cmd.o):
+    net.o                     src/net/uci/net.s(63)
+uci_begin_cmd (uci_cmd.o):
+    net.o                     src/net/uci/net.s(56)
+uci_check_err (uci_cmd.o):
+    net.o                     src/net/uci/net.s(59)
+uci_drain_resp (uci_cmd.o):
+    net.o                     src/net/uci/net.s(61)
+uci_drain_status (uci_cmd.o):
+    net.o                     src/net/uci/net.s(62)
+uci_push_wait (uci_cmd.o):
+    net.o                     src/net/uci/net.s(58)
+uci_put_byte (uci_cmd.o):
+    net.o                     src/net/uci/net.s(57)
+uci_read_resp_bytes (uci_cmd.o):
+    net.o                     src/net/uci/net.s(60)
+uci_resp_dst (uci_cmd.o):
+    net.o                     src/net/uci/net.s(64)
+uci_resp_max (uci_cmd.o):
+    net.o                     src/net/uci/net.s(65)
+uci_wait_idle (uci_cmd.o):
+    net.o                     src/net/uci/net.s(54)
+uci_wait_not_busy (uci_cmd.o):
+    net.o                     src/net/uci/net.s(55)
+udp_recv_buf (data.o):
+    net.o                     src/net/uci/net.s(69)
+    session.o                 src/wg/session.s(70)
+    transport.o               src/wg/transport.s(52)
+    cookie.o                  src/wg/cookie.s(64)
+udp_recv_len (data.o):
+    net.o                     src/net/uci/net.s(70)
+    session.o                 src/wg/session.s(71)
+    transport.o               src/wg/transport.s(53)
+udp_recv_ready (data.o):
+    net.o                     src/net/uci/net.s(71)
+    session.o                 src/wg/session.s(72)
+    boot.o                    src/boot.s(27)
+udp_recv_src_ip (data.o):
+    net.o                     src/net/uci/net.s(72)
+    session.o                 src/wg/session.s(73)
+udp_recv_src_port (data.o):
+    net.o                     src/net/uci/net.s(73)
+    session.o                 src/wg/session.s(74)
+udp_send_len_local (net.o):
+    session.o                 src/wg/session.s(69)
+    transport.o               src/wg/transport.s(54)
+udp_tunnel_build (ip_build.o):
+    boot.o                    src/boot.s(65)
+udp_tunnel_parse (ip_build.o):
+    session.o                 src/wg/session.s(58)
+w32_dst (exports.o):
+    chacha20_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(24)
+    word32_lib_raw.o          /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(24)
+w32_src1 (exports.o):
+    chacha20_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(24)
+    word32_lib_raw.o          /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(24)
+w32_src2 (exports.o):
+    word32_lib_raw.o          /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(24)
+wg_local_port (data.o):
+    net.o                     src/net/uci/net.s(76)
+    boot.o                    src/boot.s(28)
+wg_peer_ip (data.o):
+    net.o                     src/net/uci/net.s(74)
+    session.o                 src/wg/session.s(76)
+    config.o                  src/wg/config.s(22)
+wg_peer_port (data.o):
+    net.o                     src/net/uci/net.s(75)
+    session.o                 src/wg/session.s(77)
+    config.o                  src/wg/config.s(23)
+wg_state (data.o):
+    session.o                 src/wg/session.s(79)
+    timer.o                   src/wg/timer.s(35)
+    boot.o                    src/boot.s(26)
+x25519_base (x25519.o):
+    handshake.o               src/wg/handshake.s(65)
+x25519_clamp (x25519.o):
+    handshake.o               src/wg/handshake.s(63)
+x25519_scalarmult (x25519.o):
+    handshake.o               src/wg/handshake.s(64)
+x25_a (data.o):
+    x25519.o                  src/crypto/x25519.s(55)
+    fe25519.o                 src/crypto/fe25519.s(59)
+x25_b (data.o):
+    x25519.o                  src/crypto/x25519.s(56)
+    fe25519.o                 src/crypto/fe25519.s(60)
+x25_basepoint (data.o):
+    x25519.o                  src/crypto/x25519.s(50)
+x25_cb (data.o):
+    x25519.o                  src/crypto/x25519.s(58)
+    fe25519.o                 src/crypto/fe25519.s(62)
+x25_da (data.o):
+    x25519.o                  src/crypto/x25519.s(57)
+    fe25519.o                 src/crypto/fe25519.s(61)
+x25_e (data.o):
+    x25519.o                  src/crypto/x25519.s(59)
+x25_result (data.o):
+    handshake.o               src/wg/handshake.s(108)
+    x25519.o                  src/crypto/x25519.s(49)
+x25_scalar (data.o):
+    handshake.o               src/wg/handshake.s(106)
+    x25519.o                  src/crypto/x25519.s(47)
+x25_u (data.o):
+    handshake.o               src/wg/handshake.s(107)
+    x25519.o                  src/crypto/x25519.s(48)
+x25_x2 (data.o):
+    x25519.o                  src/crypto/x25519.s(51)
+x25_x3 (data.o):
+    x25519.o                  src/crypto/x25519.s(53)
+x25_z2 (data.o):
+    x25519.o                  src/crypto/x25519.s(52)
+x25_z3 (data.o):
+    x25519.o                  src/crypto/x25519.s(54)
+xor32_in_place (word32_lib_raw.o):
+    chacha20_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/chacha20_lib_raw.s(20)
+    blake2s.o                 src/crypto/blake2s.s(29)
+zp_ptr1 (exports.o):
+    chacha20poly1305_lib_raw.o /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(43)
+    poly1305_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(43)
+zp_tmp1 (exports.o):
+    chacha20poly1305_lib_raw.o /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(21)
+    chacha20_lib_raw.o        /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(21)
+    word32_lib_raw.o          /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(21)
+zp_tmp2 (exports.o):
+    chacha20poly1305_lib_raw.o /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(21)
+    word32_lib_raw.o          /Users/someone/Documents/c64-wireguard/.claude/worktrees/agent-a12aa83ad4e908f58/build/lib/chacha20poly1305_staging/constants_lib.s(21)
+
