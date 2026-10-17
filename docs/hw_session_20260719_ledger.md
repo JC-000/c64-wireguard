@@ -1,5 +1,10 @@
 # Hardware session ledger — 2026-07-19 — C64U @ 10.53.21.158
 
+> Committed 2026-10-17 from the gitignored `artifacts/`. Logs it cites are in
+> `docs/evidence/`; paths inside those raw logs still name the old
+> `artifacts/` location. Raw bus traces (`uci_trace_*`, `uci_size_probe_*`)
+> were deliberately not kept.
+
 Device: "C64 Ultimate" (new product line), firmware 1.1.0, FPGA 122, core 1.49,
 hostname C64-Ultimate-XXXXXX. NOT the U64E fw 3.14d the runbook targets.
 Operating assumption (user decision): fw 3.14d quirk lore holds until proven
@@ -74,7 +79,7 @@ x25519-sibling --dump-aead, stage 2. Result:
   REU + PR#40 re-init fix applied to the script) against the SAME x25519sib
   PRG — full session_handle_packet path was NOT covered by the 07-16 VICE
   smoke (only helpers were), so a VICE repro of Bug #2 is still possible.
-  Log: scratchpad/c64wg_type2_vice_x25519sib.log (hours).
+  Log: scratchpad/c64wg_type2_vice_x25519sib.log (hours) (not preserved).
 
 ## 2026-07-20 afternoon — Bug #2 hypothesis elimination + ladder instrumentation
 - VICE type2 trials (test_type2_slow.py + REU/PR#40 fixes applied to script):
@@ -82,7 +87,7 @@ x25519-sibling --dump-aead, stage 2. Result:
   emulation; it's a hardware-environment interaction. (The old "~100 min per
   X25519 in warp" docstring is obsolete — sibling+REU is ~50× faster.)
 - REU/UCI corruption probe (epoch #2 run_prg #3, scratchpad
-  c64wg_reu_uci_corruption_probe.py): fe25519_mul+sqr 40 vectors pre-UCI,
+  c64wg_reu_uci_corruption_probe.py, not preserved): fe25519_mul+sqr 40 vectors pre-UCI,
   echo round trip, 120 vectors post-UCI ⇒ **0 mismatches**. SOCKET_READ
   traffic does NOT corrupt single REU fe ops. Hypothesis refuted.
 - Ladder instrumentation implemented (analyst's spec; analyst went
@@ -107,7 +112,7 @@ x25519-sibling --dump-aead, stage 2. Result:
   correct (blake2s(h||e) reproduces resp[0] exactly). Offline brute of
   ~60 wrong-input candidates (truncations, offsets, swapped operands,
   alt pre-states): NO match for the C64's slot0.
-  Log archived: artifacts/ (ladder run log). udp_recv after 1 poll.
+  Log: not preserved (lost before 2026-10-17). udp_recv after 1 poll.
 - KEY STRUCTURAL FACT: VICE type2 test writes udp_recv_buf directly and
   never runs net_poll ⇒ net_poll's UCI receive path was the only
   VICE-unexercised code before the divergence.
@@ -212,7 +217,7 @@ C64 WireGuard handshake). Then strip debug instrumentation for the PR.
 - NOTE: the hardware green run uses the instrumented+fixed build 0a936f1d
   (has full ladder visibility); the clean PR build ccb7d4ef is proven
   equivalent by VICE + the non-interfering nature of the RAM-snapshot
-  instrumentation. (2026-10-17: this ledger and its logs are now committed; logs in docs/evidence/.)
+  instrumentation.
 - Green run launched on fixed build; STAGE 1 ✓ (Type-1 @ 828.8s), Type-2
   received, session_handle_packet running with the fix.
 - **12:09:47 — wg_state = 2, PASS — UCI WireGuard handshake stage 2.**

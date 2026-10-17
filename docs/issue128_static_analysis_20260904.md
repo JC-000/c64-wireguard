@@ -4,7 +4,7 @@ Consolidated from six partial messages. Authoritative version.
 
 Sources: `src/`, `libs/chacha20poly1305/`, `build/labels.txt`, `build/wireguard.map`,
 commit `9fa1923`, and the raw run logs
-`.../12f6305e-.../scratchpad/{sweep2.log,sweep3.log}`.
+`.../12f6305e-.../scratchpad/{sweep2.log,sweep3.log}` (not preserved).
 
 ---
 
