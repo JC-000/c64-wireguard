@@ -19,10 +19,10 @@
 ; that is the likely origin of the 20-25% figure.
 ;
 ; WHY WG OWNS THESE 8 BYTES rather than importing the sibling's vic_blank:
-; the in-tree build (USE_X25519_SIBLING=0) links no sibling archive, so an
-; import would need an .ifdef at every call site and would silently do
-; nothing in that configuration. Costing eight bytes to keep all four build
-; configurations behaving identically is the right trade.
+; historically the in-tree build linked no sibling archive, so an import
+; would have needed an .ifdef at every call site. That build was retired
+; 2026-10-18 (issue #69); switching to the sibling's vic_blank is now
+; possible but would change the PRG, so it is left for a separate change.
 ;
 ; DISPLAY POLICY: blanking is scoped to individual crypto operations, never
 ; held across the whole handshake. The handshake is ~20 minutes and prints

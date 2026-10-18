@@ -7,16 +7,18 @@
 ; source of truth for which bank/offset each consumer owns.
 ;
 ; Adapted from c64-https/src/crypto/shared/reu_layout.inc (same project
-; family). The bank map below matches WG's existing in-tree REU usage
-; verbatim — `src/crypto/fe25519.s:reu_mul_init` already writes to banks
-; 0-1 with `bank = a >> 7`, `offset = (a & $7F) * 512`. Codifying the map
+; family). The bank map below was written to match WG's then in-tree REU
+; usage verbatim — the in-tree `src/crypto/fe25519.s:reu_mul_init` (retired
+; 2026-10-18 with the legacy build, issue #69) wrote to banks 0-1 with
+; `bank = a >> 7`, `offset = (a & $7F) * 512`. Codifying the map
 ; here lets future consumers (chacha sibling Profile A, code overlays,
 ; P-256 / P-384 precompute, etc.) coexist without bank-allocation fights.
 ;
 ; Bank map (REU 24-bit address):
-;   $00000-$1FFFF  (banks 0-1, 128 KB)  x25519 mul tables   (in-tree default)
+;   $00000-$1FFFF  (banks 0-1, 128 KB)  x25519 mul tables   (retired in-tree
+;                                                         build, issue #69)
 ;   $00000-$1FFFF + $30000-$5FFFF  (banks 0,1,3,4,5)  x25519 sibling
-;                                                     (USE_X25519_SIBLING=1, v0.6.0)
+;                                                     (shipped; since v0.6.0)
 ;   $20000-$2FFFF  (bank 2,    64 KB)   overlay store (3x 8 KB slots + slack)
 ;   $30000-$3FFFF  (bank 3,    64 KB)   P-256 precompute    (RESERVED)
 ;   $40000-$7FFFF  (banks 4-7, 256 KB)  P-384 precompute + headroom (RESERVED)
@@ -66,7 +68,9 @@
 ; --- x25519 mul tables (banks 0-1, 128 KB) ---
 ; Layout: row a (a = 0..255) at bank=(a>>7), offset=(a & $7F) * $200.
 ; Each row is 512 bytes: 256 bytes of low product, then 256 bytes of high.
-; Owned by src/crypto/fe25519.s:reu_mul_init / reu_fetch_mul_row.
+; Was owned by the in-tree src/crypto/fe25519.s:reu_mul_init /
+; reu_fetch_mul_row, retired 2026-10-18 (issue #69). The sibling's own
+; layout is governed by its manifest (LIB_X25519_REU_BANKS_USED).
 .ifndef REU_X25519_MUL_TABLES_BASE
 REU_X25519_MUL_TABLES_BASE = $00000
 .endif
@@ -75,8 +79,8 @@ REU_X25519_MUL_TABLES_BASE = $00000
 ; NOTE: offset $0000-$003F in bank 2 is reserved by the c64-x25519 sibling
 ; as a 64-byte zero buffer for `reu_clear_wide` (DMA-zeros fe_wide on the
 ; C64 side). Overlay images start at offset $0100 so they do not collide.
-; (WG's in-tree fe25519 does not currently use reu_clear_wide; the slot
-; is reserved for future sibling-import compatibility.)
+; (The retired in-tree fe25519 never used reu_clear_wide; the slot is
+; reserved for sibling compatibility.)
 .ifndef REU_OVERLAY_STORE_BASE
 REU_OVERLAY_STORE_BASE     = $20100
 .endif

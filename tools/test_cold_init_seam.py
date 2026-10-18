@@ -423,15 +423,22 @@ def main() -> int:
     size = labels.get(SPAN_SIZE)
 
     print("=== reclaimed cold-init span ===")
-    if lo is None or size is None:
-        # USE_X25519_SIBLING=0 links no such segment, so there is nothing to
-        # reclaim and nothing to protect. Report it rather than passing mute:
-        # a silent pass here is indistinguishable from a check that has
-        # stopped resolving its own symbols.
-        print(f"  NOTE  {SPAN_LOAD}/{SPAN_SIZE} absent from labels.txt — "
-              f"no cold segment in this link, nothing to check")
-        print("\nResults: 0/0 passed, 0 failed")
-        return 0
+    if lo is None or size is None or size == 0:
+        # This used to report "0/0 passed" and exit 0, for the legacy
+        # USE_X25519_SIBLING=0 build, which linked no cold segment. That
+        # build was RETIRED 2026-10-18 (issue #69): the x25519 archive is in
+        # every link and its cold segment is never empty (826 B at REU=1,
+        # 160 B at REU=0). So a missing or empty span now means this check
+        # has stopped resolving its own symbols, or the cfg lost
+        # `define = yes` — a vacuous pass either way.
+        what = ("absent from labels.txt" if lo is None or size is None
+                else "present but the span is EMPTY (size 0)")
+        print(f"  FAIL  {SPAN_LOAD}/{SPAN_SIZE} {what} — every build links "
+              f"the x25519 archive and its LIB_X25519_INIT_CODE, so there is "
+              f"nothing legitimate to skip (the build that had no cold "
+              f"segment was retired, issue #69)")
+        print("\nResults: 0/1 passed, 1 failed")
+        return 1
 
     hi = lo + size
     print(f"  ${lo:04X}-${hi - 1:04X}  ({size} bytes), from {SPAN_LOAD} "

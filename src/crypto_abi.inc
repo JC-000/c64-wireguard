@@ -1,10 +1,10 @@
 ; =============================================================================
 ; src/crypto_abi.inc — public crypto API consumed by WireGuard protocol layers.
 ;
-; Drop-in contract: any implementation (in-tree today, sibling library
-; tomorrow) must export these exact symbols with these exact calling
-; conventions. Swapping implementation = changing the link line, no
-; call-site changes.
+; Drop-in contract: any implementation must export these exact symbols
+; with these exact calling conventions. Since issue #69 the sibling
+; libraries are the only implementation (the legacy in-tree crypto was
+; retired 2026-10-18).
 ;
 ; Sibling library correspondence:
 ;   fe25519_* / x25519_*  → c64-x25519           (src/x25519.inc)
@@ -93,9 +93,6 @@
 ; cycles thrown away on the first packet. Their INTEGRATION.md is
 ; explicit: "Always call it once at boot."
 ;
-; Sibling-only: the in-tree src/crypto/poly1305.s has no sqtab_ready and
-; no lib_init entry point, so the 0/0 build keeps calling sqtab_init.
-;
 ; CALL IT EXACTLY ONCE, AT BOOT (issue #103). Upstream documents these
 ; entry points as safe to call repeatedly, and for the library that is
 ; true. It is no longer true of this image: src/boot.s reclaims
@@ -106,6 +103,4 @@
 ; `jsr sqtab_init` is safe only because sqtab_ready is set here and no
 ; code clears it; if corruption ever clears it, that call is fatal rather
 ; than merely wasteful, which is the trade this image makes.
-.ifdef USE_CHACHA_SIBLING
 .import poly1305_lib_init
-.endif

@@ -15,7 +15,8 @@
 ;   cfg/c64-wireguard-ip65.cfg  SQTAB_HOLE start
 ;   cfg/c64-wireguard-uci.cfg   SQTAB_HOLE start
 ;   src/exports.s               sqtab_lo / sqtab_hi (sibling build)
-;   src/crypto/poly1305.s       sqtab_lo / sqtab_hi (in-tree build)
+;   src/crypto/poly1305.s       sqtab_lo / sqtab_hi (in-tree build; file
+;                               retired 2026-10-18, issue #69)
 ;   tools/integration/build_x25519.sh  -D LIB_SHARED_SQTAB_BASE=32768
 ; Nothing tied them together. Editing one and missing another would have
 ; pointed sqtab_init at a window the cfg does not reserve, so the table
