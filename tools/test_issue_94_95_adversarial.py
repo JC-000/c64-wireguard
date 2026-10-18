@@ -69,7 +69,7 @@ from c64_test_harness import (
     read_bytes, write_bytes, jsr,
 )
 from c64_test_harness.transport import TimeoutError as HarnessTimeoutError
-from vice_util import binary_wait_for_boot_ready
+from vice_util import binary_wait_for_boot_ready, vice_reu_args
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "wireguard.prg")
@@ -776,7 +776,7 @@ def main():
     # fe25519's REU row fetches.  Harmless on a REU=0 build (the label is
     # absent and the cartridge simply goes unused).
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
-                        extra_args=["-reu", "-reusize", "512"])
+                        extra_args=vice_reu_args(labels))
     with ViceInstanceManager(config=config) as mgr:
         t_boot = time.monotonic()
         inst = mgr.acquire()

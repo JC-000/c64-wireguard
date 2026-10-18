@@ -32,7 +32,7 @@ from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
     read_bytes, write_bytes, jsr,
 )
-from vice_util import binary_wait_for_boot_ready
+from vice_util import binary_wait_for_boot_ready, vice_reu_args
 
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
@@ -195,7 +195,9 @@ def main():
     ap.add_argument("--labels", default=os.path.join(PROJECT_ROOT, "build",
                                                      "labels.txt"))
     ap.add_argument("--reu", action="store_true",
-                    help="attach a 512K REU (required by a REU=1 build)")
+                    help="DEPRECATED, ignored: the REU attachment is now "
+                         "derived from the build (vice_util.vice_reu_args, "
+                         "issue #69)")
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--prove-detector", action="store_true",
                     help="deliberately corrupt one byte so every check must fail")
@@ -205,7 +207,7 @@ def main():
 
     seed = args.seed if args.seed is not None else random.randrange(1 << 30)
     rng = random.Random(seed)
-    print(f"seed={seed}  prg={args.prg}  reu={args.reu}")
+    print(f"seed={seed}  prg={args.prg}")
 
     labels = Labels.from_file(args.labels)
     for name in ("aead_encrypt", "aead_decrypt", "aead_key", "aead_nonce",
@@ -219,7 +221,11 @@ def main():
              if args.sizes else default_sizes())
     print(f"{len(sizes)} lengths: {sizes}")
 
-    extra = ["-reu", "-reusize", "512"] if args.reu else []
+    # Derived, not opt-in: without --reu this used to boot a REU=1 build on a
+    # machine with no REU (x25519_reu_fault $02); the boot wait now refuses
+    # that, so the attachment must follow the build.
+    extra = vice_reu_args(labels)
+    print(f"REU attachment derived from the build: {extra or 'none'}")
     config = ViceConfig(prg_path=args.prg, warp=True, ntsc=True, sound=False,
                         extra_args=extra)
 

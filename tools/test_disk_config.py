@@ -21,7 +21,7 @@ from c64_test_harness import (
     read_bytes, write_bytes, jsr,
 )
 from c64_test_harness.disk import DiskImage, FileType
-from vice_util import binary_wait_for_boot_ready
+from vice_util import binary_wait_for_boot_ready, vice_reu_args
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "wireguard.prg")
@@ -218,7 +218,8 @@ def run_disk_test(disk, labels, test_fn):
     Returns (passed, failed) from test_fn.
     """
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
-                        disk_image=disk)
+                        disk_image=disk,
+                        extra_args=vice_reu_args(labels))
     with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         print(f"VICE PID={inst.pid}, port={inst.port}")

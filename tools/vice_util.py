@@ -61,11 +61,98 @@ def binary_wait_for_boot_ready(transport, labels, timeout=120.0, poll_interval=2
     on six instances in sequence — so call sites use 180 s, and the
     multi-instance ones 300 s. The only cost of a large budget is paid
     on a genuine failure, whereas a tight one buys a flaky gate.
+
+    REU FAULT (issue #69): once boot_ready is set, the image's sticky
+    ``x25519_reu_fault`` byte (c64-x25519 §8.2 settle) is read too, and a
+    non-zero value RAISES ``BootReuFault`` instead of returning. Booting the
+    REU=1 PRG under a VICE with no REU sets it to $02 while boot_ready is
+    still set, and every X25519 after that is silently wrong (measured
+    2026-10-18: RFC 7748 vector 1 gave 5cf4f2af... for c3da5537...). It is
+    raised rather than folded into the ``None`` return because callers print
+    "boot did not complete" for ``None``, which would name the wrong cause.
+    A build without the label (the legacy in-tree crypto) is not checked.
+    Host-side only: nothing is added to the PRG.
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if read_bytes(transport, labels["boot_ready"], 1) == b"\x01":
+            _refuse_reu_fault(transport, labels)
             return b"\x01"
         transport.resume()
         time.sleep(poll_interval)
     return None
+
+
+class BootReuFault(RuntimeError):
+    """The booted image reports an REU settle fault (see vice_reu_args)."""
+
+
+def _label(labels, name):
+    """Address of *name* in a Labels object or a plain mapping, else None."""
+    if hasattr(labels, "address"):
+        return labels.address(name)
+    return labels.get(name)
+
+
+def _refuse_reu_fault(transport, labels):
+    addr = _label(labels, "x25519_reu_fault")
+    if addr is None:
+        return
+    val = read_bytes(transport, addr, 1)[0]
+    if val:
+        raise BootReuFault(
+            f"x25519_reu_fault = ${val:02X} at boot (boot_ready is set): the "
+            f"REU multiply tables did not verify, so every X25519 on this "
+            f"machine is wrong. This build needs VICE extra_args "
+            f"{vice_reu_args(labels)} — pass vice_util.vice_reu_args(labels) "
+            f"to ViceConfig instead of spelling the REU flags by hand.")
+
+
+# VICE -reusize accepts these KiB values (VICE 3.10 manual, REU section).
+_VICE_REU_SIZES_KIB = (128, 256, 512, 1024, 2048, 4096, 8192, 16384)
+
+# Contract §5 manifest equates, one per linked library: the REU banks that
+# library's code claims, as a bit mask. Both are emitted into labels.txt.
+_REU_MANIFEST = ("LIB_X25519_REU_BANKS_USED",
+                 "LIB_CHACHA20_POLY1305_REU_BANKS_USED")
+
+
+def vice_reu_args(labels):
+    """The VICE extra_args that match the BUILT image's REU use (issue #69).
+
+    *labels* is a ``Labels`` object, a plain ``{name: address}`` mapping, or a
+    path to labels.txt. Derived from the image, never from what the suite's
+    author expected the build to be:
+
+    * the contract §5 masks LIB_X25519_REU_BANKS_USED |
+      LIB_CHACHA20_POLY1305_REU_BANKS_USED: zero (REU=0, onchip profile)
+      gives ``[]`` — no REU, so a stray REU access is not masked by one —
+      and non-zero gives the smallest VICE REU covering the highest claimed
+      bank (64 KiB per bank; $3B -> bank 5 -> 384 KiB -> 512);
+    * no manifest at all is the legacy in-tree build (USE_X25519_SIBLING=0),
+      which the Makefile only permits at REU=1: if its ``reu_mul_init`` is
+      present it gets 512 KiB (src/crypto/fe25519.s uses banks 0-1);
+    * neither: ``ValueError`` — there is nothing to derive from, and guessing
+      is how 24 gate suites came to boot the REU build without an REU.
+    """
+    if isinstance(labels, (str, bytes)) or hasattr(labels, "__fspath__"):
+        from c64_test_harness import Labels
+        labels = Labels.from_file(str(labels))
+    present = [n for n in _REU_MANIFEST if _label(labels, n) is not None]
+    if present:
+        banks = 0
+        for name in present:
+            banks |= _label(labels, name)
+        if banks == 0:
+            return []
+        need_kib = banks.bit_length() * 64
+        size = next((s for s in _VICE_REU_SIZES_KIB if s >= need_kib), None)
+        if size is None:
+            raise ValueError(f"REU banks mask ${banks:X} needs {need_kib} KiB, "
+                             f"beyond VICE's largest REU")
+        return ["-reu", "-reusize", str(size)]
+    if _label(labels, "reu_mul_init") is not None:
+        return ["-reu", "-reusize", "512"]
+    raise ValueError("cannot tell whether this build needs an REU: labels.txt "
+                     "has neither the contract §5 REU_BANKS_USED manifest nor "
+                     "reu_mul_init")

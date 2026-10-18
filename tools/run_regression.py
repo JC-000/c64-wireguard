@@ -290,6 +290,18 @@ TESTS = [
     # records and REFUSES non-loopback sockets, DeviceLock acquisition and
     # subprocesses. Unseeded here; the seed is on its first line.
     ("live_tools_wifi", ["tools/test_live_tools_wifi.py"]),
+    # Issue #69. The gate builds REU=1 (Makefile `REU ?= 1`) and 24 VICE
+    # suites booted it with NO REU: boot_ready set, x25519_reu_fault $02, and
+    # every X25519 after that silently wrong (RFC 7748 vector 1 mismatched).
+    # They passed only because none reaches an REU multiply. Every VICE suite
+    # listed here now takes its REU flags from vice_util.vice_reu_args(labels)
+    # (derived from the built image's contract §5 REU_BANKS_USED manifest) and
+    # binary_wait_for_boot_ready refuses a non-zero fault. This suite asserts
+    # that statically (set equality over both lists, scanner proven able to
+    # fire) and in VICE: derived attachment boots with fault $00, and the
+    # opposite attachment is refused — the alarm, run every time. Pooled:
+    # reads the gate's build, mutates nothing; two short boots, no crypto.
+    ("vice_reu", ["tools/test_vice_reu_matches_build.py"]),
     # NOT listed, deliberately: tools/test_uci_*_live.py and
     # tools/test_wg_responder*.py need real hardware or a live responder.
 ]
