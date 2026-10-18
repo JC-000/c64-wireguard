@@ -45,7 +45,7 @@ Builds verified 2026-07-16; VICE regression smoke of the
 > Only one configuration is reachable today: **both siblings on** (the
 > default, `make BACKEND=uci`). The other arm, **both off**
 > (`USE_X25519_SIBLING=0 USE_CHACHA_SIBLING=0`), was **RETIRED on 2026-10-18**
-> ([#69](https://github.com/JC-000/c64-wireguard/issues/69), PR #PRNUM): its sources
+> ([#69](https://github.com/JC-000/c64-wireguard/issues/69), PR #181): its sources
 > are deleted and the Makefile now refuses any value but `1` for either
 > toggle. A sibling-vs-in-tree comparison therefore needs a checkout from
 > before the retirement, with fresh hashes measured on the day.
@@ -59,7 +59,7 @@ size cannot distinguish variants — verify by SHA-256 before flashing**:
 
 | Variant | Build command | SHA-256 (`wireguard.prg`) |
 |---|---|---|
-| baseline *(in-tree crypto — variant RETIRED 2026-10-18, #69, PR #PRNUM)* | `make BACKEND=uci` | `bdf6cb8814bc440806358645baf656093175b208f9a82c1f03ce9b3dc5edcadb` |
+| baseline *(in-tree crypto — variant RETIRED 2026-10-18, #69, PR #181)* | `make BACKEND=uci` | `bdf6cb8814bc440806358645baf656093175b208f9a82c1f03ce9b3dc5edcadb` |
 | x25519-sibling *(mixed — unbuildable since v1.0.0; in-tree half RETIRED 2026-10-18, #69)* | `make BACKEND=uci USE_X25519_SIBLING=1` | `5cc257035f3aba23b3d01847804c0bc202ab1435c5f09feede2969c92532d6b3` |
 | chacha-sibling *(mixed — unbuildable since v1.0.0; in-tree half RETIRED 2026-10-18, #69)* | `make BACKEND=uci USE_CHACHA_SIBLING=1` | `44651e787c3ddf1ef9ad157737b1b2123f0f28de1afe85c9e81056d05b6caef7` |
 | both siblings | `make BACKEND=uci USE_X25519_SIBLING=1 USE_CHACHA_SIBLING=1` | `669f20de37e6c43f542feafc59d5b19809c4b5f37b2b938da4a2d416df853b2b` |
@@ -68,7 +68,7 @@ Prebuilt copies (PRG + map) are committed in
 `docs/evidence/prebuilt/wireguard-uci-<variant>.{prg,map}` (copied there from
 the gitignored `artifacts/` on 2026-10-17; the PRG hashes match the table) —
 they are the only way to obtain rows 2 and 3, and since the in-tree crypto
-was RETIRED on 2026-10-18 (#69, PR #PRNUM) also the only way to obtain row 1.
+was RETIRED on 2026-10-18 (#69, PR #181) also the only way to obtain row 1.
 They are historical evidence: kept unchanged, not rebuildable from master.
 Always `make clean` between variants — the build system does not
 track toggle flags in object files.

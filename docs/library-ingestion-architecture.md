@@ -36,7 +36,7 @@ debugging a duplicate-symbol / unresolved-import link error.
 | `USE_X25519_SIBLING` | **1** (only value) | `c64-x25519` (`libs/x25519`) | `.gitmodules` |
 | `USE_CHACHA_SIBLING` | **1** (only value) | `c64-ChaCha20-Poly1305` (`libs/chacha20poly1305`) | `.gitmodules` |
 
-**Retired 2026-10-18 ([#69](https://github.com/JC-000/c64-wireguard/issues/69), PR #PRNUM):** the
+**Retired 2026-10-18 ([#69](https://github.com/JC-000/c64-wireguard/issues/69), PR #181):** the
 `0`/`0` legacy in-tree build. Both toggles now accept only `1` (a no-op);
 any other value is a Makefile `$(error ...)`. The text below describes why
 the toggles had to match while both values existed.
@@ -296,7 +296,7 @@ above deciding shared-primitive ownership *before* the first link.
 They were the `USE_*_SIBLING=0` legacy/dev build, for bisecting whether a
 regression was WG-side or library-side. They were never shipped, and the
 in-tree `poly1305.s` `mul_8x8` kept the known non-CT branches (issue #16).
-**Removed 2026-10-18 ([#69](https://github.com/JC-000/c64-wireguard/issues/69), PR #PRNUM)**,
+**Removed 2026-10-18 ([#69](https://github.com/JC-000/c64-wireguard/issues/69), PR #181)**,
 together with `fe25519.s`, `x25519.s`, `chacha20.s`, `aead.s` and
 `word32.s`: `fe25519.s` had three REU execute sites with no §8.2 settle and
 no fault byte, and silently computed wrong X25519 results in VICE without
