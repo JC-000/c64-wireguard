@@ -764,6 +764,37 @@ post_session_hook = None
 #: tools/test_live_tool_seams.py enforces both.
 post_session_teardown: dict = {}
 
+#: The keys a mode may set, and the type each must have. idle_mhz is further
+#: pinned to 1: idle is 1 MHz + REU off (runbook §1b/§4).
+_TEARDOWN_MODE_TYPES = {"idle_mhz": int, "reu_off": bool, "reset": bool}
+
+
+def teardown_mode_error(mode) -> str | None:
+    """Why *mode* is not a valid post_session_teardown, or None if it is.
+
+    Checked at the top of main(), BEFORE the lock: a bad mode only fails
+    when it is splatted into teardown_device in main()'s `finally`, where
+    the BaseException guard swallows the TypeError — so the whole teardown
+    would be skipped and the lock released on a box at turbo with the REU
+    attached (review of PR #178)."""
+    if not isinstance(mode, dict):
+        return (f"post_session_teardown must be a dict of teardown_device "
+                f"kwargs (got {mode!r}); the old booleans are gone — {{}} is "
+                f"the full teardown")
+    unknown = sorted(set(mode) - set(_TEARDOWN_MODE_TYPES))
+    if unknown:
+        return (f"post_session_teardown has unknown key(s) {unknown}; allowed "
+                f"{sorted(_TEARDOWN_MODE_TYPES)}")
+    for k, v in mode.items():
+        want = _TEARDOWN_MODE_TYPES[k]
+        if type(v) is not want:
+            return (f"post_session_teardown[{k!r}] must be {want.__name__}, "
+                    f"got {v!r}")
+    if mode.get("idle_mhz", 1) != 1:
+        return (f"post_session_teardown idle_mhz={mode['idle_mhz']}: idle is "
+                f"1 MHz")
+    return None
+
 
 def wants_trampoline(fn):
     """Mark a post_session_hook that must keep host trampoline control.
@@ -836,6 +867,12 @@ def main(argv: list[str] | None = None) -> int:
     Passing it explicitly lets a consumer that drives this tool through
     post_session_hook do so without assigning to the ``sys.argv`` global.
     """
+    # FIRST, before the lock or the device: a bad teardown mode would only
+    # fail in the `finally`, silently, after the device was changed.
+    mode_err = teardown_mode_error(post_session_teardown)
+    if mode_err:
+        print(f"ERROR: {mode_err}", file=sys.stderr)
+        return 2
     p = argparse.ArgumentParser()
     p.add_argument("--stage", type=int, choices=[1, 2, 3], default=2,
                    help="1=Type-1 accepted; 2=SESSION_ACTIVE (default); "

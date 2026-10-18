@@ -107,12 +107,18 @@ def main():
     def boom(*a, **k):
         raise RuntimeError("device flaky mid-abort")
 
+    # get_turbo_mhz reads 48 so the write is actually REACHED: teardown now
+    # reads before it writes, and a throwing read would skip the set and
+    # stop this case testing what it says.
+    orig_get = H.get_turbo_mhz
     H.set_turbo_mhz = boom
+    H.get_turbo_mhz = lambda cl: 48
     try:
         c = FakeClient(reset_takes=True)
         st = ds.teardown_device("fake", client=c)
     finally:
         H.set_turbo_mhz = orig
+        H.get_turbo_mhz = orig_get
     check(c.resets == 1,
           "a throwing set_turbo_mhz does NOT skip the reset", f"{c.resets}")
     check(st["reset"] == "verified",
@@ -126,7 +132,10 @@ def main():
     calls = []
     saved_h = (H.set_turbo_mhz, H.get_turbo_mhz, H.set_reu)
     H.set_turbo_mhz = lambda cl, mhz: calls.append(("set_turbo", mhz))
-    H.get_turbo_mhz = lambda cl: (calls.append(("get_turbo",)), 1)[1]
+    # Found at 48 MHz (wg_chat's clock), so the write is genuinely needed.
+    reads = [48, 1]
+    H.get_turbo_mhz = lambda cl: (calls.append(("get_turbo",)),
+                                  reads.pop(0) if len(reads) > 1 else reads[0])[1]
     H.set_reu = lambda cl, on, *a, **k: calls.append(("set_reu", on))
     try:
         c = FakeClient(reset_takes=True)
@@ -141,6 +150,49 @@ def main():
     check(c.resets == 0 and st["reset"] is None,
           "gentle mode: no reset", f"resets={c.resets} st={st}")
     check(st["turbo"] == 1, "gentle mode: the read-back is reported", str(st))
+
+    # --- NO REDUNDANT CLOCK WRITE (review of PR #178) ---------------------
+    # A CPU-speed write — even one that changes nothing — loses the next UCI
+    # command on the C64U, and in the gentle mode the session is still
+    # live. So when the device already reads idle, teardown must not write
+    # the clock; it must still REPORT the read-back. And when it does not
+    # read idle, it must write, then read back (both modes).
+    def run_mode(reads, **kw):
+        seq = list(reads)
+        calls = []
+        saved_h = (H.set_turbo_mhz, H.get_turbo_mhz, H.set_reu)
+        H.set_turbo_mhz = lambda cl, mhz: calls.append(("set_turbo", mhz))
+        H.get_turbo_mhz = lambda cl: (calls.append(("get_turbo",)),
+                                      seq.pop(0) if len(seq) > 1 else seq[0])[1]
+        H.set_reu = lambda cl, on, *a, **k: calls.append(("set_reu", on))
+        try:
+            c = FakeClient(reset_takes=True)
+            st = ds.teardown_device("fake", client=c, **kw)
+        finally:
+            H.set_turbo_mhz, H.get_turbo_mhz, H.set_reu = saved_h
+        return calls, st, c
+
+    for label, kw in (("gentle", {"reset": False, "reu_off": False}),
+                      ("full", {})):
+        calls, st, c = run_mode([1], **kw)
+        check(not any(k[0] == "set_turbo" for k in calls),
+              f"{label} mode, already at 1 MHz: NO clock write", str(calls))
+        check(st["turbo"] == 1 and ("get_turbo",) in calls,
+              f"{label} mode, already at 1 MHz: read-back still reported",
+              str(st))
+        calls, st, c = run_mode([48, 1], **kw)
+        check(("set_turbo", 1) in calls and st["turbo"] == 1,
+              f"{label} mode, at 48 MHz: clock written and read back as 1",
+              f"{calls} {st}")
+    calls, st, c = run_mode([48, 1])
+    check(("set_reu", False) in calls and c.resets == 1
+          and st["reset"] == "verified",
+          "full mode still detaches the REU and does a verified reset",
+          f"{calls} resets={c.resets} {st}")
+    calls, st, c = run_mode([48, 48])
+    check(st["turbo"] == 48,
+          "a write that does not take is REPORTED (read-back 48), not "
+          "assumed", str(st))
 
     # --- and the case that reaches the OUTER scope: the harness import
     # itself fails (a broken venv, a partial install — the shape that took

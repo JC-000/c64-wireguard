@@ -131,8 +131,15 @@ still gets its clock restored to 1 MHz **inside** `main()`'s held lock. Until
 #166 it opted out entirely and restored the clock afterwards under a second
 lock, leaving a window in which another lane could acquire the box at 48 MHz.
 If you add a non-interactive mode to an operator tool, that mode takes the
-full teardown back. `tools/test_live_tool_seams.py` derives what every live
-tool owes from what it changes and fails unless a `finally:` pays it — with
+full teardown back. `test_uci_handshake_live.main()` refuses a malformed
+mode (not a dict, unknown key, wrong type, `idle_mhz` ≠ 1) with exit 2
+BEFORE it takes the lock. `tools/test_live_tool_seams.py` derives each live
+tool's obligations from the device calls it recognises — clock, REU, and a
+reset for any tool that starts a PRG via `run_prg`/`run_prg_via_sys`/
+`load_prg`/`load_prg_verified`/`run_crt` or a typed `SYS`/`RUN` — pinned by
+set equality to a hand-reviewed `PRG_STARTERS` list, so a tool that starts a
+PRG some other way fails until it is classified. It fails unless a
+`finally:` pays those obligations — with
 `teardown_device(client=...)` (or a hand-written restore) placed before any
 `.release()` in that `finally`, and no `restore_idle()` / host-only
 `teardown_device()` taking a second lock. It is a static check: it cannot

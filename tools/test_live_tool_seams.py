@@ -1085,6 +1085,7 @@ def main() -> int:
     print("\n=== live-tool teardown, by obligation (#134, #166) ===")
     check_live_tool_teardown(check)
     check_live_tool_teardown_alarms(check)
+    check_teardown_mode_validation(check)
 
     check_multipart_builder(SEED)
 
@@ -1278,6 +1279,8 @@ LIVE_TOOLS = frozenset({
 _NOT_LIVE_TOOLS = {
     "device_session.py": "the shared lock/teardown helpers themselves",
     "test_device_teardown.py": "unit suite for teardown_device, fake clients",
+    "test_live_tool_seams.py": "this file; calls live.main() only with a "
+                               "fake DeviceLock, to prove mode validation",
 }
 
 # The ONLY permitted shortfalls, by SET EQUALITY: a tool listed here must
@@ -1330,6 +1333,31 @@ def _is_false(node) -> bool:
     return isinstance(node, ast.Constant) and node.value is False
 
 
+# Every call that STARTS a program on the C64 — and so leaves sockets only a
+# reset closes. Review of PR #178: test_ip65_rrnet_hw loads through its own
+# load_prg_verified (write_bytes + typed SYS) and never calls run_prg*, so
+# with the old two-name trigger it owed no reset and deleting its
+# client.reset() stayed green. PRG_STARTERS below pins the result by set
+# equality, so a tool that starts a PRG some new way fails until this list
+# (or the classification) is taught it.
+_PRG_START_CALLS = frozenset({"run_prg", "run_prg_via_sys", "load_prg",
+                              "load_prg_verified", "run_crt"})
+
+# Hand-classified, independently of the triggers above: every live tool
+# that starts a PRG ITSELF (delegators start theirs inside live.main(), and
+# inherit its reset obligation there). Reviewed 2026-10-18 against all 11:
+#   handshake/echo/size_probe/config_reload(--soak)/warp  client.run_prg
+#   test_ip65_rrnet_hw     load_prg_verified: write_bytes + send_text SYS
+#   NOT: u64_firmware (flashes firmware, runs no PRG), uci/udp_probe_harness
+#   (drives UCI from the host after a reset; loads nothing), and the three
+#   delegators wg_chat / wg_demo / test_wire_encryption_live.
+PRG_STARTERS = frozenset({
+    "test_uci_handshake_live.py", "test_uci_udp_echo_live.py",
+    "test_uci_udp_size_probe.py", "test_config_reload_live.py",
+    "test_warp_live.py", "test_ip65_rrnet_hw.py",
+})
+
+
 def _direct_need(tree) -> set:
     """What this file's OWN calls leave on the device. A missing or
     non-literal argument counts as the unsafe value: it might be."""
@@ -1342,9 +1370,25 @@ def _direct_need(tree) -> set:
         elif nm == "set_reu":
             if not (len(args) >= 2 and _is_false(args[1])):
                 need.add("set_reu")
-        elif nm in ("run_prg", "run_prg_via_sys"):
+        elif nm in _PRG_START_CALLS:
+            need.add("reset")
+        elif nm == "send_text" and any(
+                "SYS" in t or "RUN" in t for t in _literal_text(c)):
+            # Typing SYS/RUN at the BASIC prompt starts a program just as
+            # surely as run_prg does (test_ip65_rrnet_hw's load path).
             need.add("reset")
     return need
+
+
+def _literal_text(c: ast.Call) -> list:
+    """Every literal string fragment in a call's arguments, f-strings
+    included."""
+    out = []
+    for a in list(c.args) + [k.value for k in c.keywords]:
+        for n in ast.walk(a):
+            if isinstance(n, ast.Constant) and isinstance(n.value, str):
+                out.append(n.value.upper())
+    return out
 
 
 def _hs_aliases(tree) -> set:
@@ -1399,6 +1443,21 @@ def _structure_problems(tree, is_hs: bool) -> list:
             out.append(f"line {n.lineno}: {_MODE_NAME} READ/mutated in place "
                        f"(e.g. .update()) — that also changes the shared "
                        f"default for every later caller; assign one literal")
+        if (is_hs and isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))):
+            for g in ast.walk(n):
+                if (isinstance(g, (ast.Assign, ast.AugAssign, ast.AnnAssign))
+                        and any(isinstance(t, ast.Name) and t.id == _MODE_NAME
+                                for t in (g.targets if isinstance(g, ast.Assign)
+                                          else [g.target]))):
+                    out.append(f"line {g.lineno}: {_MODE_NAME} reassigned "
+                               f"inside {n.name}() — only the module-level "
+                               f"default is audited")
+        if (isinstance(n, ast.Subscript) and isinstance(n.value, ast.Attribute)
+                and n.value.attr == "__dict__"
+                and isinstance(n.slice, ast.Constant)
+                and n.slice.value == _MODE_NAME):
+            out.append(f"line {n.lineno}: __dict__[{_MODE_NAME!r}] — assign "
+                       f"one literal dict instead")
         if (isinstance(n, ast.Call) and _callee(n) in ("setattr", "delattr")
                 and len(n.args) >= 2 and isinstance(n.args[1], ast.Constant)
                 and n.args[1].value == _MODE_NAME):
@@ -1602,6 +1661,58 @@ def _discharge(calls, defaults, does, mode):
     return done, problems
 
 
+_WATCHED_MODULES = (_HS_MODULE, "device_session")
+
+
+def _unclassifiable_imports(tree) -> list:
+    """Ways to reach live.main() / the device helpers that discovery cannot
+    follow. FAIL CLOSED: each is an error, not a silent pass (review of PR
+    #178, finding 3)."""
+    out = []
+    aliases = {a.asname or a.name for n in ast.walk(tree)
+               if isinstance(n, ast.Import) for a in n.names
+               if a.name in _WATCHED_MODULES}
+    hs_aliases = {a.asname or a.name for n in ast.walk(tree)
+                  if isinstance(n, ast.Import) for a in n.names
+                  if a.name == _HS_MODULE}
+    from_main = {a.asname or a.name for n in ast.walk(tree)
+                 if isinstance(n, ast.ImportFrom) and n.module == _HS_MODULE
+                 for a in n.names if a.name == "main"}
+    called = {c.func.id for c in _calls_in(tree)
+              if isinstance(c.func, ast.Name)}
+    watched_attrs = set(_DEVICE_CALLS) | {"main"}
+    for n in ast.walk(tree):
+        if (isinstance(n, ast.ImportFrom) and n.module in _WATCHED_MODULES
+                and any(a.name == "*" for a in n.names)):
+            out.append(f"line {n.lineno}: `from {n.module} import *`")
+        if isinstance(n, ast.Call):
+            nm = _callee(n)
+            if (nm in ("import_module", "__import__") and n.args
+                    and isinstance(n.args[0], ast.Constant)
+                    and n.args[0].value in _WATCHED_MODULES):
+                out.append(f"line {n.lineno}: {nm}({n.args[0].value!r})")
+            if (nm == "getattr" and len(n.args) >= 2
+                    and isinstance(n.args[0], ast.Name)
+                    and n.args[0].id in aliases
+                    and isinstance(n.args[1], ast.Constant)
+                    and n.args[1].value in watched_attrs):
+                out.append(f"line {n.lineno}: getattr({n.args[0].id}, "
+                           f"{n.args[1].value!r})")
+        # `run = live.main` only: saving `ds.teardown_device` to restore
+        # it after stubbing is how the unit suites work, and is not a call.
+        if (isinstance(n, (ast.Assign, ast.AnnAssign))
+                and isinstance(n.value, ast.Attribute)
+                and isinstance(n.value.value, ast.Name)
+                and n.value.value.id in hs_aliases
+                and n.value.attr == "main"):
+            out.append(f"line {n.lineno}: `= {n.value.value.id}."
+                       f"{n.value.attr}` (re-export / indirect call)")
+    for nm in sorted(from_main - called):
+        out.append(f"imports main from {_HS_MODULE} as {nm!r} without "
+                   f"calling it (a re-export?)")
+    return out
+
+
 _RESTORE_CALLEES = {"teardown_device", "set_turbo_mhz", "set_reu",
                     "reset", "reset_and_verify"}
 
@@ -1646,7 +1757,8 @@ def _teardown_audit(tools_dir: Path, overrides: dict | None = None) -> dict:
     res = {"discovered": set(), "parse_errors": [], "tools": {},
            "helper": {}, "mode_refs_ok": False}
     trees: dict[str, ast.AST] = {}
-    needles = tuple(_DEVICE_CALLS) + (_HS_MODULE,)
+    needles = tuple(_DEVICE_CALLS) + _WATCHED_MODULES
+    res["unclassifiable"] = []
     for rel, text in texts.items():
         if not any(s in text for s in needles):
             continue
@@ -1656,6 +1768,8 @@ def _teardown_audit(tools_dir: Path, overrides: dict | None = None) -> dict:
             res["parse_errors"].append(f"{rel}: {exc}")
             continue
         trees[rel] = tree
+        for msg in _unclassifiable_imports(tree):
+            res["unclassifiable"].append(f"{rel}: {msg}")
         if (any(_effective(c)[0] in _DEVICE_CALLS for c in _calls_in(tree))
                 or _delegates(tree)):
             res["discovered"].add(rel)
@@ -1680,10 +1794,20 @@ def _teardown_audit(tools_dir: Path, overrides: dict | None = None) -> dict:
               if _callee(c) == "teardown_device" for k in c.keywords
               if k.arg is None and isinstance(k.value, ast.Name)
               and k.value.id == _MODE_NAME]
-    res["mode_refs_ok"] = bool(splats) and len(loads) == len(splats)
+    # ...plus the validation at the top of main(), which must exist: it is
+    # what stops a bad mode before the lock (review of PR #178).
+    validates = [c.args[0] for c in _calls_in(hs_tree)
+                 if _callee(c) == "teardown_mode_error" and c.args
+                 and isinstance(c.args[0], ast.Name)
+                 and c.args[0].id == _MODE_NAME]
+    res["mode_validated"] = bool(validates)
+    res["mode_refs_ok"] = (bool(splats) and bool(validates)
+                           and len(loads) == len(splats) + len(validates))
     res["mode_loads"] = len(loads)
     res["mode_splats"] = len(splats)
 
+    res["starters"] = {rel for rel in res["discovered"] & LIVE_TOOLS
+                       if "reset" in _direct_need(trees[rel])}
     for rel in sorted(res["discovered"] & LIVE_TOOLS):
         tree = trees[rel]
         need = _direct_need(tree)
@@ -1745,6 +1869,18 @@ def check_live_tool_teardown(check, tools_dir: Path | None = None) -> None:
           "(audited) or _NOT_LIVE_TOOLS (with a reason); a STALE entry "
           "means a tool stopped matching discovery — find out why before "
           "deleting it")
+    check("teardown audit: no tools/ file reaches live.main() or the "
+          "device helpers in a form discovery cannot classify "
+          f"({len(r['unclassifiable'])} found)",
+          not r["unclassifiable"], "; ".join(r["unclassifiable"]))
+    starters = r["starters"]
+    check(f"teardown audit: tools derived as starting a PRG == PRG_STARTERS "
+          f"(derived-only {sorted(starters - PRG_STARTERS)}, "
+          f"classified-only {sorted(PRG_STARTERS - starters)})",
+          starters == PRG_STARTERS,
+          "classified-only: a tool starts a PRG some way _PRG_START_CALLS "
+          "does not know, so it owes no reset — teach the trigger; "
+          "derived-only: classify it")
     check("teardown audit: every EXPECTED_SHORTFALL key is a live tool",
           set(EXPECTED_SHORTFALL) <= LIVE_TOOLS,
           f"{sorted(set(EXPECTED_SHORTFALL) - LIVE_TOOLS)}")
@@ -1783,6 +1919,77 @@ def check_live_tool_teardown(check, tools_dir: Path | None = None) -> None:
               + (f", exempt {sorted(allowed)}" if allowed else "")
               + " — paid in a finally, inside the lock",
               ok, detail)
+
+
+def check_teardown_mode_validation(check) -> None:
+    """A bad post_session_teardown must stop main() BEFORE the lock.
+
+    `teardown_device(**None)` / `(**True)` / `(reu_of=False)` raise
+    TypeError inside main()'s finally, which a BaseException guard swallows
+    with a warning: the whole teardown is skipped and the lock released on
+    a box left at 48 MHz (review of PR #178, finding 2). So main() validates
+    the mode first and exits 2. Driven with fakes: no device, no build.
+    """
+    import test_uci_handshake_live as live
+
+    class _Stop(Exception):
+        pass
+
+    acquires: list = []
+
+    class FakeLock:
+        def __init__(self, *a, **k):
+            pass
+
+        def acquire_or_raise(self, *a, **k):
+            acquires.append(1)
+            raise _Stop("lock reached")
+
+        acquire = acquire_or_raise
+
+        def release(self):
+            pass
+
+    saved = (live.post_session_teardown, live.DeviceLock, live._build_uci,
+             os.environ.pop("U64_ALLOW_MUTATE", None))
+    try:
+        live.DeviceLock = FakeLock
+        live._build_uci = lambda: None
+        for label, mode in (("None", None), ("True", True),
+                            ("a misspelled key {'reu_of': False}",
+                             {"reu_of": False}),
+                            ("idle_mhz=48", {"idle_mhz": 48}),
+                            ("a non-bool value {'reset': 'no'}",
+                             {"reset": "no"})):
+            acquires.clear()
+            live.post_session_teardown = mode
+            rc = exc = None
+            try:
+                rc = live.main(["--host", "127.0.0.1"])
+            except BaseException as e:                        # noqa: BLE001
+                exc = e
+            check(f"main() refuses post_session_teardown = {label}: exit 2, "
+                  f"lock never acquired",
+                  rc == 2 and not acquires and exc is None,
+                  f"rc={rc!r} exc={exc!r} lock acquires={len(acquires)} — a "
+                  f"bad mode that gets past this point is swallowed in the "
+                  f"finally and NOTHING is restored")
+        # Control: a VALID mode gets past the validation (here to the
+        # U64_ALLOW_MUTATE skip), so the exit 2 above is the validation's.
+        for mode in ({}, {"reset": False, "reu_off": False}):
+            live.post_session_teardown = mode
+            rc = exc = None
+            try:
+                rc = live.main(["--host", "127.0.0.1"])
+            except BaseException as e:                        # noqa: BLE001
+                exc = e
+            check(f"control: valid mode {mode} is NOT refused by the mode "
+                  f"check", rc != 2, f"rc={rc!r} exc={exc!r}")
+    finally:
+        (live.post_session_teardown, live.DeviceLock, live._build_uci,
+         env) = saved
+        if env is not None:
+            os.environ["U64_ALLOW_MUTATE"] = env
 
 
 def _mutated(rel: str, old: str, new: str) -> dict | None:
@@ -1937,6 +2144,82 @@ def check_live_tool_teardown_alarms(check) -> None:
           and "set_turbo_mhz" in r["tools"]["wg_chat.py"]["missing"],
           "mutation did not apply" if r is None else
           f"does={sorted(r['helper']['does'])}")
+
+    # Review round 2 (PR #178). Same contract: each must go red.
+    ip65 = "test_ip65_rrnet_hw.py"
+    ov = _mutated(ip65, "                        client.reset()\n",
+                  "                        pass\n")
+    r = _teardown_audit(tools_dir, ov) if ov else None
+    check("alarm-proof (review 2): test_ip65_rrnet_hw's finally reset "
+          "deleted -> missing ['reset']",
+          r is not None and r["tools"][ip65]["missing"] == {"reset"},
+          "mutation did not apply" if r is None else f"{r['tools'][ip65]}")
+    try:
+        text = (tools_dir / ip65).read_text()
+    except OSError:
+        text = ""
+    # ip65_rrnet starts PRGs two ways the triggers know: load_prg_verified
+    # AND a typed `SYS`. Each alone keeps it a starter (should survive);
+    # hiding BOTH — a loader the triggers do not know — must break the
+    # PRG_STARTERS equality rather than quietly drop its reset obligation.
+    n = text.count("load_prg_verified")
+    no_loader = text.replace("load_prg_verified", "load_prog_checked")
+    no_sys = text.replace('send_text(tr, f"SYS{', 'send_text(tr, f"XYZ{')
+    neither = no_loader.replace('send_text(tr, f"SYS{',
+                                'send_text(tr, f"XYZ{')
+    ok_shapes = n >= 2 and no_sys != text and neither != no_loader
+    for label, src, want in (("loader renamed, SYS kept", no_loader, True),
+                             ("SYS hidden, loader kept", no_sys, True),
+                             ("BOTH hidden", neither, False)):
+        r = _teardown_audit(tools_dir, {ip65: src}) if ok_shapes else None
+        got = None if r is None else (ip65 in r["starters"])
+        check(f"alarm-proof (review 2): ip65_rrnet PRG-start triggers, "
+              f"{label} -> starter={want}"
+              + ("" if want else " (PRG_STARTERS equality breaks)"),
+              got is want, "mutation did not apply" if r is None else
+              f"starters={sorted(r['starters'])}")
+    hs_validate = "    mode_err = teardown_mode_error(post_session_teardown)\n"
+    ov = _mutated(_HS_FILE, hs_validate, "    mode_err = None\n")
+    r = _teardown_audit(tools_dir, ov) if ov else None
+    check("alarm-proof (review 2): removing main()'s up-front mode "
+          "validation is flagged",
+          r is not None and not r["mode_refs_ok"] and not r["mode_validated"],
+          "mutation did not apply" if r is None else
+          f"validated={r['mode_validated']}")
+    forms = [
+        ("getattr(live, 'main')()",
+         "import test_uci_handshake_live as live\ngetattr(live, 'main')()\n"),
+        ("star import + main()",
+         "from test_uci_handshake_live import *\nmain()\n"),
+        ("importlib.import_module(...)",
+         "import importlib\n"
+         "importlib.import_module('test_uci_handshake_live').main()\n"),
+        ("__import__(...)",
+         "__import__('device_session').teardown_device('h')\n"),
+        ("re-export of main (imported, never called)",
+         "from test_uci_handshake_live import main\n"),
+        ("indirect `run = live.main`",
+         "import test_uci_handshake_live as live\nrun = live.main\nrun()\n"),
+    ]
+    for label, src in forms:
+        r = _teardown_audit(tools_dir, {"zz_evasion.py": src})
+        check(f"alarm-proof (review 2): discovery FAILS CLOSED on {label}",
+              any(u.startswith("zz_evasion.py:") for u in r["unclassifiable"]),
+              f"unclassifiable={r['unclassifiable']}")
+    hidden = [
+        ("global reassignment inside a function in main()'s module",
+         _HS_FILE, _mutated(_HS_FILE, hs_validate,
+                            hs_validate + "    global post_session_teardown\n"
+                            "    post_session_teardown = None\n")),
+        ("live.__dict__[...] write in wg_demo", "wg_demo.py",
+         _mutated("wg_demo.py", demo_hook, demo_hook +
+                  "\n    live.__dict__['post_session_teardown'] = None")),
+    ]
+    for label, tool, ov in hidden:
+        info = _teardown_audit(tools_dir, ov)["tools"].get(tool) if ov else None
+        check(f"alarm-proof (review 2): {label} -> a problem",
+              info is not None and bool(info["problems"]),
+              "mutation did not apply" if ov is None else f"{info}")
 
     # Mutations that SHOULD SURVIVE: equivalent spellings of a correct
     # restore. A guard that also fires on these keys on spelling, not on

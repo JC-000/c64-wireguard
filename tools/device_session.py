@@ -352,8 +352,14 @@ def teardown_device(host: str, client=None, idle_mhz: int = 1,
             # whose REU also needs detaching, and vice versa. Sharing one
             # try makes each restore conditional on the one before it.
             try:
-                set_turbo_mhz(c, idle_mhz)
-                time.sleep(1.0)
+                # Read FIRST, and write only if the clock is not already
+                # idle. A CPU-speed write — even a redundant one — loses the
+                # next UCI command on the C64U, and in wg_chat's gentle mode
+                # the session is still live when this runs (review of PR
+                # #178). restore_idle() always skipped it; this now does too.
+                if get_turbo_mhz(c) != idle_mhz:
+                    set_turbo_mhz(c, idle_mhz)
+                    time.sleep(1.0)
                 # Read back: set_turbo_mhz returning is not the clock having
                 # changed. A prior session's 48 MHz survives a reset.
                 st["turbo"] = get_turbo_mhz(c)
