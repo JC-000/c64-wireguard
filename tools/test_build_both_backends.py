@@ -283,6 +283,79 @@ def test_ip65_rejects_chunked_write_flag():
         _run_make("clean")
 
 
+RETIRED_SIBLING_MSG = ("is no longer supported: the legacy in-tree crypto "
+                       "build was RETIRED (issue #69)")
+
+
+def test_retired_sibling_knobs_refused():
+    """Issue #69 retired the legacy in-tree crypto build. Every non-1 value of
+    either USE_*_SIBLING knob must be refused at parse time with the
+    retirement diagnostic NAMING THE KNOB THAT WAS PASSED, and must leave no
+    PRG behind. `=1` (the only remaining configuration) must still build, so
+    an old command line that spells the default keeps working — that arm is
+    what proves the refusal is about the value, not about the variable merely
+    being present."""
+    cases = (
+        (("USE_X25519_SIBLING=0", "USE_CHACHA_SIBLING=0"), "USE_X25519_SIBLING=0"),
+        (("USE_X25519_SIBLING=0",), "USE_X25519_SIBLING=0"),
+        (("USE_CHACHA_SIBLING=0",), "USE_CHACHA_SIBLING=0"),
+        (("USE_X25519_SIBLING=1", "USE_CHACHA_SIBLING=0"), "USE_CHACHA_SIBLING=0"),
+        (("USE_X25519_SIBLING=2",), "USE_X25519_SIBLING=2"),
+        (("USE_CHACHA_SIBLING=",), "USE_CHACHA_SIBLING="),
+    )
+    try:
+        for args, knob in cases:
+            _run_make("clean")
+            result = _run_make("BACKEND=uci", *args)
+            combined = (result.stderr or "") + (result.stdout or "")
+            assert result.returncode != 0, (
+                f"make BACKEND=uci {' '.join(args)} unexpectedly SUCCEEDED — "
+                "the retired legacy crypto build must be refused (issue #69)")
+            assert f"{knob} {RETIRED_SIBLING_MSG}" in combined, (
+                f"make BACKEND=uci {' '.join(args)} failed, but not with the "
+                f"retirement diagnostic for {knob!r}:\n{combined[-1500:]}")
+            # The refusal must happen at PARSE time, before any rule runs:
+            # `make clean` above removed every object, so any .o now under
+            # build/ means the build started and was stopped later (e.g. by
+            # a link-time error), which is not the guard this checks.
+            built = [os.path.join(d, f) for d, _, fs in os.walk(BUILD_DIR)
+                     for f in fs if f.endswith((".o", ".a", ".prg"))]
+            assert not built, (
+                f"the refused {' '.join(args)} build produced artifacts "
+                f"before failing ({built[:3]}) — the guard is not at parse time")
+            print(f"[retired {' '.join(args)}] refused: "
+                  f"{[l for l in combined.splitlines() if 'RETIRED' in l][0].strip()}")
+        # `clean` must still work with a retired value on the line — the
+        # Makefile's KNOB_GUARDS convention every other knob guard follows —
+        # but `clean` followed by a real goal must still be refused.
+        result = _run_make("clean", "USE_X25519_SIBLING=0",
+                           "USE_CHACHA_SIBLING=0")
+        assert result.returncode == 0, (
+            "make clean USE_X25519_SIBLING=0 USE_CHACHA_SIBLING=0 was refused "
+            "— clean must always work (KNOB_GUARDS):\n"
+            f"{((result.stderr or '') + (result.stdout or ''))[-1500:]}")
+        print("[clean USE_*_SIBLING=0] clean still runs")
+        result = _run_make("clean", "all", "BACKEND=uci",
+                           "USE_X25519_SIBLING=0")
+        combined = (result.stderr or "") + (result.stdout or "")
+        assert (result.returncode != 0 and
+                f"USE_X25519_SIBLING=0 {RETIRED_SIBLING_MSG}" in combined), (
+            "make clean all USE_X25519_SIBLING=0 was not refused with the "
+            f"retirement diagnostic — a `clean` goal must not exempt a real "
+            f"build:\n{combined[-1500:]}")
+        print("[clean all USE_X25519_SIBLING=0] refused")
+        _run_make("clean")
+        result = _run_make("BACKEND=uci", "USE_X25519_SIBLING=1",
+                           "USE_CHACHA_SIBLING=1")
+        assert result.returncode == 0, (
+            "make BACKEND=uci USE_X25519_SIBLING=1 USE_CHACHA_SIBLING=1 "
+            f"failed — `=1` must stay an accepted no-op:\n{result.stderr[-1500:]}")
+        _assert_valid_prg()
+        print("[USE_*_SIBLING=1] accepted as a no-op")
+    finally:
+        _run_make("clean")
+
+
 def _main():
     checks = [
         ("ip65 build + labels", lambda: _check_backend("ip65")),
@@ -297,6 +370,9 @@ def _main():
          test_uci_chunked_write_flag_build),
         ("ip65 UCI_CHUNKED_WRITE=1 refused",
          test_ip65_rejects_chunked_write_flag),
+        # Issue #69 — the legacy in-tree crypto build is retired.
+        ("retired USE_*_SIBLING values refused, =1 accepted",
+         test_retired_sibling_knobs_refused),
     ]
     failures = []
     for name, fn in checks:

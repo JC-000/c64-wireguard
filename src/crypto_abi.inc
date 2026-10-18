@@ -1,10 +1,10 @@
 ; =============================================================================
 ; src/crypto_abi.inc — public crypto API consumed by WireGuard protocol layers.
 ;
-; Drop-in contract: any implementation (in-tree today, sibling library
-; tomorrow) must export these exact symbols with these exact calling
-; conventions. Swapping implementation = changing the link line, no
-; call-site changes.
+; Drop-in contract: any implementation must export these exact symbols
+; with these exact calling conventions. Since issue #69 the sibling
+; libraries are the only implementation (the legacy in-tree crypto was
+; retired 2026-10-18).
 ;
 ; Sibling library correspondence:
 ;   fe25519_* / x25519_*  → c64-x25519           (src/x25519.inc)
@@ -63,13 +63,13 @@
 .import kdf_2
 .import kdf_3
 
-; --- One-off helpers that are NOT part of any sibling-lib ABI but are
-;     currently WG-internal. Group separately so future ABI-drift
-;     verification (tools/check_abi_drift.py in Phase 3.5) ignores them.
-
-; fe25519 WG-only helpers (no sibling equivalent)
-.import fe25519_cmp_p
-.import fe25519_reduce_wide
+; --- Boot-time helpers ---
+; (fe25519_cmp_p and fe25519_reduce_wide used to be imported here as
+; "WG-only helpers". Their only implementation was the in-tree
+; src/crypto/fe25519.s, retired 2026-10-18 with the legacy build, issue
+; #69; nothing referenced them, which is why the dangling .imports linked.
+; tools/check_abi_drift.py no longer whitelists them, so re-adding either
+; is reported as drift.)
 
 ; REU setup — called once at boot. reu_mul_init does not exist in the
 ; REU-less build (x25519 onchip profile drops the whole §8.2 surface),
@@ -93,9 +93,6 @@
 ; cycles thrown away on the first packet. Their INTEGRATION.md is
 ; explicit: "Always call it once at boot."
 ;
-; Sibling-only: the in-tree src/crypto/poly1305.s has no sqtab_ready and
-; no lib_init entry point, so the 0/0 build keeps calling sqtab_init.
-;
 ; CALL IT EXACTLY ONCE, AT BOOT (issue #103). Upstream documents these
 ; entry points as safe to call repeatedly, and for the library that is
 ; true. It is no longer true of this image: src/boot.s reclaims
@@ -106,6 +103,4 @@
 ; `jsr sqtab_init` is safe only because sqtab_ready is set here and no
 ; code clears it; if corruption ever clears it, that call is fatal rather
 ; than merely wasteful, which is the trade this image makes.
-.ifdef USE_CHACHA_SIBLING
 .import poly1305_lib_init
-.endif

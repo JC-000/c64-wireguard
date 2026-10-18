@@ -72,7 +72,11 @@ def binary_wait_for_boot_ready(transport, labels, timeout=120.0, poll_interval=2
     2026-10-18: RFC 7748 vector 1 gave 5cf4f2af... for c3da5537...). It is
     raised rather than folded into the ``None`` return because callers print
     "boot did not complete" for ``None``, which would name the wrong cause.
-    A build without the label (the legacy in-tree crypto) is not checked.
+    A booted image WITHOUT the label also raises ``BootReuFault``: every
+    build links c64-x25519 and exports it at both REU settings, so a missing
+    label means a stale or foreign labels.txt, and skipping the check there
+    would fail open. (It used to be skipped for the legacy in-tree crypto
+    build, which had no fault byte; that build was retired, issue #69.)
     Host-side only: nothing is added to the PRG. NECESSARY, NOT SUFFICIENT:
     an REU that is present but too small boots with $00 (its high banks
     alias the low ones), so the size comes from ``vice_reu_args`` and is
@@ -102,7 +106,12 @@ def _label(labels, name):
 def _refuse_reu_fault(transport, labels):
     addr = _label(labels, "x25519_reu_fault")
     if addr is None:
-        return
+        raise BootReuFault(
+            "x25519_reu_fault is not in labels.txt, so the REU settle fault "
+            "cannot be checked. Every build links c64-x25519 and exports it "
+            "(REU=1 and REU=0); the build without it was the retired legacy "
+            "in-tree crypto (issue #69). Rebuild, or check that the labels "
+            "file matches the PRG.")
     val = read_bytes(transport, addr, 1)[0]
     if val:
         # Bit meanings per libs/x25519 src/x25519_init.s
@@ -157,11 +166,11 @@ def vice_reu_args(labels):
       gives ``[]`` — no REU, so a stray REU access is not masked by one —
       and non-zero gives the smallest VICE REU covering the highest claimed
       bank (64 KiB per bank; $3B -> bank 5 -> 384 KiB -> 512);
-    * no manifest at all is the legacy in-tree build (USE_X25519_SIBLING=0),
-      which the Makefile only permits at REU=1: if its ``reu_mul_init`` is
-      present it gets 512 KiB (src/crypto/fe25519.s uses banks 0-1);
-    * neither: ``ValueError`` — there is nothing to derive from, and guessing
-      is how 24 gate suites came to boot the REU build without an REU.
+    * no manifest: ``ValueError`` — there is nothing to derive from, and
+      guessing is how 24 gate suites came to boot the REU build without an
+      REU. (A manifest-less build used to be taken for the legacy in-tree
+      crypto and given 512 KiB when ``reu_mul_init`` was present; that build
+      was retired, issue #69, so every real build carries the manifest.)
     """
     if isinstance(labels, (str, bytes)) or hasattr(labels, "__fspath__"):
         from c64_test_harness import Labels
@@ -179,7 +188,7 @@ def vice_reu_args(labels):
             raise ValueError(f"REU banks mask ${banks:X} needs {need_kib} KiB, "
                              f"beyond VICE's largest REU")
         return ["-reu", "-reusize", str(size)]
-    # A sibling build whose mask is MISSING is not the legacy build: with
+    # A sibling build whose mask is MISSING: with
     # X25519_REU_BANK >= 11 the mask exceeds $FFFF and the Makefile drops it
     # from labels.txt (it keeps only 16-bit values). Guessing 512 KiB there
     # would be too small, so refuse instead.
@@ -190,8 +199,7 @@ def vice_reu_args(labels):
             f"labels.txt has contract manifest symbols ({sibling[0]}, ...) but "
             f"no REU_BANKS_USED mask — most likely a relocated REU bank pushed "
             f"it above $FFFF and the Makefile dropped it; cannot size the REU")
-    if _label(labels, "reu_mul_init") is not None:
-        return ["-reu", "-reusize", "512"]
     raise ValueError("cannot tell whether this build needs an REU: labels.txt "
-                     "has neither the contract §5 REU_BANKS_USED manifest nor "
-                     "reu_mul_init")
+                     "has no contract §5 REU_BANKS_USED manifest (every build "
+                     "links the sibling archives, which emit it — is this "
+                     "labels.txt from this tree?)")

@@ -24,7 +24,8 @@
 .export blake2s_iv
 .export blake2s_sigma
 
-; --- word32 primitives (now in src/crypto/word32.s) ---
+; --- word32 primitives (libs/chacha20poly1305/src/lib/word32_lib.s; the
+;     in-tree src/crypto/word32.s was retired with the legacy build, #69) ---
 .import add32_to_dst
 .import xor32_in_place
 .import rotr32_16

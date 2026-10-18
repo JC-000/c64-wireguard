@@ -5,6 +5,12 @@ Measures jiffy clock ticks for fe_mul and fe_sqr with random field elements.
 Since the wireguard PRG has no bench_start/bench_stop helpers, we inject a
 small 6502 timing subroutine into the cassette buffer ($0334).
 
+Targets the c64-x25519 sibling's labels (fe25519_mul/_sqr/_tmp1..3). The
+required-label check used to name the legacy in-tree fe_mul/fe_tmp* symbols,
+which only the USE_*_SIBLING=0 build exported, so on every shipped build it
+exited FATAL before measuring anything; that build was retired 2026-10-18
+(issue #69). VICE attaches a 512 KiB REU, so build with the default REU=1.
+
 Usage:
     python3 tools/bench_fe_ops.py [--iterations N]
 """
@@ -98,14 +104,14 @@ def read_result_ticks(transport):
 
 def bench_fe_mul(transport, labels, a, b):
     """Time a single fe_mul call in jiffy ticks."""
-    write_bytes(transport, labels["fe_tmp1"], int_to_le32(a))
-    write_bytes(transport, labels["fe_tmp2"], int_to_le32(b))
+    write_bytes(transport, labels["fe25519_tmp1"], int_to_le32(a))
+    write_bytes(transport, labels["fe25519_tmp2"], int_to_le32(b))
     write_bytes(transport, labels["fe25519_src1"],
-                bytes([labels["fe_tmp1"] & 0xFF, (labels["fe_tmp1"] >> 8) & 0xFF]))
+                bytes([labels["fe25519_tmp1"] & 0xFF, (labels["fe25519_tmp1"] >> 8) & 0xFF]))
     write_bytes(transport, labels["fe25519_src2"],
-                bytes([labels["fe_tmp2"] & 0xFF, (labels["fe_tmp2"] >> 8) & 0xFF]))
+                bytes([labels["fe25519_tmp2"] & 0xFF, (labels["fe25519_tmp2"] >> 8) & 0xFF]))
     write_bytes(transport, labels["fe25519_dst"],
-                bytes([labels["fe_tmp3"] & 0xFF, (labels["fe_tmp3"] >> 8) & 0xFF]))
+                bytes([labels["fe25519_tmp3"] & 0xFF, (labels["fe25519_tmp3"] >> 8) & 0xFF]))
 
     # Load and run timer subroutine for fe_mul
     code = build_timer_subroutine(labels["fe25519_mul"])
@@ -116,11 +122,11 @@ def bench_fe_mul(transport, labels, a, b):
 
 def bench_fe_sqr(transport, labels, a):
     """Time a single fe_sqr call in jiffy ticks."""
-    write_bytes(transport, labels["fe_tmp1"], int_to_le32(a))
+    write_bytes(transport, labels["fe25519_tmp1"], int_to_le32(a))
     write_bytes(transport, labels["fe25519_src1"],
-                bytes([labels["fe_tmp1"] & 0xFF, (labels["fe_tmp1"] >> 8) & 0xFF]))
+                bytes([labels["fe25519_tmp1"] & 0xFF, (labels["fe25519_tmp1"] >> 8) & 0xFF]))
     write_bytes(transport, labels["fe25519_dst"],
-                bytes([labels["fe_tmp3"] & 0xFF, (labels["fe_tmp3"] >> 8) & 0xFF]))
+                bytes([labels["fe25519_tmp3"] & 0xFF, (labels["fe25519_tmp3"] >> 8) & 0xFF]))
 
     code = build_timer_subroutine(labels["fe25519_sqr"])
     load_code(transport, TIMER_ADDR, code)
@@ -147,8 +153,8 @@ def main():
     labels = Labels.from_file(LABELS_PATH)
 
     # Verify required labels exist
-    required = ["fe_mul", "fe_sqr", "fe_tmp1", "fe_tmp2", "fe_tmp3",
-                "fe_src1", "fe_src2", "fe_dst"]
+    required = ["fe25519_mul", "fe25519_sqr", "fe25519_tmp1", "fe25519_tmp2",
+                "fe25519_tmp3", "fe25519_src1", "fe25519_src2", "fe25519_dst"]
     for name in required:
         if name not in labels:
             print(f"FATAL: label '{name}' not found in {LABELS_PATH}")

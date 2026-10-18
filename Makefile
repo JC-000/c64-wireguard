@@ -9,31 +9,38 @@ VICE = x64sc
 #   uci   — Ultimate 64 UCI ($DF1B-$DF1F) adapter; no ip65 dependency
 BACKEND ?= ip65
 
-# --- Sibling-library integration ---
-# When USE_X25519_SIBLING=1, the in-tree src/crypto/fe25519.s +
-# src/crypto/x25519.s are dropped from the link and replaced by
-# build/lib/x25519.a — the c64-x25519 archive built by the library's own
-# contract-§6 `make lib` target (see tools/integration/build_x25519.sh).
-# The in-tree X25519/fe25519 buffers in src/wg/data.s are suppressed via
-# .ifdef USE_X25519_SIBLING; the archive carries its own data segment.
+# --- Sibling-library crypto (the only crypto build) ---
+# X25519 comes from build/lib/x25519.a, the c64-x25519 archive built by the
+# library's own contract-§6 `make lib` target (tools/integration/build_x25519.sh),
+# and ChaCha20-Poly1305 from build/lib/chacha20poly1305.a (Profile B;
+# tools/integration/build_chacha20poly1305.sh). Both archives carry their own
+# data segments.
 #
-# When USE_CHACHA_SIBLING=1, the same swap happens for
-# src/crypto/chacha20.s + poly1305.s + aead.s + word32.s, replaced by
-# build/lib/chacha20poly1305.a (Profile B, rolled-outer multiply; see
-# tools/integration/build_chacha20poly1305.sh).
-#
-# Both default ON since the contract-aligned release: the siblings are
-# the shipped implementation (the two-archive link is also what makes
-# every reachable multiply constant-time — in-tree poly1305.s carries
-# the issue #16 non-CT mul_8x8). Set both to 0 for the legacy all-in-tree
-# build. Mixed configs are refused below: the archives cross-resolve
-# (x25519 provides sqtab_init/ct_mul_8x8, chacha defers to it), so each
-# half-on combination hits duplicate-export or unresolved-import errors.
+# RETIRED 2026-10-18 (issue #69): the legacy all-in-tree crypto build
+# (USE_X25519_SIBLING=0 USE_CHACHA_SIBLING=0) and its six sources
+# (src/crypto/{fe25519,x25519,chacha20,poly1305,aead,word32}.s). Its
+# fe25519.s had three REU execute sites with no §8.2 settle and no fault
+# byte, silently computed wrong X25519 results without an REU, and no
+# shipped artifact ever linked it. The knobs survive only so an old command
+# line fails loudly: `=1` (the only remaining configuration) is accepted as
+# a no-op, any other value is refused.
 USE_X25519_SIBLING ?= 1
 USE_CHACHA_SIBLING ?= 1
 
-ifneq ($(USE_X25519_SIBLING),$(USE_CHACHA_SIBLING))
-$(error USE_X25519_SIBLING and USE_CHACHA_SIBLING must match (both 1 or both 0); mixed sibling configs no longer link — see tools/integration/*.sh headers)
+# Every knob $(error) guard in this file fires at parse time, which would also
+# refuse e.g. `make clean BACKEND=uci WG_MTU1440=1`. KNOB_GUARDS is non-empty
+# whenever something other than `clean` is going to be built (an empty goal
+# list means the default target), so clean always works and every build is
+# still guarded. Defined here, ahead of its first user.
+KNOB_GUARDS := $(if $(MAKECMDGOALS),$(filter-out clean,$(MAKECMDGOALS)),all)
+
+ifneq ($(KNOB_GUARDS),)
+ifneq ($(USE_X25519_SIBLING),1)
+$(error USE_X25519_SIBLING=$(USE_X25519_SIBLING) is no longer supported: the legacy in-tree crypto build was RETIRED (issue #69). The sibling archives are the only crypto build; drop the variable from the command line, environment or MAKEFLAGS)
+endif
+ifneq ($(USE_CHACHA_SIBLING),1)
+$(error USE_CHACHA_SIBLING=$(USE_CHACHA_SIBLING) is no longer supported: the legacy in-tree crypto build was RETIRED (issue #69). The sibling archives are the only crypto build; drop the variable from the command line, environment or MAKEFLAGS)
+endif
 endif
 
 # --- REU knob ---
@@ -47,13 +54,9 @@ endif
 #   cartridge-port figure — same number, different claim. This one is the
 #   onchip-vs-REU profile ratio and it holds: measured 2026-09-07 vs WARP,
 #   REU wins at 1 MHz while onchip wins at 48 MHz, 47.7 s against 89.0 s.)
-# Only meaningful with the siblings ON (the in-tree fe25519 is REU-only).
 REU ?= 1
 
 ifeq ($(REU),0)
-ifeq ($(USE_X25519_SIBLING),0)
-$(error REU=0 requires the sibling build (USE_X25519_SIBLING=1); the in-tree fe25519 has no REU-less multiply)
-endif
 X25519_PROFILE = onchip
 else
 X25519_PROFILE = default
@@ -83,15 +86,6 @@ CA65FLAGS = -I $(SRC_DIR) -I $(SRC_DIR)/net/$(BACKEND) --debug-info
 # for stepping by source line and showing local symbol scopes.
 LD65FLAGS = -C $(CFG_FILE) -Ln $(LABELS) -m $(MAP) --dbgfile $(DBG)
 
-# Propagate sibling flags to ca65 so src/wg/data.s + src/exports.s
-# suppress the in-tree buffer / equate decls that the sibling archive
-# now owns.
-ifeq ($(USE_X25519_SIBLING),1)
-CA65FLAGS += -D USE_X25519_SIBLING=1
-endif
-ifeq ($(USE_CHACHA_SIBLING),1)
-CA65FLAGS += -D USE_CHACHA_SIBLING=1
-endif
 ifeq ($(REU),0)
 CA65FLAGS += -D WG_NO_REU=1
 endif
@@ -105,11 +99,8 @@ endif
 # build is byte-identical to a tree without this flag. UCI only — ip65 has
 # no chunked path and its caps are already 1472/1472 (clamped by
 # WG_DATAGRAM_CAP for RAM, see src/constants.inc).
-# The knob $(error) guards below fire at parse time, which would also refuse
-# `make clean BACKEND=uci WG_MTU1440=1`. KNOB_GUARDS is non-empty whenever
-# something other than `clean` is going to be built (an empty goal list means
-# the default target), so clean always works and every build is still guarded.
-KNOB_GUARDS := $(if $(MAKECMDGOALS),$(filter-out clean,$(MAKECMDGOALS)),all)
+# The knob $(error) guards below are gated on KNOB_GUARDS (defined at the top
+# of this file, above the USE_*_SIBLING guards) so `make clean` always works.
 UCI_CHUNKED_WRITE ?= 0
 ifeq ($(UCI_CHUNKED_WRITE),1)
 ifneq ($(BACKEND),uci)
@@ -202,61 +193,30 @@ ifneq ($(MSG_PORT),9999)
 CA65FLAGS += -D MSG_PORT=$(MSG_PORT)
 endif
 
-# Common ca65 source set — shared by every backend. The in-tree crypto
-# modules that the siblings replace are filtered out below.
-COMMON_SRCS_ALL = $(SRC_DIR)/loadaddr.s \
-                  $(SRC_DIR)/boot.s \
-                  $(SRC_DIR)/exports.s \
-                  $(SRC_DIR)/contract_asserts.s \
-                  $(SRC_DIR)/crypto/word32.s \
-                  $(SRC_DIR)/crypto/entropy.s \
-                  $(SRC_DIR)/crypto/blake2s.s \
-                  $(SRC_DIR)/crypto/blake2s_kdf.s \
-                  $(SRC_DIR)/crypto/chacha20.s \
-                  $(SRC_DIR)/crypto/poly1305.s \
-                  $(SRC_DIR)/crypto/aead.s \
-                  $(SRC_DIR)/crypto/fe25519.s \
-                  $(SRC_DIR)/crypto/x25519.s \
-                  $(SRC_DIR)/wg/timer.s \
-                  $(SRC_DIR)/wg/tai64n.s \
-                  $(SRC_DIR)/wg/cookie.s \
-                  $(SRC_DIR)/wg/config.s \
-                  $(SRC_DIR)/wg/data.s \
-                  $(SRC_DIR)/wg/strings.s \
-                  $(SRC_DIR)/wg/handshake.s \
-                  $(SRC_DIR)/wg/transport.s \
-                  $(SRC_DIR)/wg/session.s \
-                  $(SRC_DIR)/wg/ip_build.s \
-                  $(SRC_DIR)/wg/vic_boost.s \
-                  $(SRC_DIR)/wg/disk_config.s
-
-# Drop in-tree crypto sources that the siblings replace.
-X25519_REPLACED_SRCS  = $(SRC_DIR)/crypto/fe25519.s $(SRC_DIR)/crypto/x25519.s
-CHACHA_REPLACED_SRCS  = $(SRC_DIR)/crypto/chacha20.s \
-                        $(SRC_DIR)/crypto/poly1305.s \
-                        $(SRC_DIR)/crypto/aead.s \
-                        $(SRC_DIR)/crypto/word32.s
-
-ifeq ($(USE_X25519_SIBLING),1)
-COMMON_SRCS_DROP_X25519 := $(X25519_REPLACED_SRCS)
-else
-COMMON_SRCS_DROP_X25519 :=
-endif
-ifeq ($(USE_CHACHA_SIBLING),1)
-COMMON_SRCS_DROP_CHACHA := $(CHACHA_REPLACED_SRCS)
-else
-COMMON_SRCS_DROP_CHACHA :=
-endif
-
-COMMON_SRCS = $(filter-out $(COMMON_SRCS_DROP_X25519) $(COMMON_SRCS_DROP_CHACHA),$(COMMON_SRCS_ALL))
+# Common ca65 source set — shared by every backend. ORDER IS LINK ORDER:
+# reordering this list moves code and changes the PRG.
+COMMON_SRCS = $(SRC_DIR)/loadaddr.s \
+              $(SRC_DIR)/boot.s \
+              $(SRC_DIR)/exports.s \
+              $(SRC_DIR)/contract_asserts.s \
+              $(SRC_DIR)/crypto/entropy.s \
+              $(SRC_DIR)/crypto/blake2s.s \
+              $(SRC_DIR)/crypto/blake2s_kdf.s \
+              $(SRC_DIR)/wg/timer.s \
+              $(SRC_DIR)/wg/tai64n.s \
+              $(SRC_DIR)/wg/cookie.s \
+              $(SRC_DIR)/wg/config.s \
+              $(SRC_DIR)/wg/data.s \
+              $(SRC_DIR)/wg/strings.s \
+              $(SRC_DIR)/wg/handshake.s \
+              $(SRC_DIR)/wg/transport.s \
+              $(SRC_DIR)/wg/session.s \
+              $(SRC_DIR)/wg/ip_build.s \
+              $(SRC_DIR)/wg/vic_boost.s \
+              $(SRC_DIR)/wg/disk_config.s
 
 # Sibling archives that get linked into the PRG.
-SIBLING_ARCHIVES :=
-ifeq ($(USE_X25519_SIBLING),1)
-SIBLING_ARCHIVES += $(X25519_ARCHIVE)
-endif
-ifeq ($(USE_CHACHA_SIBLING),1)
-SIBLING_ARCHIVES += $(CHACHA_ARCHIVE)
+SIBLING_ARCHIVES := $(X25519_ARCHIVE) $(CHACHA_ARCHIVE)
 # x25519.a is listed a SECOND time after chacha's archive — DEFENCE IN
 # DEPTH, not the primary mechanism. ld65 scans an archive once, in
 # command-line order: at x25519 v0.16.0 the §8.1 group moved out of
@@ -280,10 +240,7 @@ SIBLING_ARCHIVES += $(CHACHA_ARCHIVE)
 # the other's comment too. The independent backstop for both is the §6.6
 # ratchet on __LIB_X25519_INIT_CODE_SIZE__, which fires at BOTH REU settings
 # when sqtab_init.o goes unextracted.
-ifeq ($(USE_X25519_SIBLING),1)
 SIBLING_ARCHIVES += $(X25519_ARCHIVE)
-endif
-endif
 
 # Per-backend source list.
 IP65_SRCS = $(SRC_DIR)/net/ip65/net.s \
@@ -442,7 +399,8 @@ $(CHACHA_ARCHIVE): FORCE | $(LIB_DIR)
 #                   1472/1472), from which WG_MTU, MSG_TEXT_MAX and the buffer
 #                   sizes in src/wg/data.s derive.
 #   REU=0           adds -D WG_NO_REU=1.
-#   USE_*_SIBLING   add their own -D and change which sources are linked at all.
+#   (USE_*_SIBLING added their own -D until the legacy build was retired,
+#                   issue #69; they no longer reach CA65FLAGS.)
 #
 # With nothing carrying those, every .o looks up to date after a flip and make
 # relinks a binary assembled under the PREVIOUS configuration. Same

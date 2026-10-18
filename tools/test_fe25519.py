@@ -94,96 +94,96 @@ def read_fe(transport, addr):
 
 def c64_fe_add(transport, labels, a, b):
     """Compute a + b mod p on C64."""
-    write_fe(transport, labels["fe_tmp1"], a)
-    write_fe(transport, labels["fe_tmp2"], b)
+    write_fe(transport, labels["fe25519_tmp1"], a)
+    write_fe(transport, labels["fe25519_tmp2"], b)
     set_fe_ptrs(transport, labels,
-                src1=labels["fe_tmp1"],
-                src2=labels["fe_tmp2"],
-                dst=labels["fe_tmp3"])
+                src1=labels["fe25519_tmp1"],
+                src2=labels["fe25519_tmp2"],
+                dst=labels["fe25519_tmp3"])
     jsr(transport, labels["fe25519_add"])
-    return read_fe(transport, labels["fe_tmp3"])
+    return read_fe(transport, labels["fe25519_tmp3"])
 
 
 def c64_fe_sub(transport, labels, a, b):
     """Compute a - b mod p on C64."""
-    write_fe(transport, labels["fe_tmp1"], a)
-    write_fe(transport, labels["fe_tmp2"], b)
+    write_fe(transport, labels["fe25519_tmp1"], a)
+    write_fe(transport, labels["fe25519_tmp2"], b)
     set_fe_ptrs(transport, labels,
-                src1=labels["fe_tmp1"],
-                src2=labels["fe_tmp2"],
-                dst=labels["fe_tmp3"])
+                src1=labels["fe25519_tmp1"],
+                src2=labels["fe25519_tmp2"],
+                dst=labels["fe25519_tmp3"])
     jsr(transport, labels["fe25519_sub"])
-    return read_fe(transport, labels["fe_tmp3"])
+    return read_fe(transport, labels["fe25519_tmp3"])
 
 
 def c64_fe_mul(transport, labels, a, b):
     """Compute a * b mod p on C64."""
-    write_fe(transport, labels["fe_tmp1"], a)
-    write_fe(transport, labels["fe_tmp2"], b)
+    write_fe(transport, labels["fe25519_tmp1"], a)
+    write_fe(transport, labels["fe25519_tmp2"], b)
     set_fe_ptrs(transport, labels,
-                src1=labels["fe_tmp1"],
-                src2=labels["fe_tmp2"],
-                dst=labels["fe_tmp3"])
+                src1=labels["fe25519_tmp1"],
+                src2=labels["fe25519_tmp2"],
+                dst=labels["fe25519_tmp3"])
     jsr(transport, labels["fe25519_mul"], timeout=120.0)
-    return read_fe(transport, labels["fe_tmp3"])
+    return read_fe(transport, labels["fe25519_tmp3"])
 
 
 def c64_fe_sqr(transport, labels, a):
     """Compute a^2 mod p on C64."""
-    write_fe(transport, labels["fe_tmp1"], a)
+    write_fe(transport, labels["fe25519_tmp1"], a)
     set_fe_ptrs(transport, labels,
-                src1=labels["fe_tmp1"],
-                dst=labels["fe_tmp3"])
+                src1=labels["fe25519_tmp1"],
+                dst=labels["fe25519_tmp3"])
     jsr(transport, labels["fe25519_sqr"], timeout=120.0)
-    return read_fe(transport, labels["fe_tmp3"])
+    return read_fe(transport, labels["fe25519_tmp3"])
 
 
 def c64_fe_inv(transport, labels, a):
     """Compute a^(p-2) mod p on C64."""
-    write_fe(transport, labels["fe_tmp1"], a)
+    write_fe(transport, labels["fe25519_tmp1"], a)
     set_fe_ptrs(transport, labels,
-                src1=labels["fe_tmp1"],
-                dst=labels["fe_tmp3"])
+                src1=labels["fe25519_tmp1"],
+                dst=labels["fe25519_tmp3"])
     # fe_inv takes ~253 squarings + 11 muls — very slow
     jsr(transport, labels["fe25519_inv"], timeout=600.0)
-    return read_fe(transport, labels["fe_tmp3"])
+    return read_fe(transport, labels["fe25519_tmp3"])
 
 
 def c64_fe_mul_a24(transport, labels, a):
     """Compute a * 121665 mod p on C64."""
-    write_fe(transport, labels["fe_tmp1"], a)
+    write_fe(transport, labels["fe25519_tmp1"], a)
     set_fe_ptrs(transport, labels,
-                src1=labels["fe_tmp1"],
-                dst=labels["fe_tmp3"])
+                src1=labels["fe25519_tmp1"],
+                dst=labels["fe25519_tmp3"])
     jsr(transport, labels["fe25519_mul_a24"], timeout=60.0)
-    return read_fe(transport, labels["fe_tmp3"])
+    return read_fe(transport, labels["fe25519_tmp3"])
 
 
 def c64_fe_copy(transport, labels, a):
     """Copy a field element via fe_copy."""
-    write_fe(transport, labels["fe_tmp1"], a)
+    write_fe(transport, labels["fe25519_tmp1"], a)
     set_fe_ptrs(transport, labels,
-                src1=labels["fe_tmp1"],
-                dst=labels["fe_tmp3"])
+                src1=labels["fe25519_tmp1"],
+                dst=labels["fe25519_tmp3"])
     jsr(transport, labels["fe25519_copy"])
-    return read_fe(transport, labels["fe_tmp3"])
+    return read_fe(transport, labels["fe25519_tmp3"])
 
 
 def c64_fe_zero(transport, labels):
     """Zero a field element via fe_zero."""
     # Write nonzero first to prove it gets zeroed
-    write_fe(transport, labels["fe_tmp3"], P - 1)
-    set_fe_ptrs(transport, labels, dst=labels["fe_tmp3"])
+    write_fe(transport, labels["fe25519_tmp3"], P - 1)
+    set_fe_ptrs(transport, labels, dst=labels["fe25519_tmp3"])
     jsr(transport, labels["fe25519_zero"])
-    return read_fe(transport, labels["fe_tmp3"])
+    return read_fe(transport, labels["fe25519_tmp3"])
 
 
 def c64_fe_one(transport, labels):
     """Set a field element to 1 via fe_one."""
-    write_fe(transport, labels["fe_tmp3"], P - 1)
-    set_fe_ptrs(transport, labels, dst=labels["fe_tmp3"])
+    write_fe(transport, labels["fe25519_tmp3"], P - 1)
+    set_fe_ptrs(transport, labels, dst=labels["fe25519_tmp3"])
     jsr(transport, labels["fe25519_one"])
-    return read_fe(transport, labels["fe_tmp3"])
+    return read_fe(transport, labels["fe25519_tmp3"])
 
 
 # ============================================================================
@@ -408,11 +408,11 @@ def test_cswap(transport, labels, rng):
     b = rand_fe(rng)
 
     # Test no-swap (mask = 0x00)
-    write_fe(transport, labels["fe_tmp1"], a)
-    write_fe(transport, labels["fe_tmp2"], b)
+    write_fe(transport, labels["fe25519_tmp1"], a)
+    write_fe(transport, labels["fe25519_tmp2"], b)
     set_fe_ptrs(transport, labels,
-                src1=labels["fe_tmp1"],
-                src2=labels["fe_tmp2"])
+                src1=labels["fe25519_tmp1"],
+                src2=labels["fe25519_tmp2"])
     # Write mask to A via a byte in memory and LDA before jsr
     # Actually, fe_cswap expects A register. jsr() can't set A.
     # Use a wrapper: write the mask byte, then have a tiny trampoline.
@@ -431,8 +431,8 @@ def test_cswap(transport, labels, rng):
         0x4C, cswap_addr & 0xFF, cswap_addr >> 8,  # JMP fe_cswap
     ]))
     jsr(transport, trampoline)
-    r_a = read_fe(transport, labels["fe_tmp1"])
-    r_b = read_fe(transport, labels["fe_tmp2"])
+    r_a = read_fe(transport, labels["fe25519_tmp1"])
+    r_b = read_fe(transport, labels["fe25519_tmp2"])
 
     if r_a == a and r_b == b:
         passed += 1
@@ -442,18 +442,18 @@ def test_cswap(transport, labels, rng):
         print(f"  FAIL cswap no-swap: a changed={r_a != a}, b changed={r_b != b}")
 
     # Swap test (mask = $FF)
-    write_fe(transport, labels["fe_tmp1"], a)
-    write_fe(transport, labels["fe_tmp2"], b)
+    write_fe(transport, labels["fe25519_tmp1"], a)
+    write_fe(transport, labels["fe25519_tmp2"], b)
     set_fe_ptrs(transport, labels,
-                src1=labels["fe_tmp1"],
-                src2=labels["fe_tmp2"])
+                src1=labels["fe25519_tmp1"],
+                src2=labels["fe25519_tmp2"])
     write_bytes(transport, trampoline, bytes([
         0xA9, 0xFF,                          # LDA #$FF
         0x4C, cswap_addr & 0xFF, cswap_addr >> 8,  # JMP fe_cswap
     ]))
     jsr(transport, trampoline)
-    r_a = read_fe(transport, labels["fe_tmp1"])
-    r_b = read_fe(transport, labels["fe_tmp2"])
+    r_a = read_fe(transport, labels["fe25519_tmp1"])
+    r_b = read_fe(transport, labels["fe25519_tmp2"])
 
     if r_a == b and r_b == a:
         passed += 1
@@ -480,10 +480,10 @@ def test_reduce_final(transport, labels):
     for name, val, expected in cases:
         # Write raw bytes (may be >= p)
         raw = val.to_bytes(32, "little")
-        write_bytes(transport, labels["fe_tmp3"], raw)
-        set_fe_ptrs(transport, labels, dst=labels["fe_tmp3"])
+        write_bytes(transport, labels["fe25519_tmp3"], raw)
+        set_fe_ptrs(transport, labels, dst=labels["fe25519_tmp3"])
         jsr(transport, labels["fe25519_reduce_final"])
-        result = read_fe(transport, labels["fe_tmp3"])
+        result = read_fe(transport, labels["fe25519_tmp3"])
 
         if result == expected:
             passed += 1
@@ -588,46 +588,16 @@ def main():
     # Load labels
     labels = Labels.from_file(LABELS_PATH)
 
-    # --- Symbol-name compatibility shim ---------------------------------
-    # The in-tree fe25519/x25519 path (default build) exports the scratch
-    # buffers as fe_tmp{1..4}. The c64-x25519 sibling (USE_X25519_SIBLING=1,
-    # v0.6.0+) renames the equivalents to fe25519_tmp{1..4} to match its
-    # own canonical naming. The test driver only cares about the resolved
-    # addresses, so we install bidirectional aliases at load time and let
-    # the rest of the file keep using the historical fe_tmp* names.
-    #
-    # fe_wide moves to a ZP-pinned working buffer in the sibling and is no
-    # longer emitted as a labels.txt entry; it's also unused by this test
-    # (only referenced in the required-list sanity check), so we drop it
-    # from required when the sibling owns the build.
-    _BUF_ALIASES = (
-        ("fe_tmp1", "fe25519_tmp1"),
-        ("fe_tmp2", "fe25519_tmp2"),
-        ("fe_tmp3", "fe25519_tmp3"),
-        ("fe_tmp4", "fe25519_tmp4"),
-    )
-    for legacy, canonical in _BUF_ALIASES:
-        if legacy not in labels and canonical in labels:
-            labels._by_name[legacy] = labels._by_name[canonical]
-        elif canonical not in labels and legacy in labels:
-            labels._by_name[canonical] = labels._by_name[legacy]
-
     required = [
         "fe25519_src1", "fe25519_src2", "fe25519_dst",
         "fe25519_copy", "fe25519_zero", "fe25519_one",
         "fe25519_add", "fe25519_sub", "fe25519_mul", "fe25519_sqr", "fe25519_inv",
         "fe25519_cswap", "fe25519_mul_a24", "fe25519_reduce_final",
-        "fe_tmp1", "fe_tmp2", "fe_tmp3", "fe_tmp4",
+        "fe25519_tmp1", "fe25519_tmp2", "fe25519_tmp3", "fe25519_tmp4",
         "fe_p",
         "cassette_buf",
         "input_buffer",
     ]
-    # fe_wide is in-tree-only — sibling pins it to ZP and skips the
-    # labels.txt entry. Test code doesn't actually use this label, but
-    # validate its presence when the in-tree path is active so an
-    # accidental drop on that side is still caught.
-    if "fe_wide" in labels:
-        required.append("fe_wide")
     for name in required:
         if labels.address(name) is None:
             print(f"FATAL: '{name}' label not found in {LABELS_PATH}")
@@ -635,12 +605,12 @@ def main():
     print(f"Labels loaded: {len(required)} required labels verified")
 
     # Launch VICE
-    # fe25519_mul does table lookups against REU-resident product rows
-    # (src/crypto/fe25519.s reu_mul_init / reu_fetch_mul_row). The harness
-    # does not attach an REU by default, and without one the REU registers
-    # read back open-bus and the "fetched" rows are stale RAM — issue #34's
-    # non-deterministic fe_mul/fe_inv failures. 512 KiB covers banks 0-7
-    # per src/crypto/shared/reu_layout.inc (sibling uses banks up to 5).
+    # At REU=1, fe25519_mul does table lookups against REU-resident product
+    # rows built at boot by the sibling's reu_mul_init. Without an REU the
+    # registers read back open-bus and the "fetched" rows are stale RAM —
+    # issue #34's non-deterministic fe_mul/fe_inv failures. The REU size is
+    # derived from the build's contract §5 manifest by vice_reu_args (none
+    # at REU=0, 512 KiB for banks 0,1,3,4,5 at REU=1).
     config = ViceConfig(
         prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
         extra_args=vice_reu_args(labels),

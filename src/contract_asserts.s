@@ -1,8 +1,8 @@
 ; =============================================================================
 ; src/contract_asserts.s — link-time c64-lib-contract composition checks.
 ;
-; Active only in the two-sibling build (USE_X25519_SIBLING=1 +
-; USE_CHACHA_SIBLING=1; the Makefile enforces that the toggles match).
+; Describes the two-sibling composition, which since issue #69 is the only
+; crypto build (the legacy in-tree build was retired 2026-10-18).
 ;
 ; Pins: c64-x25519 v0.11.2, c64-ChaCha20-Poly1305 v0.9.0.
 ;
@@ -51,15 +51,6 @@
 ; exporting LIB_SHARED_SQTAB_BASE, so the consumer holds it — in exactly
 ; one place, per contract v0.10.2.
 .include "crypto/shared/sqtab_base.inc"
-
-.ifdef USE_X25519_SIBLING
-
-; The Makefile refuses to build a mixed configuration, but this file is
-; also assemblable by hand; fail loudly rather than silently checking
-; half a composition.
-.ifndef USE_CHACHA_SIBLING
-    .error "contract_asserts.s: USE_X25519_SIBLING without USE_CHACHA_SIBLING — these checks describe the two-sibling composition and cannot verify half of it"
-.endif
 
 ; --- §5 manifest surface, both libraries ------------------------------------
 .import LIB_X25519_REU_BANKS_USED
@@ -419,7 +410,6 @@ WG_REU_BANKS_USED = $00
 .import __APP_CODE_RUN__, __APP_CODE_SIZE__
 .assert __APP_CODE_RUN__ + __APP_CODE_SIZE__ <= $4900, lderror, "APP_CODE crossed the chacha align: every later MAIN_AREA_LO segment just moved up a whole page, costing 256 B of MAIN_AREA_LO for however many bytes you added. Either shrink APP_CODE back under $4900, or move this constant deliberately to wherever LIB_CHACHA20_POLY1305_CODE now lands (read it off build/wireguard.map) and record the page in the commit message"
 
-.endif
 
 ; --- APP_BSS_OVERLAY guard (issue #103) --------------------------------------
 ;
@@ -439,12 +429,11 @@ WG_REU_BANKS_USED = $00
 ; than a comment stating the boundary — the defect class issue #103 exists to
 ; stop (cf. the "~1.9 KB free" comment this change deletes).
 ;
-; APP_DATA is the last LIVE file-emitting segment in MAIN_AREA_HI in every
-; configuration — including USE_X25519_SIBLING=0, where the archive is not
-; linked at all and LIB_X25519_INIT_CODE does not exist. So the boundary
-; check is anchored on APP_DATA's end, not on the cold segment's load
-; address: keying it to the cold segment would make the one safety property
-; here evaporate in exactly the build that has no cold segment to reclaim.
+; APP_DATA is the last LIVE file-emitting segment in MAIN_AREA_HI. The
+; boundary check is anchored on APP_DATA's end, not on the cold segment's
+; load address, so it holds independently of the cold segment (which, until
+; the legacy in-tree build was retired under issue #69, did not exist in
+; every configuration).
 .import __MAIN_AREA_HI_START__, __MAIN_AREA_HI_SIZE__
 .import __APP_BSS_OVERLAY_START__, __APP_BSS_OVERLAY_SIZE__
 .import __APP_DATA_LOAD__, __APP_DATA_SIZE__
@@ -467,11 +456,8 @@ WG_REU_BANKS_USED = $00
 .assert __APP_BSS_OVERLAY_START__ >= __MAIN_AREA_HI_START__, lderror, "APP_BSS_OVERLAY starts below MAIN_AREA_HI — it is meant to overlay the top of that region, not extend it downward into the sqtab window"
 .assert __APP_BSS_OVERLAY_START__ + __APP_BSS_OVERLAY_SIZE__ = __MAIN_AREA_HI_START__ + __MAIN_AREA_HI_SIZE__, lderror, "APP_BSS_OVERLAY and MAIN_AREA_HI no longer end together — either APP_BSS runs past $9FFF into the ip65 blob's BSS, or the top of MAIN_AREA_HI is stranded with no segment able to use it"
 
-; The rest only exists when the x25519 archive is in the link. Under
-; USE_X25519_SIBLING=0 the segment is `optional = yes` and empty, so
-; ld65 defines none of its symbols and importing them is an unresolved
-; external, not a satisfied assert.
-.ifdef USE_X25519_SIBLING
+; The cold segment's own bounds. The x25519 archive is always in the link
+; (issue #69 retired the build without it), so these symbols always exist.
 .import __LIB_X25519_INIT_CODE_LOAD__, __LIB_X25519_INIT_CODE_SIZE__
 
 ; ADJACENCY, not ordering. The cold segment must start at exactly the byte
@@ -497,7 +483,6 @@ WG_REU_BANKS_USED = $00
 ; depend on someone remembering the ordering rule in the cfg comment.
 .assert __LIB_X25519_INIT_CODE_LOAD__ = __APP_DATA_LOAD__ + __APP_DATA_SIZE__, lderror, "LIB_X25519_INIT_CODE no longer starts immediately after APP_DATA — a file-emitting segment has been inserted between them (or after the cold segment), so live data now sits inside the span boot.s zeroes at the end of the table build. The cold segment must be the LAST file-emitting segment in MAIN_AREA_HI and must abut APP_DATA; route the new segment to MAIN_AREA_LO, or place it before APP_DATA and re-check the APP_BSS_OVERLAY boundary above"
 .assert __LIB_X25519_INIT_CODE_LOAD__ + __LIB_X25519_INIT_CODE_SIZE__ <= __APP_BSS_OVERLAY_START__ + __APP_BSS_OVERLAY_SIZE__, lderror, "LIB_X25519_INIT_CODE runs past the end of APP_BSS_OVERLAY — boot.s would zero bytes outside the region the overlay reclaims"
-.endif
 
 ; --- §13.8 network-backend capability fit (SPEC v0.12.0 §13.3 / §13.8) -------
 ;

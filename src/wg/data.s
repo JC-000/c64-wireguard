@@ -9,18 +9,22 @@
 ; No logic changes vs data.asm; mechanical ACME -> ca65 translation only.
 ;
 ; Segment layout:
-;   CRYPTO_RODATA : constant lookup tables (fe_p prime, sqtab2_lo/hi,
-;                   mul38_lo/hi_tab, x25_basepoint, rw_bit_mask)
+;   CRYPTO_RODATA : constant lookup tables (sqtab2_lo/hi, rw_bit_mask)
 ;   APP_DATA      : initialised application data (msg_port, ip_hdr_template,
 ;                   config_filename, b2s_out_len default)
-;   CRYPTO_BSS    : uninitialised crypto scratch (cc20_*, poly_*, b2s_*,
-;                   aead_*, fe_*, x25_*, mul_*, kdf_*, hmac_*, input_buffer)
+;   CRYPTO_BSS    : uninitialised crypto scratch (b2s_*, kdf_*, hmac_*,
+;                   input_buffer)
 ;   APP_BSS       : uninitialised app state (hs_*, tp_*, wg_*, cfg_*,
 ;                   cookie_*, udp_*, rw_*, tunnel/ping/msg/disk/net state)
 ;
-; Page-aligned buffers:
-;   mul_dma_lo / mul_dma_hi : MUST be page-aligned; REU DMA targets used
-;   with absolute,Y lookups where #<buf is assumed to be zero.
+; The ChaCha20/Poly1305/AEAD state (cc20_*, poly_*, aead_*) and the
+; fe25519/X25519 buffers (fe_*, x25_*, mul_dma_lo/hi, ...) are owned by the
+; sibling archives. Until 2026-10-18 this file also carried the legacy
+; in-tree copies for the USE_*_SIBLING=0 build, including the page-aligned
+; mul_dma_lo/hi REU DMA targets and their issue #104 constant-time
+; alignment asserts; that build was retired under issue #69. The shipped
+; mul_dma_lo/hi/carry live in LIB_X25519_DATA and are asserted page-aligned
+; by libs/x25519/src/mul_stage.s:83-85.
 ; =============================================================================
 
 .include "constants.inc"
@@ -66,81 +70,22 @@
 .export hmac_data_len
 
 ; --- ChaCha20 / Poly1305 / AEAD state ---
-; Owned by c64-ChaCha20-Poly1305/src/lib/data_lib.s when USE_CHACHA_SIBLING=1
-; (sibling archive exports cc20_*, poly_*, aead_* at its own addresses,
-; with cc20_work/cc20_keystream pinned to ZP $40 via the sibling's
-; zp_config.s). The in-tree exports + reservations are suppressed in
-; that case to avoid duplicate-symbol link errors.
-.ifndef USE_CHACHA_SIBLING
-.export cc20_state
-.export cc20_work
-.export cc20_keystream
-.export cc20_key
-.export cc20_nonce
-.export cc20_counter
-.export cc20_remain_hi
-.export poly_h
-.export poly_r
-.export poly_s
-.export poly_product
-.export poly1305_tag
-.export aead_key
-.export aead_nonce
-.export aead_aad_ptr
-.export aead_aad_len
-.export aead_data_ptr
-.export aead_data_len
-.export aead_tag
-.export aead_scratch
-.endif
+; Owned by c64-ChaCha20-Poly1305/src/lib/data_lib.s (the archive exports
+; cc20_*, poly_*, aead_* at its own addresses, with cc20_work/cc20_keystream
+; pinned to ZP $40 via the sibling's zp_config.s).
 
 ; --- fe25519 / X25519 / fe25519-mul support ---
-; Owned by c64-x25519/src/data.s + sibling fe25519/x25519 when
-; USE_X25519_SIBLING=1. The sibling's equivalents land in its own §4
-; segment, LIB_X25519_DATA, which the cfgs route into LOADER with
-; align = $100 (measured: the segment starts at $1000). They are NOT
-; emitted into CRYPTO_BSS/CRYPTO_RODATA, as this comment used to claim.
-; fe_p, mul38_lo/hi_tab, mul_dma_lo/hi, mul_src2_buf,
-; mul_cached_a, x25_basepoint, x25_scalar/u/result, x25_x2/z2/x3/z3/a/b/
-; da/cb/e are the sibling-owned set; fe_wide moves to ZP $40 in the
-; sibling. Suppressed here in that case to avoid duplicates.
-.ifndef USE_X25519_SIBLING
-.export fe_wide
-.export fe_tmp1
-.export fe_tmp2
-.export fe_tmp3
-.export fe_tmp4
-.export fe_p
+; Owned by the c64-x25519 archive, in its own §4 segment LIB_X25519_DATA,
+; which the cfgs route into LOADER with align = $100. fe_wide is ZP $40 in
+; the sibling.
 
-.export mul_src2_buf
-.export mul_cached_a
-.export mul_dma_lo
-.export mul_dma_hi
-.export mul38_lo_tab
-.export mul38_hi_tab
-
-.export x25_scalar
-.export x25_u
-.export x25_result
-.export x25_x2
-.export x25_z2
-.export x25_x3
-.export x25_z3
-.export x25_a
-.export x25_b
-.export x25_da
-.export x25_cb
-.export x25_e
-.export x25_basepoint
-.endif
-
-; --- Quarter-square table for in-tree fe25519 / poly1305 mult66 path ---
-; sqtab2_lo / sqtab2_hi are used only by the in-tree mult66 micro-multiply
-; in src/crypto/fe25519.s. The c64-x25519 sibling uses a different
-; multiply (sqr_lo/sqr_hi from data_x25519_rodata) and does NOT import
-; sqtab2_*, so they become dead when the x25519 sibling is active.
-; Keep the exports unconditional — labels.txt callers in the test harness
-; reference them by name; ld65 happily emits unreferenced exports.
+; --- Quarter-square table sqtab2_lo / sqtab2_hi ---
+; DEAD DATA, kept deliberately. These were used only by the mult66
+; micro-multiply in the retired in-tree src/crypto/fe25519.s (issue #69,
+; 2026-10-18). The c64-x25519 sibling uses its own sqr_lo/sqr_hi and does
+; NOT import sqtab2_*. They stay emitted solely so retiring the legacy
+; build left the shipped PRGs byte-identical; removing them is a separate
+; layout change (every later CRYPTO_RODATA/MAIN_AREA_LO byte moves).
 .export sqtab2_lo
 .export sqtab2_hi
 
@@ -257,23 +202,14 @@
 ; =============================================================================
 .segment "CRYPTO_RODATA"
 
-.ifndef USE_X25519_SIBLING
-; p = 2^255 - 19 in little-endian
-fe_p:
-        .byte $ed
-        .res 30, $ff
-        .byte $7f
-.endif
 
 ; --- mult66 second quarter-square table ---
 ; sqtab2[0] = 0
 ; sqtab2[n] = floor((256-n)^2 / 4) - 1  for n=1..255
 ; The -1 compensates for carry being clear in the negative-difference path
 ;
-; Used only by the in-tree fe25519.s mult66 path. The sibling x25519 uses
-; sqr_lo/sqr_hi tables instead, so this is dead under USE_X25519_SIBLING=1
-; — but kept emitted so the test harness can still look it up by label
-; (the harness's Labels reader cross-references both backends).
+; Dead since the in-tree fe25519.s was retired (issue #69); kept for PRG
+; byte identity — see the export block above.
 sqtab2_lo:
         .byte 0
         .repeat 255, i
@@ -286,27 +222,6 @@ sqtab2_hi:
                 .byte >((((256-(i+1))*(256-(i+1)))/4) - 1)
         .endrepeat
 
-.ifndef USE_X25519_SIBLING
-; --- mul_by_38 lookup tables ---
-; mul38_lo_tab[i] = low byte of (i * 38)
-; mul38_hi_tab[i] = high byte of (i * 38)
-mul38_lo_tab:
-        .byte 0
-        .repeat 255, i
-                .byte <((i+1) * 38)
-        .endrepeat
-
-mul38_hi_tab:
-        .byte 0
-        .repeat 255, i
-                .byte >((i+1) * 38)
-        .endrepeat
-
-; X25519 generator (constant): u = 9
-x25_basepoint:
-        .byte 9
-        .res 31, 0
-.endif
 
 ; Bit mask lookup (index 0-7 -> bit mask)
 rw_bit_mask:
@@ -474,171 +389,7 @@ hmac_data_ptr:
 hmac_data_len:
         .res 1                 ; HMAC data length
 
-.ifndef USE_CHACHA_SIBLING
-; --- ChaCha20 state (RFC 7539) ---
-; Initial state: 16 x 32-bit words = 64 bytes
-cc20_state:
-        .res 64, 0
 
-; Working state during block computation
-cc20_work:
-        .res 64, 0
-
-; Generated keystream for XOR
-cc20_keystream:
-        .res 64, 0
-
-; 256-bit key
-cc20_key:
-        .res 32, 0
-
-; 96-bit nonce
-cc20_nonce:
-        .res 12, 0
-
-; 32-bit block counter
-cc20_counter:
-        .res 4, 0
-
-; High byte of cc20_remain for 16-bit length support
-cc20_remain_hi:
-        .res 1
-
-; --- Poly1305 state ---
-; 130-bit accumulator (17 bytes for carry room)
-poly_h:
-        .res 17, 0
-
-; Clamped key part r (16 bytes)
-poly_r:
-        .res 16, 0
-
-; Key part s (added at end)
-poly_s:
-        .res 16, 0
-
-; Multiplication scratch (33 bytes for 17x16 product)
-poly_product:
-        .res 33, 0
-
-; Output tag (16 bytes)
-poly1305_tag:
-        .res 16, 0
-
-; --- AEAD state ---
-aead_key:
-        .res 32, 0
-aead_nonce:
-        .res 12, 0
-aead_aad_ptr:
-        .res 2
-aead_aad_len:
-        .res 1
-aead_data_ptr:
-        .res 2
-aead_data_len:
-        .res 2                 ; 16-bit data length for MTU up to 1500
-aead_tag:
-        .res 16, 0
-
-; Poly1305 padding/length block scratch (16 bytes)
-aead_scratch:
-        .res 16, 0
-.endif
-
-.ifndef USE_X25519_SIBLING
-; --- fe25519 field arithmetic ---
-fe_wide:
-        .res 64, 0             ; 512-bit product from multiply
-fe_tmp1:
-        .res 32, 0             ; temporary field element 1
-fe_tmp2:
-        .res 32, 0             ; temporary field element 2
-fe_tmp3:
-        .res 32, 0             ; temporary field element 3
-fe_tmp4:
-        .res 32, 0             ; temporary field element 4
-
-; --- Squaring support buffers ---
-mul_src2_buf:
-        .res 32, 0             ; absolute copy of src for fast indexed access
-mul_cached_a:
-        .res 1                 ; cached a[i] for inner loop
-
-; --- REU DMA target buffers (page-aligned for LDA abs,Y without penalty) ---
-; The inner product lookups `lda mul_dma_lo,y` / `lda mul_dma_hi,y` assume
-; these start on page boundaries (low byte = 0).
-.align 256
-mul_dma_lo:
-        .res 256, 0            ; DMA target: lo bytes of a*b for current a
-mul_dma_hi:
-        .res 256, 0            ; DMA target: hi bytes of a*b for current a
-
-; Issue #104: this is a CONSTANT-TIME invariant, not a performance hint, and
-; until now only a comment carried it. `.align 256` above is SEGMENT-RELATIVE,
-; so it yields a real page boundary only because cfg/c64-wireguard-*.cfg pins
-; CRYPTO_BSS with `align = $100`. Drop that one cfg word and the buffers land
-; mid-page; `lda mul_dma_lo,y` / `lda mul_dma_hi,y` in fe25519_mul
-; (src/crypto/fe25519.s:434-441, and the unrolled copy at :481-488) index with
-; Y = a byte of src2 — a Montgomery-ladder field element, i.e. SECRET — and an
-; abs,Y that crosses a page costs 5 cycles instead of 4. The execution time of
-; X25519 then depends on the secret. ld65 only WARNS about a dropped alignment
-; (docs/library-ingestion-architecture.md:156-158), the gate has no timing
-; oracle, and a misaligned build links and passes green.
-;
-; The asserts fire on the RESOLVED address, so they catch every route to the
-; failure: the cfg align removed, the `.align 256` above deleted, a field
-; inserted between the two buffers, or a future segment reshuffle.
-;
-; WHAT RUNS IT. The assert fires wherever this build is linked, but something
-; has to link it. .github/workflows/sibling-bump.yml gained cfg/** so a
-; cfg-only PR triggers the matrix, whose x25519=0 row is the only automated
-; build that reaches these lines -- and that row is `make BACKEND=uci`, so
-; cfg/c64-wireguard-ip65.cfg is covered by the assert but not by CI. It cannot
-; be: CI has no ip65 blob (see that workflow's paths: comment). Until the gate
-; carries a BACKEND=ip65 USE_X25519_SIBLING=0 link, an ip65-only align edit is
-; caught by this assert only when a human links that combination.
-;
-; Colocated here rather than in src/contract_asserts.s deliberately: these
-; symbols do not exist under USE_X25519_SIBLING=1 — the SHIPPED build, which
-; is guarded by the sibling's own asserts at libs/x25519/src/mul_stage.s:83-85
-; (three there: mul_dma_lo, mul_dma_hi and mul_dma_carry, which the in-tree
-; fallback does not have). They moved out of that library's src/data.s with the
-; buffers at its v0.14.0, so its data.s now carries only a "MOVED" note; check
-; the pinned tag before citing a line number here, and follow the buffers
-; rather than the file. So a central assert here would need its own .ifndef
-; plus .imports — a guard able to drift from the thing it guards.
-; Inside the defining block it is automatically absent in sibling builds and
-; automatically present in exactly the build that needs it.
-.assert (mul_dma_lo & $00FF) = 0, lderror, "mul_dma_lo must be page-aligned: CRYPTO_BSS lost align=$100 in cfg/c64-wireguard-*.cfg — the `.align 256` above is segment-relative, and `lda mul_dma_lo,y` in fe25519_mul indexes with secret Y, so a page cross is a data-dependent timing leak (ld65 only WARNS)"
-.assert (mul_dma_hi & $00FF) = 0, lderror, "mul_dma_hi must be page-aligned — same CT invariant as mul_dma_lo"
-
-; --- X25519 state (mutable ladder working buffers) ---
-x25_scalar:
-        .res 32, 0             ; clamped scalar
-x25_u:
-        .res 32, 0             ; input u-coordinate
-x25_result:
-        .res 32, 0             ; output u-coordinate
-x25_x2:
-        .res 32, 0             ; Montgomery ladder state
-x25_z2:
-        .res 32, 0
-x25_x3:
-        .res 32, 0
-x25_z3:
-        .res 32, 0
-x25_a:
-        .res 32, 0             ; ladder temporaries
-x25_b:
-        .res 32, 0
-x25_da:
-        .res 32, 0
-x25_cb:
-        .res 32, 0
-x25_e:
-        .res 32, 0
-.endif
 
 
 ; =============================================================================

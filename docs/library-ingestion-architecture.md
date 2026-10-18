@@ -33,8 +33,13 @@ debugging a duplicate-symbol / unresolved-import link error.
 
 | Toggle | Default | Sibling repo | Pinned in |
 | --- | --- | --- | --- |
-| `USE_X25519_SIBLING` | **1** | `c64-x25519` (`libs/x25519`) | `.gitmodules` |
-| `USE_CHACHA_SIBLING` | **1** | `c64-ChaCha20-Poly1305` (`libs/chacha20poly1305`) | `.gitmodules` |
+| `USE_X25519_SIBLING` | **1** (only value) | `c64-x25519` (`libs/x25519`) | `.gitmodules` |
+| `USE_CHACHA_SIBLING` | **1** (only value) | `c64-ChaCha20-Poly1305` (`libs/chacha20poly1305`) | `.gitmodules` |
+
+**Retired 2026-10-18 ([#69](https://github.com/JC-000/c64-wireguard/issues/69), PR #181):** the
+`0`/`0` legacy in-tree build. Both toggles now accept only `1` (a no-op);
+any other value is a Makefile `$(error ...)`. The text below describes why
+the toggles had to match while both values existed.
 
 The toggles must match (both 1 or both 0); the Makefile refuses mixed
 configs. The two archives cross-resolve — x25519 provides
@@ -286,14 +291,17 @@ suppression `.ifdef`s in `exports.s`/`data.s` if it displaces in-tree
 code, drift-gate coverage, and a row in the §8.0 composition table
 above deciding shared-primitive ownership *before* the first link.
 
-## Why the in-tree copies are still here
+## The in-tree copies (retired)
 
-They are the `USE_*_SIBLING=0` legacy/dev build — useful for
-bisecting whether a regression is WG-side or library-side, and as the
-reference implementation for the test suites' direct-`jsr()` entry
-points. They are no longer shipped, and the in-tree `poly1305.s`
-`mul_8x8` retains the known non-CT branches (issue #16) — do not ship
-`0/0` builds.
+They were the `USE_*_SIBLING=0` legacy/dev build, for bisecting whether a
+regression was WG-side or library-side. They were never shipped, and the
+in-tree `poly1305.s` `mul_8x8` kept the known non-CT branches (issue #16).
+**Removed 2026-10-18 ([#69](https://github.com/JC-000/c64-wireguard/issues/69), PR #181)**,
+together with `fe25519.s`, `x25519.s`, `chacha20.s`, `aead.s` and
+`word32.s`: `fe25519.s` had three REU execute sites with no §8.2 settle and
+no fault byte, and silently computed wrong X25519 results in VICE without
+an REU. Bisecting against them now means checking out a commit before the
+retirement.
 
 ## References
 

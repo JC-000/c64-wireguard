@@ -19,7 +19,8 @@
 ; REU bank-allocation map. Authoritative single source of truth for which
 ; REU bank/offset each subsystem owns; included here so it is syntax-
 ; checked on every build even though no .s file currently references the
-; equates by symbol (fe25519.s still hard-codes its bank/offset compute).
+; equates by symbol (the retired in-tree fe25519.s hard-coded its own
+; bank/offset compute; the sibling archives carry their own layout).
 .include "crypto/shared/reu_layout.inc"
 
 ; §8.1 shared sqtab window — single source of truth for its base.
@@ -70,28 +71,21 @@ chacha20poly1305_zp_ptr2 = zp_ptr2
 .exportzp lmul0, lmul1
 
 ; --- ChaCha20-Poly1305 sibling Profile B ct_mul_8x8 scratch ($1e/$1f) ---
-; Always exported so the chacha sibling's .importzp ct_diff_raw /
-; ct_sign_mask resolves even when USE_CHACHA_SIBLING=0 (harmless: the
-; in-tree poly1305.s doesn't reference these). Same byte range as
-; fe_src1 ($1e-$1f); time-share applies — see zp_config.inc.
+; Exported so the chacha sibling's .importzp ct_diff_raw / ct_sign_mask
+; resolves. Same byte range as fe_src1 ($1e-$1f); time-share applies —
+; see zp_config.inc.
 .exportzp ct_diff_raw, ct_sign_mask
 
-; --- ChaCha20 ZP-pinned working buffer ($40-$7F, sibling-only) ---
-; cc20_work / cc20_keystream are non-ZP BSS labels in the in-tree
-; build (defined in wg/data.s); the sibling pins them to ZP $40.
-; Exported as ZP only when USE_CHACHA_SIBLING=1 so the in-tree linker
-; still sees the BSS definitions otherwise.
-.ifdef USE_CHACHA_SIBLING
+; --- ChaCha20 ZP-pinned working buffer ($40-$7F) ---
+; The chacha sibling pins cc20_work / cc20_keystream to ZP $40.
 .exportzp cc20_work, cc20_keystream
-.endif
 
 ; --- fe25519 ZP ---
 .exportzp fe_src1, fe_src2, fe_dst, fe_misc, fe_carry, fe_loop
 .exportzp fe_mul_i, fe_mul_j
 
 ; --- fe25519 ZP ABI-aligned aliases (match c64-x25519 library naming) ---
-; Mandatory under USE_X25519_SIBLING=1 (sibling's .importzp targets);
-; left unconditional so test-harness Labels.from_file() always sees them.
+; Mandatory: they are the x25519 sibling's .importzp targets.
 fe25519_src1 = fe_src1
 fe25519_src2 = fe_src2
 fe25519_dst  = fe_dst
@@ -148,27 +142,18 @@ fe25519_dst  = fe_dst
 ; file are what keep it satisfied for when the guard lands.
 
 ; --- Quarter-square table at $8000-$83FF (runtime-built by sqtab_init) ---
-; Address-only equates; the table itself is built at runtime by
-; either the in-tree src/crypto/poly1305.s:sqtab_init or the sibling
-; libs/chacha20poly1305/src/lib/poly1305_lib.s:sqtab_init. The sibling
-; x25519's x25519_init.s .imports sqtab_lo / sqtab_hi to clear /
-; verify the table region. Without this fallback, USE_X25519_SIBLING=1
-; combined with USE_CHACHA_SIBLING=1 would leave sqtab_lo/hi
-; unresolved (in-tree poly1305.s is dropped under USE_CHACHA_SIBLING,
-; and the chacha sibling treats sqtab_lo/hi as private equates). The
-; equate values match both in-tree and sibling private definitions —
-; enforced now rather than asserted in prose: both derive from
+; Address-only equates; the table itself is built at runtime by the §8.1
+; owner (sqtab_init / mul_tables_init, reached through poly1305_lib_init).
+; The sibling x25519's x25519_init.s .imports sqtab_lo / sqtab_hi to clear /
+; verify the table region, and the chacha sibling treats sqtab_lo/hi as
+; private equates, so without these exports the two-archive link would
+; leave them unresolved. The equate values match the siblings' private
+; definitions — enforced rather than asserted in prose: both derive from
 ; crypto/shared/sqtab_base.inc, and src/contract_asserts.s checks that
 ; base against the cfg's reserved window (§6.7).
-;
-; Only emitted under USE_CHACHA_SIBLING=1 — otherwise the in-tree
-; src/crypto/poly1305.s already exports them and ld65 would flag a
-; duplicate-export error.
-.ifdef USE_CHACHA_SIBLING
 sqtab_lo = WG_SQTAB_LO
 sqtab_hi = WG_SQTAB_HI
 .export sqtab_lo, sqtab_hi
-.endif
 
 ; --- Non-ZP constants the test harness or tools may reference ---
 .export blake2s_block_size, blake2s_hash_size, blake2s_rounds

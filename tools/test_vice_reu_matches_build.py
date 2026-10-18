@@ -64,8 +64,9 @@ WHAT THIS CHECKS:
      fire on synthetic sources (S0) and to find real sites (positive control)
      before its verdict on the tree counts.
   D  Derivation, on synthetic label maps: banks 0 -> no REU; $3B -> 512 KiB;
-     legacy in-tree build (no manifest, reu_mul_init present) -> REU; nothing
-     to go on -> refuse.
+     no manifest -> refuse, even with reu_mul_init present (that shape was
+     the legacy in-tree build, retired in issue #69, and used to get 512 KiB);
+     a booted image with no x25519_reu_fault label -> BootReuFault.
   R  Runtime, in VICE, on the gate's own build: booting with the derived
      arguments must give x25519_reu_fault == 0 AND compute RFC 7748 vector 1
      correctly (R1); booting with NO REU must make binary_wait_for_boot_ready
@@ -422,8 +423,6 @@ def derivation_checks(chk: Check):
         ("D5 chacha-only banks count too",
          {"LIB_X25519_REU_BANKS_USED": 0, "LIB_CHACHA20_POLY1305_REU_BANKS_USED": 0x01},
          ["-reu", "-reusize", "128"]),
-        ("D6 legacy in-tree build (no manifest, reu_mul_init) -> REU",
-         {"reu_mul_init": 0x4822, "boot_ready": 0x908F}, ["-reu", "-reusize", "512"]),
     ]
     for what, labels, want in cases:
         try:
@@ -431,6 +430,16 @@ def derivation_checks(chk: Check):
         except Exception as exc:                                  # noqa: BLE001
             got = f"raised {exc!r}"
         chk.ok(got == want, what, f"got {got}, want {want}")
+    # D6 used to accept this shape as the legacy in-tree build (512 KiB). That
+    # build was retired (issue #69), so a manifest-less map must refuse even
+    # with reu_mul_init present — there is no fallback left to take.
+    try:
+        got = vice_reu_args({"reu_mul_init": 0x4822, "boot_ready": 0x908F})
+        chk.ok(False, "D6 no manifest, reu_mul_init present -> refuse (legacy "
+               "fallback retired, #69)", f"returned {got}")
+    except ValueError:
+        chk.ok(True, "D6 no manifest, reu_mul_init present -> refuse (legacy "
+               "fallback retired, #69)")
     try:
         got = vice_reu_args({"boot_ready": 0x908F})
         chk.ok(False, "D7 no manifest and no REU code -> refuse", f"returned {got}")
@@ -438,7 +447,7 @@ def derivation_checks(chk: Check):
         chk.ok(True, "D7 no manifest and no REU code -> refuse")
     # A relocated bank (X25519_REU_BANK >= 11) pushes the mask above $FFFF and
     # the Makefile drops it from labels.txt; the other manifest symbols stay.
-    # That must refuse, not fall back to the legacy 512 KiB guess.
+    # That must refuse with its own diagnostic (no fallback exists since #69).
     try:
         got = vice_reu_args({"reu_mul_init": 0x87D1,
                              "LIB_X25519_RESIDENT_BYTES": 0x213A})
@@ -467,6 +476,25 @@ def derivation_checks(chk: Check):
     chk.ok(got == "BootReuFault",
            "D9 fault on a build whose REU size cannot be derived -> BootReuFault, "
            "not the derivation's ValueError", f"got {got}")
+    # D10: a booted image whose labels lack x25519_reu_fault must NOT pass the
+    # boot wait unchecked (it used to: the legacy build had no fault byte).
+    # read_bytes is faked so boot_ready reads $01 and any other address $00,
+    # i.e. a healthy boot: the only reason to raise is the missing label.
+    vice_util.read_bytes = lambda t, a, n: b"\x01" if a == 0x908F else b"\x00"
+    try:
+        vice_util.binary_wait_for_boot_ready(
+            object(), {"boot_ready": 0x908F,
+                       "LIB_X25519_REU_BANKS_USED": 0x3B}, timeout=1.0)
+        got = "returned"
+    except vice_util.BootReuFault as exc:
+        got = "BootReuFault" if "x25519_reu_fault" in str(exc) else f"other: {exc}"
+    except Exception as exc:                                      # noqa: BLE001
+        got = f"{type(exc).__name__}: {exc}"
+    finally:
+        vice_util.read_bytes = real_read
+    chk.ok(got == "BootReuFault",
+           "D10 boot with no x25519_reu_fault label -> BootReuFault naming it "
+           "(no fail-open skip)", f"got {got}")
 
 
 # --------------------------------------------------------------- runtime ---

@@ -47,6 +47,9 @@ and Poly1305 paths is now the contract's CT body — the long-standing
 non-CT `mul_8x8` finding (#16) is fixed in all shipped
 configurations. (The in-tree copy, and its known non-CT branches,
 survives only in the non-shipped `USE_*_SIBLING=0` dev build.)
+*[Later note: that dev build was RETIRED on 2026-10-18 —
+[#69](https://github.com/JC-000/c64-wireguard/issues/69), PR #181. No v1.0.0
+artifact used it.]*
 
 - BLAKE2s remains in-tree by design (no sibling library exists).
 - x25519 v0.8.0 also brings the v0.7.0 RFC 7748 decode fix and the
