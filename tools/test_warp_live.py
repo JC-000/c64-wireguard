@@ -2955,8 +2955,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         if client is not None:
             from device_session import teardown_device
             td = teardown_device(args.host, client=client, logger=log)
-            results["teardown"] = td
             check_teardown(td, logger=log)
+            results["teardown"] = td
         lock.release()
         log.info("lock released")
 

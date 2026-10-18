@@ -1735,37 +1735,125 @@ def _unclassifiable_imports(tree) -> list:
 
 
 def _result_problems(tree) -> list:
-    """Every teardown_device result must reach check_teardown(), and a file
-    that tears down must decorate its main() with @fails_on_bad_teardown —
-    otherwise a box left at 48 MHz exits 0 (round-3 review)."""
+    """Every teardown_device result must be JUDGED, and judged where nothing
+    can skip it; and the judging names must be device_session's.
+
+    DOMINATING, not "somewhere in the file" (round-4 review: an
+    `if False: check_teardown(td)` stayed green). Two accepted shapes:
+      * `check_teardown(teardown_device(...))` as its own statement;
+      * `X = teardown_device(...)` IMMEDIATELY followed, in the same block,
+        by the statement `check_teardown(X, ...)`.
+    teardown_device never raises, so adjacency means the check runs
+    whenever the teardown did. And a file that tears down must decorate its
+    main() with @fails_on_bad_teardown — imported from device_session, not
+    a local look-alike (a no-op of the same name passed by name alone).
+    """
     out = []
     parents = {ch: p for p in ast.walk(tree) for ch in ast.iter_child_nodes(p)}
-    checked_names = {a.id for c in _calls_in(tree)
-                     if _callee(c) == "check_teardown" and c.args
-                     for a in [c.args[0]] if isinstance(a, ast.Name)}
+
+    def _is_check_stmt(stmt, name=None):
+        if not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)
+                and _callee(stmt.value) == "check_teardown"
+                and stmt.value.args):
+            return False
+        a = stmt.value.args[0]
+        return (isinstance(a, ast.Name) and a.id == name) if name else True
+
     tds = [c for c in _calls_in(tree) if _callee(c) == "teardown_device"]
     for c in tds:
         par = parents.get(c)
         ok = (isinstance(par, ast.Call) and _callee(par) == "check_teardown"
-              and par.args and par.args[0] is c)
-        if (not ok and isinstance(par, ast.Assign)
-                and any(isinstance(t, ast.Name) and t.id in checked_names
-                        for t in par.targets)):
-            ok = True
+              and par.args and par.args[0] is c
+              and isinstance(parents.get(par), ast.Expr))
+        if not ok and isinstance(par, ast.Assign) and len(par.targets) == 1 \
+                and isinstance(par.targets[0], ast.Name):
+            block = parents.get(par)
+            for field in ("body", "orelse", "finalbody"):
+                seq = getattr(block, field, None)
+                if isinstance(seq, list) and par in seq:
+                    k = seq.index(par)
+                    ok = (k + 1 < len(seq)
+                          and _is_check_stmt(seq[k + 1], par.targets[0].id))
+                    break
         if not ok:
-            out.append(f"line {c.lineno}: teardown_device()'s result is "
-                       f"discarded — pass it to check_teardown() so a failed "
-                       f"restore fails the run")
-    if tds:
-        mains = [n for n in getattr(tree, "body", [])
-                 if isinstance(n, ast.FunctionDef) and n.name == "main"]
-        if not any(any((isinstance(d, ast.Name) and d.id ==
-                        "fails_on_bad_teardown")
-                       or (isinstance(d, ast.Attribute)
-                           and d.attr == "fails_on_bad_teardown")
-                       for d in m.decorator_list) for m in mains):
-            out.append("main() is not @fails_on_bad_teardown — a recorded "
-                       "restore failure would not change the exit code")
+            out.append(f"line {c.lineno}: teardown_device()'s result is not "
+                       f"judged where nothing can skip it — use "
+                       f"check_teardown(teardown_device(...)) or put "
+                       f"check_teardown(X) as the very next statement")
+    if not tds:
+        return out
+    # The names must resolve to device_session's.
+    imported = {a.name for n in ast.walk(tree)
+                if isinstance(n, ast.ImportFrom) and n.module == "device_session"
+                for a in n.names if a.asname is None}
+    local = {n.name for n in ast.walk(tree)
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
+                               ast.ClassDef))}
+    local |= {t.id for n in ast.walk(tree) if isinstance(n, ast.Assign)
+              for t in n.targets if isinstance(t, ast.Name)}
+    for nm in ("check_teardown", "fails_on_bad_teardown"):
+        if nm not in imported or nm in local:
+            out.append(f"{nm} must be imported from device_session and not "
+                       f"defined or rebound locally (found imported="
+                       f"{nm in imported}, local={nm in local})")
+    mains = [n for n in getattr(tree, "body", [])
+             if isinstance(n, ast.FunctionDef) and n.name == "main"]
+    if not any(any(isinstance(d, ast.Name) and d.id == "fails_on_bad_teardown"
+                   for d in m.decorator_list) for m in mains):
+        out.append("main() is not @fails_on_bad_teardown — a recorded "
+                   "restore failure would not change the exit code")
+    return out
+
+
+def _acquire_gap_problems(tree) -> list:
+    """A lock acquired before the try that protects it: every exit in
+    between leaves the lock held and the device un-restored (round-4
+    review: echo_live acquired ~45 lines before its try). After the
+    statement that acquires, only literal bindings (`client = None`) may
+    come before a Try whose finally calls .release()."""
+    out = []
+    for blk in ast.walk(tree):
+        for field in ("body", "orelse", "finalbody"):
+            seq = getattr(blk, field, None)
+            if not isinstance(seq, list):
+                continue
+            # `try: lock.acquire_or_raise() except DeviceLockTimeout: ...`
+            # is an acquire GUARD; it is judged one level up, as a whole
+            # statement, against the statement that follows it.
+            if (isinstance(blk, ast.Try) and field == "body" and blk.handlers
+                    and not any(_callee(c) == "release" for f in blk.finalbody
+                                for c in _calls_in(f))):
+                continue
+            for k, stmt in enumerate(seq):
+                if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                     ast.ClassDef)):
+                    continue
+                acq = [c for c in _calls_in(stmt)
+                       if isinstance(c.func, ast.Attribute)
+                       and c.func.attr in ("acquire", "acquire_or_raise")]
+                if not acq:
+                    continue
+                if isinstance(stmt, ast.Try) and any(
+                        _callee(c) == "release" for f in stmt.finalbody
+                        for c in _calls_in(f)):
+                    continue        # acquired inside its own protected try
+                nxt = k + 1
+                while nxt < len(seq) and isinstance(
+                        seq[nxt], (ast.Assign, ast.AnnAssign)) and isinstance(
+                        seq[nxt].value, (ast.Constant, ast.List, ast.Dict,
+                                         ast.Tuple)):
+                    nxt += 1
+                ok = (nxt < len(seq) and isinstance(seq[nxt], ast.Try)
+                      and any(_callee(c) == "release"
+                              for f in seq[nxt].finalbody
+                              for c in _calls_in(f)))
+                if not ok:
+                    where = (f"line {seq[nxt].lineno}" if nxt < len(seq)
+                             else "the end of the block")
+                    out.append(f"line {acq[0].lineno}: lock acquired, but the "
+                               f"next real statement ({where}) is not a try "
+                               f"whose finally releases it — an exit in "
+                               f"between skips the teardown")
     return out
 
 
@@ -1884,6 +1972,7 @@ def _teardown_audit(tools_dir: Path, overrides: dict | None = None) -> dict:
         missing = need - done
         problems += _structure_problems(tree, rel == _HS_FILE)
         problems += _result_problems(tree)
+        problems += _acquire_gap_problems(tree)
         problems += _released_before_restore(tree)
         info = {"need": set(need), "missing": missing,
                 "problems": problems, "delegates": False}
@@ -2105,8 +2194,8 @@ def check_live_tool_teardown_alarms(check) -> None:
     echo_call = ("teardown_device(host, client=client, logger=log)")
     # The whole judged statement (round 3: the result goes to
     # check_teardown), for mutations that remove or move it.
-    echo_stmt = ("        check_teardown(teardown_device(host, client=client, "
-                 "logger=log),\n                       logger=log)\n")
+    echo_stmt = ("                td = teardown_device(host, client=client, "
+                 "logger=log)\n                check_teardown(td, logger=log)\n")
     cfg_call = ("td = teardown_device(args.host, client=client,\n"
                 "                                         logger=log)")
     chat_mode = '{"reset": False, "reu_off": False}'
@@ -2114,7 +2203,8 @@ def check_live_tool_teardown_alarms(check) -> None:
     cases = [
         # (label, rel, override, tool, expected missing, expect a problem)
         ("echo_live: teardown call deleted", echo,
-         _mutated(echo, echo_stmt, "        pass\n"), echo, full, False),
+         _mutated(echo, echo_stmt, "                pass\n"), echo, full,
+         False),
         ("echo_live: clock restore dropped only (idle_mhz=48)", echo,
          _mutated(echo, echo_call,
                   "teardown_device(host, client=client, idle_mhz=48, "
@@ -2176,7 +2266,9 @@ def check_live_tool_teardown_alarms(check) -> None:
     # a problem. Anchors are the post-fix shapes; a non-applying anchor
     # fails rather than skips.
     demo_hook = "live.post_session_hook = build_demo_loop()"
-    echo_fin = echo_stmt + "        lock.release()\n"
+    echo_fin_head = ("        try:\n            if client is not None:\n"
+                     "                from device_session import "
+                     "teardown_device\n")
     review = [
         ("M1 wg_demo writes the old default `= True` (**True raises at "
          "runtime; nothing restored)", "wg_demo.py",
@@ -2189,24 +2281,53 @@ def check_live_tool_teardown_alarms(check) -> None:
          _mutated("wg_demo.py", demo_hook, demo_hook +
                   "\n    setattr(live, 'post_session_teardown', {})")),
         ("M3 echo_live releases the lock BEFORE the teardown", echo,
-         _mutated(echo, echo_fin, "        lock.release()\n" + echo_stmt)),
+         _mutated(echo, echo_fin_head,
+                  "        lock.release()\n" + echo_fin_head)),
         ("M4 echo_live passes client=None", echo,
          _mutated(echo, echo_call,
                   "teardown_device(host, client=None, logger=log)")),
         ("M6 echo_live 'resets' a listener, not the device", echo,
          _mutated(echo, echo_stmt,
-                  "        check_teardown(teardown_device(host, client=client, "
-                  "reset=False, logger=log))\n        listener.reset()\n")),
+                  "                check_teardown(teardown_device(host, "
+                  "client=client, reset=False, logger=log))\n"
+                  "                listener.reset()\n")),
         ("M8 echo_live imports teardown_device under an alias", echo,
-         _mutated(echo, "        from device_session import teardown_device\n"
-                  + echo_stmt,
-                  "        from device_session import teardown_device as td\n"
-                  "        check_teardown(td(host, client=client, idle_mhz=48, "
-                  "logger=log))\n")),
+         _mutated(echo, "                from device_session import "
+                  "teardown_device\n" + echo_stmt,
+                  "                from device_session import teardown_device "
+                  "as td_fn\n                td = td_fn(host, client=client, "
+                  "idle_mhz=48, logger=log)\n"
+                  "                check_teardown(td, logger=log)\n")),
         # --- round 3 ---
         ("R3 echo_live discards the teardown result", echo,
          _mutated(echo, echo_stmt,
-                  "        teardown_device(host, client=client, logger=log)\n")),
+                  "                teardown_device(host, client=client, "
+                  "logger=log)\n")),
+        # --- round 4 ---
+        ("R4 warp judges the result under `if False:` (never runs)",
+         "test_warp_live.py",
+         _mutated("test_warp_live.py",
+                  "            check_teardown(td, logger=log)\n",
+                  "            if False:\n"
+                  "                check_teardown(td, logger=log)\n")),
+        ("R4 warp judges the result, but not as the next statement",
+         "test_warp_live.py",
+         _mutated("test_warp_live.py",
+                  "            check_teardown(td, logger=log)\n"
+                  "            results[\"teardown\"] = td\n",
+                  "            results[\"teardown\"] = td\n"
+                  "            check_teardown(td, logger=log)\n")),
+        ("R4 echo decorates main() with a LOCAL no-op of the same name",
+         echo,
+         _mutated(echo, "@fails_on_bad_teardown\ndef main() -> int:",
+                  "def fails_on_bad_teardown(f):\n    return f\n\n\n"
+                  "@fails_on_bad_teardown\ndef main() -> int:")),
+        ("R4 echo moves setup back between the acquire and the try",
+         echo,
+         _mutated(echo, "    result, trace_path, streamed, failures = None, "
+                  "None, False, []\n    try:\n",
+                  "    result, trace_path, streamed, failures = None, None, "
+                  "False, []\n    log_build(host, log)\n    try:\n")),
         ("R3 echo_live main() loses @fails_on_bad_teardown", echo,
          _mutated(echo, "@fails_on_bad_teardown\ndef main() -> int:",
                   "def main() -> int:")),
@@ -2352,7 +2473,7 @@ def check_live_tool_teardown_alarms(check) -> None:
          chat),
         ("echo_live: a COMMENT naming restore_idle() in the finally", echo,
          _mutated(echo, echo_stmt,
-                  echo_stmt + "        # not restore_idle(host): #166\n"),
+                  echo_stmt + "                # not restore_idle(host): #166\n"),
          echo),
     ]
     for label, rel, ov, tool in survivors:

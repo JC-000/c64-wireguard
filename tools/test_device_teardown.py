@@ -242,6 +242,9 @@ def main():
             ("REU detach not confirmed", dict(good, reu=False), True),
             ("reset failed", dict(good, reset="failed"), True),
             ("reset never issued", dict(good, reset=None), True),
+            # reset_and_verify's own contract: "unverified" is NOT a success
+            # — the sockets may still be stranded (round-4 review).
+            ("reset unverified", dict(good, reset="unverified"), True),
             ("gentle: clock 1, REU/reset untouched",
              {"turbo": 1, "reu": False, "reset": None, "mode": gentle}, False),
             ("gentle: clock left at 48",
@@ -269,6 +272,9 @@ def main():
         check(tool(0, dict(good, turbo=48)) == 1,
               "decorated main: rc 0 + clock left at 48 -> exit 1",
               repr(tool(0, dict(good, turbo=48))))
+        check(tool(0, dict(good, reset="unverified")) == 1,
+              "decorated main: rc 0 + reset 'unverified' -> exit 1",
+              repr(tool(0, dict(good, reset="unverified"))))
         check(tool(3, dict(good, turbo=48)) == 3,
               "decorated main: an existing failure code (3) is preserved")
         check(tool(None, dict(good, turbo=48), raise_exit=77) == ("exit", 1),
@@ -276,6 +282,20 @@ def main():
               repr(tool(None, dict(good, turbo=48), raise_exit=77)))
         check(tool(None, good, raise_exit=77) == ("exit", 77),
               "decorated main: SKIP with a clean restore stays 77")
+
+        # The tool may already have printed "PASS"/"SKIP"; when the exit is
+        # overridden, STDOUT must say so last, or a log reader is misled.
+        import contextlib
+        import io
+        for rc0, raise0, word in ((0, None, "PASS"), (None, 77, "SKIP")):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                tool(rc0, dict(good, turbo=48), raise_exit=raise0)
+            last = (buf.getvalue().strip().splitlines() or [""])[-1]
+            check(last.startswith("OVERRIDDEN: exit 1") and word in last
+                  and "device restore failed" in last,
+                  f"override after {word}: last STDOUT line says OVERRIDDEN "
+                  f"and names {word}", repr(last))
 
     # --- and the case that reaches the OUTER scope: the harness import
     # itself fails (a broken venv, a partial install — the shape that took

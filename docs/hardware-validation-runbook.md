@@ -146,8 +146,15 @@ is classified. A NEW tool that starts a PRG or opens a socket by a means
 the triggers do not recognise is in neither set and is NOT caught. Every
 `teardown_device` result must go to `check_teardown()` and the tool's
 `main()` must be `@fails_on_bad_teardown`, so a restore that does not take
-(clock not idle, REU detach unconfirmed in full mode, reset failed) exits
-non-zero. It fails unless a `finally:` pays those obligations — with
+(clock not idle, REU detach unconfirmed in full mode, or a reset that is
+anything but `verified` — `unverified` included, per `reset_and_verify`'s
+own contract) exits non-zero, with a final `OVERRIDDEN: exit 1 …` line on
+stdout after any PASS/SKIP the tool printed. **CBM80 cartridge caveat:** with
+an autostart cartridge in the port (or a Cartridge Preference serving one),
+`$FCE2` jumps to the cartridge before RAMTAS, so a reset that worked reads as
+`failed` and the full-teardown tools now exit 1 on that bench. And
+`test_ip65_rrnet_hw`'s Cartridge Preference restore is log-only: its failure
+does not change the exit code. It fails unless a `finally:` pays those obligations — with
 `teardown_device(client=...)` (or a hand-written restore) placed before any
 `.release()` in that `finally`, and no `restore_idle()` / host-only
 `teardown_device()` taking a second lock. It is a static check: it cannot

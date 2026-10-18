@@ -438,7 +438,11 @@ def teardown_failure(st) -> Optional[str]:
                    f"{mode['idle_mhz']} MHz")
     if mode["reu_off"] and not st.get("reu"):
         why.append("REU detach not confirmed")
-    if mode["reset"] and st.get("reset") in ("failed", None):
+    # Only "verified" is a reset. "unverified" is NOT a success by
+    # reset_and_verify's own contract (the sockets may still be stranded),
+    # and on a machine with a CBM80 autostart cartridge a reset that worked
+    # reads as "failed" — so such a bench now exits 1 (round-4 review).
+    if mode["reset"] and st.get("reset") != "verified":
         why.append(f"reset {st.get('reset') or 'not issued'}")
     return "; ".join(why) or None
 
@@ -468,8 +472,15 @@ def exit_code_after_teardown(rc, failures: list[str]):
     """*rc* unless a restore failed: then 1, or *rc* if it was already a
     failure. 0, None and 77 (skip) are not failures."""
     if failures and rc in (0, None, 77):
-        print(f"FAIL — device restore failed: {'; '.join(failures)}",
+        why = "; ".join(failures)
+        print(f"FAIL — device restore failed: {why}",
               file=sys.stderr, flush=True)
+        # The tool may already have printed PASS or SKIP on STDOUT. Say,
+        # LAST and on the same stream, that the exit code overrides it, so
+        # a log reader is not misled (round-4 review).
+        verdict = {0: "PASS", 77: "SKIP"}.get(rc, "no exit code")
+        print(f"OVERRIDDEN: exit 1 — device restore failed ({why}); "
+              f"the tool reported {verdict}", flush=True)
         return 1
     return rc
 
