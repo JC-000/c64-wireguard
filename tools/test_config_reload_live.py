@@ -420,6 +420,7 @@ def run_soak(args) -> int:
         live._skip(str(e))
 
     rows: list[tuple[int, str, float, str]] = []
+    client = None           # the finally reads it; it must never be unbound
     try:
         # Reachability is a REST read of the shared device: inside the lock.
         pr = probe_u64(args.host)
@@ -530,8 +531,19 @@ def run_soak(args) -> int:
             rows.append((i, verdict, dt, note))
             print(f"  load {i}: {verdict} ({dt:.1f}s) {note}", flush=True)
     finally:
-        lock.release()
-        sink.close()
+        # Clock + REU + a VERIFIED reset, BEFORE the release (issue #134,
+        # #166). This used to happen in main()'s `finally` via
+        # _turbo_down(), after this lock was gone, under a second one: a
+        # window in which another lane could acquire the box at turbo with
+        # this soak's abandoned sockets still open. We hold the lock, so the
+        # client is passed in; teardown_device never raises.
+        try:
+            if client is not None:
+                from device_session import teardown_device
+                teardown_device(args.host, client=client, logger=log)
+        finally:
+            lock.release()
+            sink.close()
 
     print("\n" + "=" * 66, flush=True)
     print(f"{'load':>4}  {'verdict':<8} {'wall':>7}  note", flush=True)
@@ -549,20 +561,13 @@ def run_soak(args) -> int:
 
 # ── entry point ───────────────────────────────────────────────────────────
 
-def _turbo_down(host: str) -> None:
-    """Leave the bench at 1 MHz, REU off and RESET for whoever has it next.
-
-    The name is now narrower than the job, kept because both call sites
-    below read as an exit path. It used to be exactly what it says — a bare
-    set_turbo_mhz, unlocked, with a bare `except: pass` — so this tool left
-    its UDP sockets open on every run (issue #134) AND wrote to a shared
-    device without queueing for it.
-
-    live.main() has released the lock by the time this runs, so the helper
-    takes its own.
-    """
-    from device_session import teardown_device
-    teardown_device(host, idle_mhz=1, logger=log)
+# NO EXIT-PATH RESTORE HERE ANY MORE. This file used to end both paths with
+# `finally: _turbo_down(host)` — teardown_device under a SECOND lock, after
+# the first was released (issue #166's window). Both paths now restore inside
+# the lock they already hold: --soak in run_soak()'s finally, the #65 test in
+# test_uci_handshake_live.main()'s (its default, full mode). The second
+# restore was redundant on the #65 path — it reset the C64 twice — and late
+# on the soak path. tools/test_live_tool_seams.py audits both.
 
 
 def main() -> int:
@@ -608,10 +613,7 @@ def main() -> int:
         live.seed_payloads(seed)
         print(f"Random seed: {seed} (reproduce with --seed {seed} or "
               f"TEST_SEED={seed})", flush=True)
-        try:
-            return run_soak(args)
-        finally:
-            _turbo_down(args.host)
+        return run_soak(args)
 
     # live.main() seeds the payload stream and logs the seed.
     live.post_session_hook = build_probe(args)
@@ -619,10 +621,7 @@ def main() -> int:
             "--reu", "off", "--seed", str(seed)]
     if args.password:
         argv += ["--password", args.password]
-    try:
-        return live.main(argv)
-    finally:
-        _turbo_down(args.host)
+    return live.main(argv)
 
 
 if __name__ == "__main__":

@@ -736,8 +736,10 @@ def main() -> int:
     # meant two resets and a second lock cycle for the same result. The
     # reasoning that put it here still holds — this tool runs a full
     # WireGuard session and holds a UDP socket only a reset closes, issue
-    # #134 — it is just satisfied one layer down now. If this tool ever
-    # sets post_session_teardown = False, it owns its own teardown again.
+    # #134 — it is just satisfied one layer down now, in the default (full)
+    # post_session_teardown mode. Do not override that mode here:
+    # tools/test_live_tool_seams.py allows exactly one gentler mode
+    # (wg_chat's) and fails on a second.
     return live.main(["--chat", "--host", args.host,
                       "--turbo", str(args.turbo), "--reu", reu_arg])
 

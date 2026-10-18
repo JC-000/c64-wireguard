@@ -746,12 +746,23 @@ def _hand_back_to_c64(tr: Ultimate64Transport, L: dict[str, int],
 # combinatorial cost (see above) that a per-hook attribute does not pay.
 post_session_hook = None
 
-#: Whether main() runs the shared teardown (clock, REU, verified reset) before
-#: releasing the lock. True for every caller EXCEPT wg_chat, which attaches to
-#: a machine a human is sitting in front of: resetting it on Ctrl-C would
-#: destroy the session that is the tool's whole purpose (wg_chat.py:53-67,
-#: issue #134). A caller that opts out owns its own restore.
-post_session_teardown = True
+#: How main() runs the shared teardown before releasing the lock: keyword
+#: arguments splatted into device_session.teardown_device(client=...), which
+#: runs INSIDE the held lock. ``{}`` — the default, and what every caller but
+#: one uses — is the full teardown: 1 MHz read back, REU off, verified reset.
+#:
+#: wg_chat sets ``{"reset": False, "reu_off": False}``: it attaches to a
+#: machine a human is sitting in front of, and a reset on Ctrl-C (or a REU
+#: detach, which may reset) would destroy the session that is the tool's
+#: whole purpose (issue #134). It still gets its clock restored here, under
+#: this lock. This used to be a boolean, and the only way to say "no reset"
+#: was to skip the teardown entirely and restore afterwards under a SECOND
+#: lock — an unserialised window at 48 MHz with the REU attached (#166).
+#:
+#: Read in exactly one place, the splat in main()'s finally: ``{}`` is falsy,
+#: so an ``if post_session_teardown:`` guard would silently skip the default.
+#: tools/test_live_tool_seams.py enforces both.
+post_session_teardown: dict = {}
 
 
 def wants_trampoline(fn):
@@ -1298,13 +1309,14 @@ def main(argv: list[str] | None = None) -> int:
         # attached — state that reads as a device fault, not as our residue.
         # client is passed because WE ALREADY HOLD THE LOCK; teardown_device
         # never raises, so this is safe in a `finally`.
-        if client is not None and post_session_teardown:
+        if client is not None:
             # The import is INSIDE the try for the reason device_session's
             # own helper documents: an ImportError escaping a `finally`
             # replaces the traceback that says what actually ended the run.
             try:
                 from device_session import teardown_device
-                teardown_device(args.host, client=client, logger=log)
+                teardown_device(args.host, client=client, logger=log,
+                                **post_session_teardown)
             except BaseException as exc:                      # noqa: BLE001
                 # BaseException, not Exception: a second Ctrl-C landing in
                 # teardown_device's sleep would otherwise propagate past the

@@ -34,7 +34,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import wg_c64_input                                          # noqa: E402
 
 CHAT_TURBO_MHZ = 48
-IDLE_TURBO_MHZ = 1
 
 # WireGuard's own REJECT_AFTER_TIME. timer.s enforces it as 10800 jiffies off
 # the 60 Hz KERNAL clock, which is wall time and therefore unaffected by turbo.
@@ -156,13 +155,12 @@ def build_demo_loop():
     return demo_loop
 
 
-def _restore_speed(host: str) -> None:
-    """Put the shared device back to 1 MHz. Never raises."""
-    # Through the harness lock: this is a WRITE to a shared device, and it
-    # runs after the locked body has released. An unserialised restore can
-    # land inside another lane's run — see tools/device_session.py.
-    from device_session import restore_idle
-    restore_idle(host, IDLE_TURBO_MHZ)
+# NO RESTORE OF OUR OWN. test_uci_handshake_live.main() runs the full shared
+# teardown (1 MHz read back, REU off, verified reset) inside its held lock
+# before it releases, and this tool takes its default mode. A `finally:`
+# here used to call restore_idle() as well — a second lock cycle after the
+# release, redundant at best and, as a pattern, the unserialised window of
+# issue #166. tools/test_live_tool_seams.py now fails on it.
 
 
 def main() -> int:
@@ -202,8 +200,6 @@ def main() -> int:
         return live.main()
     except KeyboardInterrupt:
         return 0
-    finally:
-        _restore_speed(host)
 
 
 if __name__ == "__main__":

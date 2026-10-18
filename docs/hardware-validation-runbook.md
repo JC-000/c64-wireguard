@@ -117,16 +117,23 @@ the long test bodies. `tools/device_session.py` provides `locked_client()` and
 verified reset) runs INSIDE the locked region — a restore that lands after
 the release is an unserialised write, which is the defect this rule exists
 to prevent. `test_uci_handshake_live.main()` does this for every tool that
-delegates to it, so `wg_demo.py` and `test_wire_encryption_live.py` inherit
-it and must not repeat it.
+delegates to it, so `wg_demo.py`, `test_wire_encryption_live.py` and
+`test_config_reload_live.py` inherit it and must not repeat it. Idle means
+**1 MHz + REU off**, not "the clock we found": restoring whatever was there
+on arrival hands on another lane's leftover state.
 
 The one exception is `wg_chat.py`, which sets
-`live.post_session_teardown = False`: it is an **operator** tool attached to
-a machine a human is sitting in front of, and resetting that machine on
-Ctrl-C would destroy the session that is the tool's entire purpose (issue
-#134). A tool that opts out owns its own restore — `wg_chat` does its 1 MHz
-through `restore_idle()`, under the lock. If you add a non-interactive mode
-to an operator tool, that mode takes the teardown back.
+`live.post_session_teardown = {"reset": False, "reu_off": False}`: it is an
+**operator** tool attached to a machine a human is sitting in front of, and
+resetting that machine on Ctrl-C (or detaching the REU, which may reset)
+would destroy the session that is the tool's entire purpose (issue #134). It
+still gets its clock restored to 1 MHz **inside** `main()`'s held lock. Until
+#166 it opted out entirely and restored the clock afterwards under a second
+lock, leaving a window in which another lane could acquire the box at 48 MHz.
+If you add a non-interactive mode to an operator tool, that mode takes the
+full teardown back. `tools/test_live_tool_seams.py` derives what every live
+tool owes from what it changes and fails if a `finally:` does not pay it
+inside the lock.
 
 Two things measured on 2026-09-03/04 are why:
 

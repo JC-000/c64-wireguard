@@ -764,7 +764,11 @@ def main() -> int:
         if not get_uci_enabled(client):
             _skip(f"enable_uci did not stick on {host}")
 
-    orig_mhz = _safe(get_turbo_mhz, client)
+    # Logged, not kept: the exit restores 1 MHz, never this. Restoring
+    # "whatever it was when we arrived" hands on another lane's leftover
+    # clock (runbook §4/§5a: idle is 1 MHz + REU off).
+    log.info("clock on arrival: %s MHz (exit restores 1 MHz)",
+             _safe(get_turbo_mhz, client))
     orig_mode = _safe(get_debug_stream_mode, client) or ""
     local_ip = _local_ip_for(host)
     log.info("host=%s local_ip=%s", host, local_ip)
@@ -877,8 +881,7 @@ def main() -> int:
         # SOCKET — reading as a regression in whatever it changed.
         # We hold the lock here, so the client is passed in.
         from device_session import teardown_device
-        teardown_device(host, client=client,
-                        idle_mhz=orig_mhz if orig_mhz else 1, logger=log)
+        teardown_device(host, client=client, logger=log)
         lock.release()
 
 

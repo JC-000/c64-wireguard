@@ -1602,10 +1602,12 @@ def _teardown_audit(tools_dir: Path, overrides: dict | None = None) -> dict:
                                 f"pin exactly one literal")
             info["mode"] = mode
             d_done, d_prob = _discharge(hs_fin, defaults, does, mode)
-            # Problems inside main()'s own finally are reported against
-            # test_uci_handshake_live itself; only an UNEVALUABLE mode is
-            # this delegator's fault.
-            problems += [p for p in d_prob if _MODE_NAME in p]
+            # Problems main()'s finally has under its OWN default are
+            # reported against test_uci_handshake_live; only those this
+            # delegator's mode introduces (an idle_mhz override, an
+            # unevaluable value) are this delegator's.
+            base = set(_discharge(hs_fin, defaults, does, hs_default)[1])
+            problems += [p for p in d_prob if p not in base]
             info["need"] |= hs_need
             missing |= hs_need - d_done
         res["tools"][rel] = info
