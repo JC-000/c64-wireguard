@@ -119,13 +119,21 @@ def _refuse_reu_fault(transport, labels):
                         "typically an open-bus read)")
         if val & ~0x03:
             bits.append(f"${val & ~0x03 & 0xFF:02X} undefined bits")
+        # The fault is what must be reported. Deriving the advice can itself
+        # raise (e.g. a sibling build whose bank mask was dropped), and that
+        # ValueError must not replace the BootReuFault.
+        try:
+            advice = (f"This build needs VICE extra_args {vice_reu_args(labels)}"
+                      f" — pass vice_util.vice_reu_args(labels)")
+        except ValueError as exc:
+            advice = (f"(the needed REU size could not be derived: {exc}) — "
+                      f"attach an REU that covers the build's banks")
         raise BootReuFault(
             f"x25519_reu_fault = ${val:02X} at boot (boot_ready is set): "
             f"{'; '.join(bits)}. The REU the multiply tables were stashed in "
             f"is not behaving like one, so X25519 on this machine cannot be "
-            f"trusted. This build needs VICE extra_args "
-            f"{vice_reu_args(labels)} — pass vice_util.vice_reu_args(labels) "
-            f"to ViceConfig instead of spelling the REU flags by hand.")
+            f"trusted. {advice} to ViceConfig instead of spelling the REU "
+            f"flags by hand.")
 
 
 # VICE -reusize accepts these KiB values (VICE 3.10 manual, REU section).

@@ -17,11 +17,13 @@ THE DEFECT. The gate builds with plain `make`, and `Makefile` has
 and with `-reu -reusize 512`: fault $00, vector matches. So a machine without
 an REU boots normally and then computes WRONG X25519 results with no other
 symptom. Every one of the 24 suites happened to pass because none of them
-executes the REU multiply path — measured by planting BRK at fe25519_mul,
-fe25519_sqr, reu_fetch_mul_row, reu_fetch_doubled_row and reu_clear_wide
-right after boot, running each suite with its master gate arguments, and
-reading the plants back intact at teardown; all 24 still passed, while the
-fe25519 control derailed on the first plant. (The fault byte is NOT a usable
+executes the REU DMA path — measured by planting BRK at fe25519_mul,
+fe25519_sqr, reu_fetch_mul_row and reu_fetch_doubled_row (the routines that
+issue or reach REU DMA after boot; a reu_clear_wide plant was also set but is
+redundant — it does no DMA — and fe25519_mul_a24 / x25519_scalarmult only
+set REU registers) right after boot, running each suite with its master gate
+arguments, and reading the plants back intact at teardown; all 24 still
+passed, while the fe25519 control derailed at fe_mul and fe_sqr. (The fault byte is NOT a usable
 "was the REU touched" instrument: bit 0 is a settle-spin timeout and bit 1 a
 $DF00 bit-5 sample, and on open bus a fetch need set neither — 8 random
 fe25519_mul calls with no REU were all wrong with the byte staying $02.) That
@@ -48,10 +50,17 @@ WHAT THIS CHECKS:
      binary_wait_for_boot_ready — reported both ways, per call site. No gate
      suite may spell "-reu"/"-reusize" itself. It fails CLOSED on the ways
      around a checked ViceConfig call: an `as` alias, ViceConfig used as a
-     value (`VC = ViceConfig`, functools.partial), getattr by name,
-     `cfg.extra_args = ...`, extra_args handed to any other callable
+     value (`VC = ViceConfig`, functools.partial), getattr by name, ANY
+     `.extra_args` attribute access (assignment, +=, slice assignment, del,
+     annotated or tuple targets, .clear()/.append()) and the string
+     "extra_args" (setattr), extra_args handed to any other callable
      (dataclasses.replace), a wrapper around vice_reu_args(...), and
-     ViceProcess / EthVice / an "x64sc" string. The scanner is proven able to
+     ViceProcess / EthVice / an x64sc launch token. Type annotations and
+     isinstance()/issubclass() references are exempt. LIMIT: an x64sc
+     launch counts only as a token — 'x64sc', '.../x64sc', or that followed
+     by an option ('x64sc -warp ...'); prose and f-string text mentioning
+     x64sc are not flagged, so a launch disguised as prose is not caught.
+     The scanner is proven able to
      fire on synthetic sources (S0) and to find real sites (positive control)
      before its verdict on the tree counts.
   D  Derivation, on synthetic label maps: banks 0 -> no REU; $3B -> 512 KiB;
@@ -132,6 +141,20 @@ def _call_name(node):
     return ""
 
 
+def _is_x64sc_token(s: str) -> bool:
+    """True when *s* names the x64sc executable as a launch token: exactly
+    'x64sc', a path ending in '/x64sc', or a shell command line starting with
+    one of those followed by an option ('x64sc -warp ...'). Prose that merely
+    mentions x64sc ('x64sc PID 123 was never stopped') is not a token — that
+    is the scanner's stated limit: a launch hidden in prose-shaped text is
+    not caught."""
+    head = s.split(" ", 1)
+    exe = head[0]
+    if not (exe == "x64sc" or exe.endswith("/x64sc")):
+        return False
+    return len(head) == 1 or head[1].lstrip().startswith(("-", "+"))
+
+
 def scan_source(src: str, filename: str = "<src>"):
     """Return (vice_sites, bad_sites, has_boot_wait, literal_hits).
 
@@ -159,6 +182,28 @@ def scan_source(src: str, filename: str = "<src>"):
             if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
                     and isinstance(first.value.value, str)):
                 docstrings.add(id(first.value))
+    # Text inside f-strings is prose (log lines), never a launch token.
+    fstring_parts = {id(c) for n in ast.walk(tree) if isinstance(n, ast.JoinedStr)
+                     for c in ast.walk(n) if isinstance(c, ast.Constant)}
+    # References to ViceConfig that cannot construct anything: type
+    # annotations and isinstance()/issubclass() class arguments.
+    benign_refs = set()
+
+    def _mark(sub):
+        if sub is not None:
+            benign_refs.update(id(x) for x in ast.walk(sub))
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            _mark(n.returns)
+            for a in n.args.args + n.args.kwonlyargs + n.args.posonlyargs:
+                _mark(a.annotation)
+            _mark(n.args.vararg and n.args.vararg.annotation)
+            _mark(n.args.kwarg and n.args.kwarg.annotation)
+        elif isinstance(n, ast.AnnAssign):
+            _mark(n.annotation)
+        elif (isinstance(n, ast.Call) and _call_name(n) in ("isinstance", "issubclass")
+              and len(n.args) == 2):
+            _mark(n.args[1])
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             name = _call_name(node)
@@ -194,20 +239,32 @@ def scan_source(src: str, filename: str = "<src>"):
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             if node.value.strip() in FORBIDDEN_LITERALS:
                 literal_hits.append(node.lineno)
-            if id(node) not in docstrings and (
-                    node.value == "ViceConfig" or "x64sc" in node.value):
-                # getattr(mod, "ViceConfig") or a hand-rolled x64sc launch.
+            if id(node) in docstrings or id(node) in fstring_parts:
+                continue
+            v = node.value.strip()
+            if v in ("ViceConfig", "extra_args"):
+                # getattr(mod, "ViceConfig"), setattr(cfg, "extra_args", ...)
                 vice_sites.append(node.lineno)
-                bad.append((node.lineno, f"string {node.value[:30]!r} reaches VICE "
+                bad.append((node.lineno, f"string {v!r} reaches ViceConfig / "
+                                         f"extra_args by name"))
+            elif _is_x64sc_token(v):
+                # ['x64sc', ...] / '/opt/.../x64sc' / 'x64sc -warp ...' as an
+                # executable token. Prose and f-string text are not flagged.
+                vice_sites.append(node.lineno)
+                bad.append((node.lineno, f"string {v[:30]!r} launches x64sc "
                                          f"around the checked ViceConfig path"))
-        elif isinstance(node, ast.Assign):
-            for t in node.targets:
-                if isinstance(t, ast.Attribute) and t.attr == "extra_args":
-                    vice_sites.append(node.lineno)
-                    bad.append((node.lineno, "extra_args assigned after "
-                                             "construction"))
+        elif isinstance(node, ast.Attribute) and node.attr == "extra_args":
+            # ANY attribute access: assignment, augmented assignment, slice
+            # assignment, del, annotated assignment, tuple targets, and
+            # in-place methods (.clear(), .append()) all reach it this way.
+            # The only sanctioned spelling is the ViceConfig KEYWORD, which
+            # is an ast.keyword, not an ast.Attribute.
+            vice_sites.append(node.lineno)
+            bad.append((node.lineno, "extra_args touched after construction "
+                                     "(attribute access)"))
         elif (isinstance(node, ast.Name) and node.id in cfg_names
-              and isinstance(node.ctx, ast.Load) and id(node) not in call_funcs):
+              and isinstance(node.ctx, ast.Load) and id(node) not in call_funcs
+              and id(node) not in benign_refs):
             # ViceConfig used as a VALUE (VC = ViceConfig, partial(ViceConfig))
             vice_sites.append(node.lineno)
             bad.append((node.lineno, f"{node.id} used as a value, not called "
@@ -273,10 +330,34 @@ def static_checks(chk: Check):
          "VC = getattr(h, 'ViceConfig')\n"),
         ("S0p subprocess launching x64sc is flagged",
          "subprocess.Popen(['x64sc', '-warp', prg])\n"),
+        # Round 2 of review: every post-construction mutation of extra_args.
+        ("S0q cfg.extra_args.clear() is flagged", "cfg.extra_args.clear()\n"),
+        ("S0r cfg.extra_args[:] = [] is flagged", "cfg.extra_args[:] = []\n"),
+        ("S0s del cfg.extra_args[0:3] is flagged", "del cfg.extra_args[0:3]\n"),
+        ("S0t cfg.extra_args += extra is flagged", "cfg.extra_args += extra\n"),
+        ("S0u cfg.extra_args: list = [] is flagged", "cfg.extra_args: list = []\n"),
+        ("S0v setattr(cfg, 'extra_args', []) is flagged",
+         "setattr(cfg, 'extra_args', [])\n"),
+        ("S0w cfg.extra_args, x = [], 1 is flagged", "cfg.extra_args, x = [], 1\n"),
+        ("S0x shell-string x64sc launch is flagged",
+         "os.system('/opt/vice/bin/x64sc -warp ' + prg)\n"),
     ]
     for what, src in bypasses:
         s, b, w, lit = scan_source(src)
-        chk.ok(bool(s) and len(b) == 1, what, f"sites={s} bad={b}")
+        chk.ok(bool(s) and len(b) >= 1, what, f"sites={s} bad={b}")
+    # ...and references that cannot construct or reconfigure anything must
+    # NOT be flagged, or the rule gets switched off within a week.
+    benign = [
+        ("S0y annotation `def f(c: ViceConfig) -> ViceConfig` is not flagged",
+         "def f(c: ViceConfig) -> ViceConfig:\n    return c\n"),
+        ("S0z isinstance(cfg, ViceConfig) is not flagged",
+         "ok = isinstance(cfg, ViceConfig)\n"),
+        ("S0aa x64sc in log prose / f-string text is not flagged",
+         "print('x64sc PID 12 was never stopped')\nprint(f'x64sc {pid} gone')\n"),
+    ]
+    for what, src in benign:
+        s, b, w, lit = scan_source(src)
+        chk.ok(not s and not b, what, f"sites={s} bad={b}")
 
     print("S   gate suites: REU attachment derived from the build, at every site")
     files = gate_suite_files()
@@ -365,6 +446,27 @@ def derivation_checks(chk: Check):
                f"returned {got}")
     except ValueError:
         chk.ok(True, "D8 sibling build with its mask dropped -> refuse")
+    # D9: when the boot-time fault fires on such a build, the FAULT must be
+    # what is reported — D8's ValueError (raised while composing the advice)
+    # must not replace it. Host-side: read_bytes is faked to return $02.
+    import vice_util
+    fake = {"boot_ready": 0x908F, "x25519_reu_fault": 0x1361,
+            "reu_mul_init": 0x87D1, "LIB_X25519_RESIDENT_BYTES": 0x213A}
+    real_read = vice_util.read_bytes
+    vice_util.read_bytes = lambda t, a, n: b"\x01" if a == 0x908F else b"\x02"
+    try:
+        vice_util.binary_wait_for_boot_ready(object(), fake, timeout=1.0)
+        got = "returned"
+    except vice_util.BootReuFault as exc:
+        got = "BootReuFault"
+        detail = str(exc)
+    except Exception as exc:                                      # noqa: BLE001
+        got = f"{type(exc).__name__}: {exc}"
+    finally:
+        vice_util.read_bytes = real_read
+    chk.ok(got == "BootReuFault",
+           "D9 fault on a build whose REU size cannot be derived -> BootReuFault, "
+           "not the derivation's ValueError", f"got {got}")
 
 
 # --------------------------------------------------------------- runtime ---
