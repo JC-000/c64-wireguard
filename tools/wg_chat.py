@@ -21,6 +21,7 @@ defaults are wrong for interactive use:
     with other sessions, and a machine found at a stale 48 MHz has already
     cost this project an afternoon, so we put it back on the way out —
     including on Ctrl-C, which is how an interactive session normally ends.
+    The restore runs inside the underlying tool's held lock (issue #166).
 
 WHY --host HAS NO DEFAULT: the device's address moves with the user. The
 in-repo tools still default to the home LAN address, which is wrong whenever
@@ -41,7 +42,6 @@ import wg_c64_input                                          # noqa: E402
 from c64_caps import C64_TUNNEL_MTU                          # noqa: E402
 
 CHAT_TURBO_MHZ = 48
-IDLE_TURBO_MHZ = 1
 
 # Rekey before WireGuard's 180 s REJECT_AFTER_TIME strands us. The firmware
 # raises rekey_pending and prints REKEY NEEDED but nothing consumes the flag,
@@ -61,21 +61,20 @@ REKEY_AFTER_S = 140.0
 # destroy the session they were using — the tool's whole purpose — to tidy
 # up a socket the next run's `run_prg` closes anyway (measured, issue #58).
 #
+# The same objection covers detaching the REU: set_reu may itself reset the
+# machine (test_uci_handshake_live.py, the REU-before-turbo comment). So the
+# REU stays attached for this tool.
+#
+# What it DOES get is the clock: 1 MHz, read back, inside the lock
+# test_uci_handshake_live.main() already holds — via the gentle
+# post_session_teardown mode set in main() below. It used to opt out of that teardown altogether and restore the clock
+# from its own `finally`, after main() had released the lock, under a second
+# one. Between the two another lane could acquire the box at 48 MHz with the
+# REU attached (issue #166).
+#
 # This is a decision, not the omission it used to be. If wg_chat ever grows
-# a non-interactive mode that exits on its own, that mode should call
-# teardown_device; the reasoning above only covers the human at the keyboard.
-def _restore_speed(host: str) -> None:
-    """Put the shared device back to 1 MHz. Never raises.
-
-    Called from a finally, so it must not mask the real exit path: a failure
-    to restore is worth a warning, never a traceback that buries whatever
-    actually ended the session.
-    """
-    # Through the harness lock: this is a WRITE to a shared device, and it
-    # runs after the locked body has released. An unserialised restore can
-    # land inside another lane's run — see tools/device_session.py.
-    from device_session import restore_idle
-    restore_idle(host, IDLE_TURBO_MHZ)
+# a non-interactive mode that exits on its own, that mode should take the
+# full teardown; the reasoning above only covers the human at the keyboard.
 
 
 def build_chat_loop():
@@ -215,16 +214,22 @@ def main() -> int:
 
     import test_uci_handshake_live as live
     live.post_session_hook = build_chat_loop()
-    # Opt out of the shared teardown: see "WHY THIS TOOL DOES NOT RESET"
-    # above. _restore_speed below is this tool's own restore.
-    live.post_session_teardown = False
+    # The gentle teardown — clock only, inside main()'s lock: see "WHY THIS
+    # TOOL DOES NOT RESET" above. Keep it a literal dict:
+    # tools/test_live_tool_seams.py evaluates this assignment from the AST
+    # and fails on anything it cannot read as a constant.
+    live.post_session_teardown = {"reset": False, "reu_off": False}
+    # live.main() is @fails_on_bad_teardown, so a clock that did not come
+    # back to 1 MHz already makes its return value non-zero. Ctrl-C bypasses
+    # that return, so judge the recorded restore here too.
+    import device_session
+    n = device_session.teardown_failure_count()
     try:
         return live.main()
     except KeyboardInterrupt:
         print("\n-- interrupted --", file=sys.stderr)
-        return 0
-    finally:
-        _restore_speed(host)
+        return device_session.exit_code_after_teardown(
+            0, device_session.teardown_failures_since(n))
 
 
 if __name__ == "__main__":

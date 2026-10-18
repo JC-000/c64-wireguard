@@ -2944,12 +2944,18 @@ def main(argv: Optional[list[str]] = None) -> int:
                         time.sleep(1.0)
                         actual = get_turbo_mhz(client)
                         set_reu(client, False)
-                        log.info("restore: turbo=%d MHz (restored=%s), REU off",
+                        log.info("restore: turbo=%s MHz (restored=%s), REU off",
                                  actual, actual == 1)
                         run["restored_mhz"] = actual
+                        # A restore that did not take FAILS the run (round-3
+                        # review of PR #178); it used to be logged only.
+                        check(actual == 1, "restore: clock read back at 1 MHz",
+                              f"device reads {actual!r} MHz")
                     except Exception as exc:                          # noqa: BLE001
                         log.error("clock/REU restore FAILED: %s — the device is "
                                   "shared, check it before you walk away", exc)
+                        check(False, "restore: clock and REU restored",
+                              repr(exc))
                     try:
                         if cart_prev:
                             client.set_config_item(CAT_CART, ITEM_CART_PREF, cart_prev)
@@ -2968,6 +2974,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                         log.error("reset FAILED: %s — our PRG may still be running "
                                   "and driving the command interface for the next "
                                   "lane", exc)
+                        check(False, "restore: C64 reset issued", repr(exc))
             finally:
                 lock.release()
                 log.info("device lock released")

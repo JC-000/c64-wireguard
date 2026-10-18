@@ -691,6 +691,12 @@ def _safe(fn, *args, **kw):
         return None
 
 
+# A restore that does not take must fail the run (round-3 review of
+# PR #178): check_teardown records it, the decorator exits non-zero.
+from device_session import check_teardown, fails_on_bad_teardown  # noqa: E402
+
+
+@fails_on_bad_teardown
 def main() -> int:
     seed = _resolve_seed_from_argv()
     print(f"Random seed: {seed} (reproduce with --seed {seed} or "
@@ -738,40 +744,54 @@ def main() -> int:
                   e.lockfile_age_seconds, e.device_reachable_rest)
         _skip(str(e))
 
-    # Build identity, INSIDE the lock: an unserialised /v1/info read can
-    # observe another lane's half-applied config rewrite and raise nothing.
-    log_build(host, log)
-    client = Ultimate64Client(host=host, password=password, timeout=10.0)
-    tr = Ultimate64Transport(host=host, password=password, timeout=10.0,
-                             client=client)
-
-    # Detect wedged-runner state before doing destructive work.
-    try:
-        runner_health_check(client)
-    except Ultimate64RunnerStuckError as exc:
-        log.warning("runner is wedged: %s — running recover()", exc)
-        step = recover(client)
-        log.info("recover() returned %r — re-checking runner", step)
-        runner_health_check(client)
-
-    # Minimal setup: assume UCI is already enabled (via menu or prior
-    # enable_uci). No reboot, no reset — just run the PRG on the
-    # existing state. If UCI misbehaves, the operator can power cycle.
-    if not get_uci_enabled(client):
-        log.info("enabling UCI via REST")
-        enable_uci(client)
-        time.sleep(0.5)
-        if not get_uci_enabled(client):
-            _skip(f"enable_uci did not stick on {host}")
-
-    orig_mhz = _safe(get_turbo_mhz, client)
-    orig_mode = _safe(get_debug_stream_mode, client) or ""
-    local_ip = _local_ip_for(host)
-    log.info("host=%s local_ip=%s", host, local_ip)
-
-    cap, listener = DebugCapture(port=DEBUG_PORT), UDPEchoListener(port=0)
+    # EVERY exit after the acquire runs the teardown: the try starts right
+    # here. It used to start ~45 lines later, after log_build, recover(),
+    # enable_uci and a possible _skip — any of which exited with the lock
+    # held and NO teardown (round-4 review of PR #178). Everything the
+    # finally reads is bound first, so it can never NameError.
+    client = None
+    orig_mode = ""
+    capture = False
+    cap = listener = None
     result, trace_path, streamed, failures = None, None, False, []
     try:
+        # Build identity, INSIDE the lock: an unserialised /v1/info read can
+        # observe another lane's half-applied config rewrite and raise nothing.
+        log_build(host, log)
+        client = Ultimate64Client(host=host, password=password, timeout=10.0)
+        tr = Ultimate64Transport(host=host, password=password, timeout=10.0,
+                                 client=client)
+
+        # Detect wedged-runner state before doing destructive work.
+        try:
+            runner_health_check(client)
+        except Ultimate64RunnerStuckError as exc:
+            log.warning("runner is wedged: %s — running recover()", exc)
+            step = recover(client)
+            log.info("recover() returned %r — re-checking runner", step)
+            runner_health_check(client)
+
+        # Minimal setup: assume UCI is already enabled (via menu or prior
+        # enable_uci). No reboot, no reset — just run the PRG on the
+        # existing state. If UCI misbehaves, the operator can power cycle.
+        if not get_uci_enabled(client):
+            log.info("enabling UCI via REST")
+            enable_uci(client)
+            time.sleep(0.5)
+            if not get_uci_enabled(client):
+                _skip(f"enable_uci did not stick on {host}")
+
+        # Logged, not kept: the exit restores 1 MHz, never this. Restoring
+        # "whatever it was when we arrived" hands on another lane's leftover
+        # clock (runbook §4/§5a: idle is 1 MHz + REU off).
+        log.info("clock on arrival: %s MHz (exit restores 1 MHz)",
+                 _safe(get_turbo_mhz, client))
+        orig_mode = _safe(get_debug_stream_mode, client) or ""
+        local_ip = _local_ip_for(host)
+        log.info("host=%s local_ip=%s", host, local_ip)
+
+        cap, listener = (DebugCapture(port=DEBUG_PORT),
+                         UDPEchoListener(port=0))
         listener.start()
         log.info("echo listener bound on %s:%d", local_ip, listener.port)
         # U64_NO_CAPTURE=1 skips the 6510 debug-bus stream entirely (no
@@ -866,9 +886,10 @@ def main() -> int:
                 print(f"Debug trace (partial): {trace_path}")
             except Exception as exc:
                 log.warning("failed to persist trace: %s", exc)
-        if orig_mode:
+        if orig_mode and client is not None:
             _safe(set_debug_stream_mode, client, orig_mode)
-        _safe(listener.stop)
+        if listener is not None:
+            _safe(listener.stop)
         # Clock + REU + a VERIFIED reset, the shared contract (issue #134).
         # This tool used to restore only the clock, so every run it made
         # abandoned its UDP sockets: the network target closes them from
@@ -876,10 +897,13 @@ def main() -> int:
         # next lane inherits them and eventually sees $85 ERROR OPENING
         # SOCKET — reading as a regression in whatever it changed.
         # We hold the lock here, so the client is passed in.
-        from device_session import teardown_device
-        teardown_device(host, client=client,
-                        idle_mhz=orig_mhz if orig_mhz else 1, logger=log)
-        lock.release()
+        try:
+            if client is not None:
+                from device_session import teardown_device
+                td = teardown_device(host, client=client, logger=log)
+                check_teardown(td, logger=log)
+        finally:
+            lock.release()
 
 
 if __name__ == "__main__":

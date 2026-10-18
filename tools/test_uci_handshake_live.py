@@ -64,6 +64,7 @@ from test_uci_udp_echo_live import (  # noqa: E402
     REQUEST_BYTE_ALPHABET, REPLY_BYTE_ALPHABET, SEND_BUF, resolve_seed,
 )
 
+from device_session import check_teardown, fails_on_bad_teardown  # noqa: E402
 from wg_responder.keys import generate_keypair  # noqa: E402
 from wg_responder.responder import (  # noqa: E402
     MSG_TYPE_INITIATION, MSG_TYPE_RESPONSE, MSG_TYPE_TRANSPORT,
@@ -746,12 +747,54 @@ def _hand_back_to_c64(tr: Ultimate64Transport, L: dict[str, int],
 # combinatorial cost (see above) that a per-hook attribute does not pay.
 post_session_hook = None
 
-#: Whether main() runs the shared teardown (clock, REU, verified reset) before
-#: releasing the lock. True for every caller EXCEPT wg_chat, which attaches to
-#: a machine a human is sitting in front of: resetting it on Ctrl-C would
-#: destroy the session that is the tool's whole purpose (wg_chat.py:53-67,
-#: issue #134). A caller that opts out owns its own restore.
-post_session_teardown = True
+#: How main() runs the shared teardown before releasing the lock: keyword
+#: arguments splatted into device_session.teardown_device(client=...), which
+#: runs INSIDE the held lock. ``{}`` — the default, and what every caller but
+#: one uses — is the full teardown: 1 MHz read back, REU off, verified reset.
+#:
+#: wg_chat sets ``{"reset": False, "reu_off": False}``: it attaches to a
+#: machine a human is sitting in front of, and a reset on Ctrl-C (or a REU
+#: detach, which may reset) would destroy the session that is the tool's
+#: whole purpose (issue #134). It still gets its clock restored here, under
+#: this lock. This used to be a boolean, and the only way to say "no reset"
+#: was to skip the teardown entirely and restore afterwards under a SECOND
+#: lock — an unserialised window at 48 MHz with the REU attached (#166).
+#:
+#: Read in exactly one place, the splat in main()'s finally: ``{}`` is falsy,
+#: so an ``if post_session_teardown:`` guard would silently skip the default.
+#: tools/test_live_tool_seams.py enforces both.
+post_session_teardown: dict = {}
+
+#: The keys a mode may set, and the type each must have. idle_mhz is further
+#: pinned to 1: idle is 1 MHz + REU off (runbook §1b/§4).
+_TEARDOWN_MODE_TYPES = {"idle_mhz": int, "reu_off": bool, "reset": bool}
+
+
+def teardown_mode_error(mode) -> str | None:
+    """Why *mode* is not a valid post_session_teardown, or None if it is.
+
+    Checked at the top of main(), BEFORE the lock: a bad mode only fails
+    when it is splatted into teardown_device in main()'s `finally`, where
+    the BaseException guard swallows the TypeError — so the whole teardown
+    would be skipped and the lock released on a box at turbo with the REU
+    attached (review of PR #178)."""
+    if not isinstance(mode, dict):
+        return (f"post_session_teardown must be a dict of teardown_device "
+                f"kwargs (got {mode!r}); the old booleans are gone — {{}} is "
+                f"the full teardown")
+    unknown = sorted(set(mode) - set(_TEARDOWN_MODE_TYPES))
+    if unknown:
+        return (f"post_session_teardown has unknown key(s) {unknown}; allowed "
+                f"{sorted(_TEARDOWN_MODE_TYPES)}")
+    for k, v in mode.items():
+        want = _TEARDOWN_MODE_TYPES[k]
+        if type(v) is not want:
+            return (f"post_session_teardown[{k!r}] must be {want.__name__}, "
+                    f"got {v!r}")
+    if mode.get("idle_mhz", 1) != 1:
+        return (f"post_session_teardown idle_mhz={mode['idle_mhz']}: idle is "
+                f"1 MHz")
+    return None
 
 
 def wants_trampoline(fn):
@@ -819,12 +862,23 @@ def _chat_loop(tr: Ultimate64Transport, L: dict[str, int],
 
 # ── Main flow ─────────────────────────────────────────────────────────────
 
+@fails_on_bad_teardown
 def main(argv: list[str] | None = None) -> int:
     """Run the tool.  ``argv`` defaults to ``sys.argv[1:]`` as usual.
 
     Passing it explicitly lets a consumer that drives this tool through
     post_session_hook do so without assigning to the ``sys.argv`` global.
     """
+    # FIRST, before the lock or the device: a bad teardown mode would only
+    # fail in the `finally`, silently, after the device was changed.
+    mode_err = teardown_mode_error(post_session_teardown)
+    if mode_err:
+        print(f"ERROR: {mode_err}", file=sys.stderr)
+        return 2
+    # SNAPSHOT what was validated; the finally splats this copy, never the
+    # module global, so nothing that rebinds or mutates the global mid-run
+    # can change the teardown after the check (round-3 review).
+    teardown_mode = dict(post_session_teardown)
     p = argparse.ArgumentParser()
     p.add_argument("--stage", type=int, choices=[1, 2, 3], default=2,
                    help="1=Type-1 accepted; 2=SESSION_ACTIVE (default); "
@@ -1298,13 +1352,17 @@ def main(argv: list[str] | None = None) -> int:
         # attached — state that reads as a device fault, not as our residue.
         # client is passed because WE ALREADY HOLD THE LOCK; teardown_device
         # never raises, so this is safe in a `finally`.
-        if client is not None and post_session_teardown:
+        if client is not None:
             # The import is INSIDE the try for the reason device_session's
             # own helper documents: an ImportError escaping a `finally`
             # replaces the traceback that says what actually ended the run.
             try:
                 from device_session import teardown_device
-                teardown_device(args.host, client=client, logger=log)
+                td = teardown_device(args.host, client=client, logger=log,
+                                     **teardown_mode)
+                # A restore that did not take FAILS the run (main() is
+                # @fails_on_bad_teardown); it used to be discarded.
+                check_teardown(td, logger=log)
             except BaseException as exc:                      # noqa: BLE001
                 # BaseException, not Exception: a second Ctrl-C landing in
                 # teardown_device's sleep would otherwise propagate past the
@@ -1312,6 +1370,7 @@ def main(argv: list[str] | None = None) -> int:
                 # of the process.
                 log.warning("teardown skipped (%r); device may be left at "
                             "turbo with the REU attached", exc)
+                check_teardown(None, logger=log)
         lock.release()
         if skipped:
             print("SKIP — UCI WireGuard handshake not run (exit 77)")

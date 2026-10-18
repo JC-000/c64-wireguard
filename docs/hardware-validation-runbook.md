@@ -117,16 +117,49 @@ the long test bodies. `tools/device_session.py` provides `locked_client()` and
 verified reset) runs INSIDE the locked region — a restore that lands after
 the release is an unserialised write, which is the defect this rule exists
 to prevent. `test_uci_handshake_live.main()` does this for every tool that
-delegates to it, so `wg_demo.py` and `test_wire_encryption_live.py` inherit
-it and must not repeat it.
+delegates to it, so `wg_demo.py`, `test_wire_encryption_live.py` and
+`test_config_reload_live.py` inherit it and must not repeat it. Idle means
+**1 MHz + REU off**, not "the clock we found": restoring whatever was there
+on arrival hands on another lane's leftover state.
 
 The one exception is `wg_chat.py`, which sets
-`live.post_session_teardown = False`: it is an **operator** tool attached to
-a machine a human is sitting in front of, and resetting that machine on
-Ctrl-C would destroy the session that is the tool's entire purpose (issue
-#134). A tool that opts out owns its own restore — `wg_chat` does its 1 MHz
-through `restore_idle()`, under the lock. If you add a non-interactive mode
-to an operator tool, that mode takes the teardown back.
+`live.post_session_teardown = {"reset": False, "reu_off": False}`: it is an
+**operator** tool attached to a machine a human is sitting in front of, and
+resetting that machine on Ctrl-C (or detaching the REU, which may reset)
+would destroy the session that is the tool's entire purpose (issue #134). It
+still gets its clock restored to 1 MHz **inside** `main()`'s held lock. Until
+#166 it opted out entirely and restored the clock afterwards under a second
+lock, leaving a window in which another lane could acquire the box at 48 MHz.
+If you add a non-interactive mode to an operator tool, that mode takes the
+full teardown back. `test_uci_handshake_live.main()` refuses a malformed
+mode (not a dict, unknown key, wrong type, `idle_mhz` ≠ 1) with exit 2
+BEFORE it takes the lock. `tools/test_live_tool_seams.py` derives each live
+tool's obligations from the device calls it recognises — clock, REU, and a
+reset for any tool that starts a PRG via `run_prg`/`run_prg_via_sys`/
+`load_prg`/`load_prg_verified`/`run_crt` or a typed `SYS`/`RUN`, or opens a
+UCI socket from the host (`uci_udp_connect`/`uci_tcp_connect`/
+`uci_tcp_listen_start`). The derived set is pinned by equality to a
+hand-reviewed `OWES_RESET` list. What that does and does NOT catch: an
+EXISTING listed tool that stops using a recognised call fails (it drops out
+of the derived set); a NEW tool that uses a recognised call fails until it
+is classified. A NEW tool that starts a PRG or opens a socket by a means
+the triggers do not recognise is in neither set and is NOT caught. Every
+`teardown_device` result must go to `check_teardown()` and the tool's
+`main()` must be `@fails_on_bad_teardown`, so a restore that does not take
+(clock not idle, REU detach unconfirmed in full mode, or a reset that is
+anything but `verified` — `unverified` included, per `reset_and_verify`'s
+own contract) exits non-zero, with a final `OVERRIDDEN: exit 1 …` line on
+stdout after any PASS/SKIP the tool printed. **CBM80 cartridge caveat:** with
+an autostart cartridge in the port (or a Cartridge Preference serving one),
+`$FCE2` jumps to the cartridge before RAMTAS, so a reset that worked reads as
+`failed` and the full-teardown tools now exit 1 on that bench. And
+`test_ip65_rrnet_hw`'s Cartridge Preference restore is log-only: its failure
+does not change the exit code. It fails unless a `finally:` pays those obligations — with
+`teardown_device(client=...)` (or a hand-written restore) placed before any
+`.release()` in that `finally`, and no `restore_idle()` / host-only
+`teardown_device()` taking a second lock. It is a static check: it cannot
+see a restore that is skipped at runtime (e.g. behind an `if` that is never
+true).
 
 Two things measured on 2026-09-03/04 are why:
 

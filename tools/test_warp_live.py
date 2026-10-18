@@ -2736,6 +2736,12 @@ def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
 # =============================================================================
 # main
 # =============================================================================
+# A restore that does not take must fail the run (round-3 review of
+# PR #178): check_teardown records it, the decorator exits non-zero.
+from device_session import check_teardown, fails_on_bad_teardown  # noqa: E402
+
+
+@fails_on_bad_teardown
 def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--host", default=os.environ.get("U64_HOST"))
@@ -2949,6 +2955,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         if client is not None:
             from device_session import teardown_device
             td = teardown_device(args.host, client=client, logger=log)
+            check_teardown(td, logger=log)
             results["teardown"] = td
         lock.release()
         log.info("lock released")

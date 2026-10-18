@@ -654,6 +654,12 @@ def self_check() -> int:
     return 0
 
 
+# A restore that does not take must fail the run (round-3 review of
+# PR #178): check_teardown records it, the decorator exits non-zero.
+from device_session import check_teardown, fails_on_bad_teardown  # noqa: E402
+
+
+@fails_on_bad_teardown
 def main() -> int:
     if "--self-check" in sys.argv:
         return self_check()
@@ -725,7 +731,11 @@ def main() -> int:
             log.info("re-enabling UCI via REST")
             enable_uci(client); time.sleep(0.5)
 
-        orig_mhz = _safe(get_turbo_mhz, client)
+        # Logged, not kept: the exit restores 1 MHz, never this. Restoring
+        # "whatever it was when we arrived" hands on another lane's leftover
+        # clock (runbook §4/§5a: idle is 1 MHz + REU off).
+        log.info("clock on arrival: %s MHz (exit restores 1 MHz)",
+                 _safe(get_turbo_mhz, client))
         orig_mode = _safe(get_debug_stream_mode, client) or ""
         local_ip = _local_ip_for(host)
         setup_ok = True
@@ -824,8 +834,8 @@ def main() -> int:
         # strands one per run. We hold the lock, so pass the client.
         try:
             from device_session import teardown_device
-            teardown_device(host, client=client,
-                            idle_mhz=orig_mhz if orig_mhz else 1, logger=log)
+            check_teardown(teardown_device(host, client=client, logger=log),
+                           logger=log)
         finally:
             lock.release()
 

@@ -107,17 +107,195 @@ def main():
     def boom(*a, **k):
         raise RuntimeError("device flaky mid-abort")
 
-    H.set_turbo_mhz = boom
+    # The REAL get_turbo_mhz runs against FakeClient, which has no config
+    # API, so the pre-read THROWS too — the flaky-device shape. The write
+    # must still be attempted (it raises here) and the reset still reached.
+    # (Round 2 stubbed the read to 48, which hid the throwing-read path;
+    # round 3 restored this shape and counts the write attempt.)
+    attempts = []
+
+    def boom_counted(*a, **k):
+        attempts.append(1)
+        raise RuntimeError("device flaky mid-abort")
+
+    H.set_turbo_mhz = boom_counted
     try:
         c = FakeClient(reset_takes=True)
         st = ds.teardown_device("fake", client=c)
     finally:
         H.set_turbo_mhz = orig
+    check(attempts == [1],
+          "a throwing clock READ does not skip the clock WRITE attempt",
+          f"{len(attempts)} attempts")
     check(c.resets == 1,
           "a throwing set_turbo_mhz does NOT skip the reset", f"{c.resets}")
     check(st["reset"] == "verified",
           "and the reset is still verified", str(st))
     check(st["turbo"] is None, "the clock failure is still reported", str(st))
+
+    # --- the GENTLE mode wg_chat runs inside main()'s lock (#166) --------
+    # reset=False, reu_off=False must still set the clock to 1 MHz and read
+    # it back, and must touch neither the REU nor the reset. Before #166
+    # nothing exercised these kwargs; wg_chat now depends on them.
+    calls = []
+    saved_h = (H.set_turbo_mhz, H.get_turbo_mhz, H.set_reu)
+    H.set_turbo_mhz = lambda cl, mhz: calls.append(("set_turbo", mhz))
+    # Found at 48 MHz (wg_chat's clock), so the write is genuinely needed.
+    reads = [48, 1]
+    H.get_turbo_mhz = lambda cl: (calls.append(("get_turbo",)),
+                                  reads.pop(0) if len(reads) > 1 else reads[0])[1]
+    H.set_reu = lambda cl, on, *a, **k: calls.append(("set_reu", on))
+    try:
+        c = FakeClient(reset_takes=True)
+        st = ds.teardown_device("fake", client=c, reset=False, reu_off=False)
+    finally:
+        H.set_turbo_mhz, H.get_turbo_mhz, H.set_reu = saved_h
+    check(("set_turbo", 1) in calls and ("get_turbo",) in calls,
+          "gentle mode: clock set to 1 MHz AND read back", str(calls))
+    check(not any(k[0] == "set_reu" for k in calls),
+          "gentle mode: the REU is not touched (set_reu may reset)",
+          str(calls))
+    check(c.resets == 0 and st["reset"] is None,
+          "gentle mode: no reset", f"resets={c.resets} st={st}")
+    check(st["turbo"] == 1, "gentle mode: the read-back is reported", str(st))
+
+    # --- NO REDUNDANT CLOCK WRITE (review of PR #178) ---------------------
+    # A CPU-speed write — even one that changes nothing — loses the next UCI
+    # command on the C64U, and in the gentle mode the session is still
+    # live. So when the device already reads idle, teardown must not write
+    # the clock; it must still REPORT the read-back. And when it does not
+    # read idle, it must write, then read back (both modes).
+    def run_mode(reads, **kw):
+        seq = list(reads)
+        calls = []
+        saved_h = (H.set_turbo_mhz, H.get_turbo_mhz, H.set_reu)
+        H.set_turbo_mhz = lambda cl, mhz: calls.append(("set_turbo", mhz))
+        def fake_get(cl):
+            calls.append(("get_turbo",))
+            v = seq.pop(0) if len(seq) > 1 else seq[0]
+            if isinstance(v, BaseException):
+                raise v
+            return v
+        H.get_turbo_mhz = fake_get
+        H.set_reu = lambda cl, on, *a, **k: calls.append(("set_reu", on))
+        try:
+            c = FakeClient(reset_takes=True)
+            st = ds.teardown_device("fake", client=c, **kw)
+        finally:
+            H.set_turbo_mhz, H.get_turbo_mhz, H.set_reu = saved_h
+        return calls, st, c
+
+    for label, kw in (("gentle", {"reset": False, "reu_off": False}),
+                      ("full", {})):
+        calls, st, c = run_mode([1], **kw)
+        check(not any(k[0] == "set_turbo" for k in calls),
+              f"{label} mode, already at 1 MHz: NO clock write", str(calls))
+        check(st["turbo"] == 1 and ("get_turbo",) in calls,
+              f"{label} mode, already at 1 MHz: read-back still reported",
+              str(st))
+        calls, st, c = run_mode([48, 1], **kw)
+        check(("set_turbo", 1) in calls and st["turbo"] == 1,
+              f"{label} mode, at 48 MHz: clock written and read back as 1",
+              f"{calls} {st}")
+    calls, st, c = run_mode([48, 1])
+    check(("set_reu", False) in calls and c.resets == 1
+          and st["reset"] == "verified",
+          "full mode still detaches the REU and does a verified reset",
+          f"{calls} resets={c.resets} {st}")
+    calls, st, c = run_mode([48, 48])
+    check(st["turbo"] == 48,
+          "a write that does not take is REPORTED (read-back 48), not "
+          "assumed", str(st))
+
+    # --- the pre-write READ must never gate the write on its own failure
+    # (round-3 review): a flaky device whose first GET throws, or a box
+    # with Turbo OFF (the harness returns None), must still get the write.
+    for label, kw in (("gentle", {"reset": False, "reu_off": False}),
+                      ("full", {})):
+        calls, st, c = run_mode([RuntimeError("GET flaky"), 1], **kw)
+        check(("set_turbo", 1) in calls and st["turbo"] == 1,
+              f"{label} mode, first clock READ throws: the write still "
+              f"happens and reads back 1", f"{calls} {st}")
+        calls, st, c = run_mode([None, 1], **kw)
+        check(("set_turbo", 1) in calls and st["turbo"] == 1,
+              f"{label} mode, Turbo Off (read None): the write happens",
+              f"{calls} {st}")
+
+    # --- a failed restore must FAIL the run (round-3 review) -------------
+    # Every caller used to discard teardown_device's result, so a box left
+    # at 48 MHz still exited 0.
+    try:
+        tf, ck = ds.teardown_failure, ds.check_teardown
+        deco = ds.fails_on_bad_teardown
+    except AttributeError as exc:
+        check(False, "device_session judges teardown results "
+              "(teardown_failure / check_teardown / fails_on_bad_teardown)",
+              repr(exc))
+    else:
+        full = {"idle_mhz": 1, "reu_off": True, "reset": True}
+        gentle = {"idle_mhz": 1, "reu_off": False, "reset": False}
+        good = {"turbo": 1, "reu": True, "reset": "verified", "mode": full}
+        cases = [
+            ("a clean full restore", good, False),
+            ("clock left at 48", dict(good, turbo=48), True),
+            ("clock unreadable (None)", dict(good, turbo=None), True),
+            ("REU detach not confirmed", dict(good, reu=False), True),
+            ("reset failed", dict(good, reset="failed"), True),
+            ("reset never issued", dict(good, reset=None), True),
+            # reset_and_verify's own contract: "unverified" is NOT a success
+            # — the sockets may still be stranded (round-4 review).
+            ("reset unverified", dict(good, reset="unverified"), True),
+            ("gentle: clock 1, REU/reset untouched",
+             {"turbo": 1, "reu": False, "reset": None, "mode": gentle}, False),
+            ("gentle: clock left at 48",
+             {"turbo": 48, "reu": False, "reset": None, "mode": gentle}, True),
+            ("not a dict at all", None, True),
+        ]
+        for label, st_, bad in cases:
+            check(bool(tf(st_)) is bad,
+                  f"teardown_failure: {label} -> "
+                  f"{'FAILED' if bad else 'ok'}", repr(tf(st_)))
+
+        def tool(rc, st_, raise_exit=None):
+            @deco
+            def main():
+                ck(st_)
+                if raise_exit is not None:
+                    raise SystemExit(raise_exit)
+                return rc
+            try:
+                return main()
+            except SystemExit as e:
+                return ("exit", e.code)
+
+        check(tool(0, good) == 0, "decorated main: clean restore keeps rc 0")
+        check(tool(0, dict(good, turbo=48)) == 1,
+              "decorated main: rc 0 + clock left at 48 -> exit 1",
+              repr(tool(0, dict(good, turbo=48))))
+        check(tool(0, dict(good, reset="unverified")) == 1,
+              "decorated main: rc 0 + reset 'unverified' -> exit 1",
+              repr(tool(0, dict(good, reset="unverified"))))
+        check(tool(3, dict(good, turbo=48)) == 3,
+              "decorated main: an existing failure code (3) is preserved")
+        check(tool(None, dict(good, turbo=48), raise_exit=77) == ("exit", 1),
+              "decorated main: SKIP (77) + failed restore -> SystemExit(1)",
+              repr(tool(None, dict(good, turbo=48), raise_exit=77)))
+        check(tool(None, good, raise_exit=77) == ("exit", 77),
+              "decorated main: SKIP with a clean restore stays 77")
+
+        # The tool may already have printed "PASS"/"SKIP"; when the exit is
+        # overridden, STDOUT must say so last, or a log reader is misled.
+        import contextlib
+        import io
+        for rc0, raise0, word in ((0, None, "PASS"), (None, 77, "SKIP")):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                tool(rc0, dict(good, turbo=48), raise_exit=raise0)
+            last = (buf.getvalue().strip().splitlines() or [""])[-1]
+            check(last.startswith("OVERRIDDEN: exit 1") and word in last
+                  and "device restore failed" in last,
+                  f"override after {word}: last STDOUT line says OVERRIDDEN "
+                  f"and names {word}", repr(last))
 
     # --- and the case that reaches the OUTER scope: the harness import
     # itself fails (a broken venv, a partial install — the shape that took
@@ -186,7 +364,10 @@ def main():
     check(raised is None,
           "no-client path: a broken harness import does NOT raise out of "
           "teardown_device", repr(raised))
-    check(st == {"turbo": None, "reu": False, "reset": None},
+    # ("mode" is the requested mode, carried for check_teardown; not a
+    # claim about what was done.)
+    check({k: v for k, v in (st or {}).items() if k != "mode"}
+          == {"turbo": None, "reu": False, "reset": None},
           "no-client path: it reports having done nothing, rather than "
           "half-reporting success", str(st))
 
