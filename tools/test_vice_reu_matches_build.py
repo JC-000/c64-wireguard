@@ -8,19 +8,25 @@ THE DEFECT. The gate builds with plain `make`, and `Makefile` has
 24 of the 33 gate suites that start VICE did so WITHOUT `-reu`. Measured
 2026-10-18 on master d4431ab, REU=1 PRG booted under VICE with no REU:
 
-    boot_ready = $01, x25519_reu_fault = $02   (VERIFY ERROR seen by the
-                                                 §8.2 settle in reu_mul_init)
+    boot_ready = $01, x25519_reu_fault = $02   ($DF00 bit 5 seen by the §8.2
+                                                 settle in reu_mul_init — with
+                                                 no REU, an open-bus read)
     x25519_scalarmult (RFC 7748 vector 1) = 5cf4f2af..., expected c3da5537...
                                                  fault afterwards $03
 
 and with `-reu -reusize 512`: fault $00, vector matches. So a machine without
 an REU boots normally and then computes WRONG X25519 results with no other
 symptom. Every one of the 24 suites happened to pass because none of them
-reaches an REU-backed multiply (measured: the fault byte read just before
-each suite's VICE instance was torn down was $02 in all 24, never with bit 0
-set — bit 0 is what an REU fetch on the missing REU records). That is luck,
-not coverage: the next suite that adds one handshake gets silently wrong
-crypto and a confusing failure two layers up.
+executes the REU multiply path — measured by planting BRK at fe25519_mul,
+fe25519_sqr, reu_fetch_mul_row, reu_fetch_doubled_row and reu_clear_wide
+right after boot, running each suite with its master gate arguments, and
+reading the plants back intact at teardown; all 24 still passed, while the
+fe25519 control derailed on the first plant. (The fault byte is NOT a usable
+"was the REU touched" instrument: bit 0 is a settle-spin timeout and bit 1 a
+$DF00 bit-5 sample, and on open bus a fetch need set neither — 8 random
+fe25519_mul calls with no REU were all wrong with the byte staying $02.) That
+is luck, not coverage: the next suite that adds one handshake gets silently
+wrong crypto and a confusing failure two layers up.
 
 THE FIX this suite holds in place, in two parts:
 
@@ -40,7 +46,12 @@ WHAT THIS CHECKS:
      construct a ViceConfig must EQUAL the set whose every ViceConfig gets
      extra_args from vice_reu_args(...) AND that call
      binary_wait_for_boot_ready — reported both ways, per call site. No gate
-     suite may spell "-reu"/"-reusize" itself. The scanner is proven able to
+     suite may spell "-reu"/"-reusize" itself. It fails CLOSED on the ways
+     around a checked ViceConfig call: an `as` alias, ViceConfig used as a
+     value (`VC = ViceConfig`, functools.partial), getattr by name,
+     `cfg.extra_args = ...`, extra_args handed to any other callable
+     (dataclasses.replace), a wrapper around vice_reu_args(...), and
+     ViceProcess / EthVice / an "x64sc" string. The scanner is proven able to
      fire on synthetic sources (S0) and to find real sites (positive control)
      before its verdict on the tree counts.
   D  Derivation, on synthetic label maps: banks 0 -> no REU; $3B -> 512 KiB;
@@ -139,6 +150,15 @@ def scan_source(src: str, filename: str = "<src>"):
             for a in node.names:
                 if a.name == "ViceConfig" and a.asname:
                     cfg_names.add(a.asname)
+    call_funcs = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    docstrings = set()
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                          ast.ClassDef)) and n.body:
+            first = n.body[0]
+            if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+                    and isinstance(first.value.value, str)):
+                docstrings.add(id(first.value))
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             name = _call_name(node)
@@ -161,9 +181,37 @@ def scan_source(src: str, filename: str = "<src>"):
                     # override what it derived.
                     bad.append((node.lineno, f"extra_args is not exactly "
                                              f"{DERIVE_FN}(...)"))
+            # extra_args handed to ANY other callable (dataclasses.replace,
+            # functools.partial(ViceConfig, ...)) must also be exactly derived.
+            if name not in cfg_names:
+                for k in node.keywords:
+                    if k.arg == "extra_args" and not (
+                            isinstance(k.value, ast.Call)
+                            and _call_name(k.value) == DERIVE_FN):
+                        vice_sites.append(node.lineno)
+                        bad.append((node.lineno, f"extra_args passed to {name or '?'}()"
+                                                 f" is not exactly {DERIVE_FN}(...)"))
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             if node.value.strip() in FORBIDDEN_LITERALS:
                 literal_hits.append(node.lineno)
+            if id(node) not in docstrings and (
+                    node.value == "ViceConfig" or "x64sc" in node.value):
+                # getattr(mod, "ViceConfig") or a hand-rolled x64sc launch.
+                vice_sites.append(node.lineno)
+                bad.append((node.lineno, f"string {node.value[:30]!r} reaches VICE "
+                                         f"around the checked ViceConfig path"))
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Attribute) and t.attr == "extra_args":
+                    vice_sites.append(node.lineno)
+                    bad.append((node.lineno, "extra_args assigned after "
+                                             "construction"))
+        elif (isinstance(node, ast.Name) and node.id in cfg_names
+              and isinstance(node.ctx, ast.Load) and id(node) not in call_funcs):
+            # ViceConfig used as a VALUE (VC = ViceConfig, partial(ViceConfig))
+            vice_sites.append(node.lineno)
+            bad.append((node.lineno, f"{node.id} used as a value, not called "
+                                     f"directly"))
     literal_hits = sorted(set(literal_hits))
     return vice_sites, bad, has_boot_wait, literal_hits
 
@@ -213,6 +261,18 @@ def static_checks(chk: Check):
          "p = ViceProcess(cfg)\n"),
         ("S0j EthVice rig launch is flagged",
          "r = EthVice(prg, labels, reu=False)\n"),
+        ("S0k extra_args assigned after construction is flagged",
+         "cfg = make()\ncfg.extra_args = []\n"),
+        ("S0l dataclasses.replace(cfg, extra_args=[]) is flagged",
+         "cfg2 = dataclasses.replace(cfg, extra_args=[])\n"),
+        ("S0m functools.partial(ViceConfig, ...) is flagged",
+         "mk = functools.partial(ViceConfig, warp=True)\n"),
+        ("S0n alias by assignment (VC = ViceConfig) is flagged",
+         "VC = ViceConfig\n"),
+        ("S0o getattr(mod, 'ViceConfig') is flagged",
+         "VC = getattr(h, 'ViceConfig')\n"),
+        ("S0p subprocess launching x64sc is flagged",
+         "subprocess.Popen(['x64sc', '-warp', prg])\n"),
     ]
     for what, src in bypasses:
         s, b, w, lit = scan_source(src)
@@ -295,6 +355,16 @@ def derivation_checks(chk: Check):
         chk.ok(False, "D7 no manifest and no REU code -> refuse", f"returned {got}")
     except ValueError:
         chk.ok(True, "D7 no manifest and no REU code -> refuse")
+    # A relocated bank (X25519_REU_BANK >= 11) pushes the mask above $FFFF and
+    # the Makefile drops it from labels.txt; the other manifest symbols stay.
+    # That must refuse, not fall back to the legacy 512 KiB guess.
+    try:
+        got = vice_reu_args({"reu_mul_init": 0x87D1,
+                             "LIB_X25519_RESIDENT_BYTES": 0x213A})
+        chk.ok(False, "D8 sibling build with its mask dropped -> refuse",
+               f"returned {got}")
+    except ValueError:
+        chk.ok(True, "D8 sibling build with its mask dropped -> refuse")
 
 
 # --------------------------------------------------------------- runtime ---

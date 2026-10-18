@@ -64,9 +64,11 @@ def binary_wait_for_boot_ready(transport, labels, timeout=120.0, poll_interval=2
 
     REU FAULT (issue #69): once boot_ready is set, the image's sticky
     ``x25519_reu_fault`` byte (c64-x25519 §8.2 settle) is read too, and a
-    non-zero value RAISES ``BootReuFault`` instead of returning. Booting the
-    REU=1 PRG under a VICE with no REU sets it to $02 while boot_ready is
-    still set, and every X25519 after that is silently wrong (measured
+    non-zero value RAISES ``BootReuFault`` instead of returning ($01 =
+    settle spin timed out, $02 = a $DF00 bit-5 sample). Booting the REU=1
+    PRG under a VICE with no REU sets $02 — an open-bus read of $DF00 —
+    while boot_ready is still set, and every X25519 after that is silently
+    wrong (measured
     2026-10-18: RFC 7748 vector 1 gave 5cf4f2af... for c3da5537...). It is
     raised rather than folded into the ``None`` return because callers print
     "boot did not complete" for ``None``, which would name the wrong cause.
@@ -103,10 +105,25 @@ def _refuse_reu_fault(transport, labels):
         return
     val = read_bytes(transport, addr, 1)[0]
     if val:
+        # Bit meanings per libs/x25519 src/x25519_init.s
+        # (x25519_reu_settle_slow): $01 = the bounded settle spin expired
+        # without END OF BLOCK; $02 = a $DF00 sample had bit 5 (VERIFY
+        # ERROR) set. With no REU attached $DF00 is open bus, so $02 there
+        # is typically an open-bus artefact, not a real verify — and a REU
+        # access on open bus need not set EITHER bit.
+        bits = []
+        if val & 0x01:
+            bits.append("$01 settle spin timed out without END OF BLOCK")
+        if val & 0x02:
+            bits.append("$02 $DF00 bit 5 seen (with no REU attached, "
+                        "typically an open-bus read)")
+        if val & ~0x03:
+            bits.append(f"${val & ~0x03 & 0xFF:02X} undefined bits")
         raise BootReuFault(
-            f"x25519_reu_fault = ${val:02X} at boot (boot_ready is set): the "
-            f"REU multiply tables did not verify, so every X25519 on this "
-            f"machine is wrong. This build needs VICE extra_args "
+            f"x25519_reu_fault = ${val:02X} at boot (boot_ready is set): "
+            f"{'; '.join(bits)}. The REU the multiply tables were stashed in "
+            f"is not behaving like one, so X25519 on this machine cannot be "
+            f"trusted. This build needs VICE extra_args "
             f"{vice_reu_args(labels)} — pass vice_util.vice_reu_args(labels) "
             f"to ViceConfig instead of spelling the REU flags by hand.")
 
@@ -154,6 +171,17 @@ def vice_reu_args(labels):
             raise ValueError(f"REU banks mask ${banks:X} needs {need_kib} KiB, "
                              f"beyond VICE's largest REU")
         return ["-reu", "-reusize", str(size)]
+    # A sibling build whose mask is MISSING is not the legacy build: with
+    # X25519_REU_BANK >= 11 the mask exceeds $FFFF and the Makefile drops it
+    # from labels.txt (it keeps only 16-bit values). Guessing 512 KiB there
+    # would be too small, so refuse instead.
+    sibling = [n for n in labels if str(n).startswith(("LIB_X25519_",
+                                                       "LIB_CHACHA20_POLY1305_"))]
+    if sibling:
+        raise ValueError(
+            f"labels.txt has contract manifest symbols ({sibling[0]}, ...) but "
+            f"no REU_BANKS_USED mask — most likely a relocated REU bank pushed "
+            f"it above $FFFF and the Makefile dropped it; cannot size the REU")
     if _label(labels, "reu_mul_init") is not None:
         return ["-reu", "-reusize", "512"]
     raise ValueError("cannot tell whether this build needs an REU: labels.txt "

@@ -202,11 +202,11 @@ Tests use the [c64-test-harness](https://github.com/JC-000/c64-test-harness) pac
 pip install c64-test-harness
 
 # All 54 suites — the canonical run, and the gate for any change.
-# Most run in a staggered parallel pool against a single build; the NINE that
+# Most run in a staggered parallel pool against a single build; the ELEVEN that
 # rebuild the tree themselves (x25519, write_bytes, uci_stub, both_backends,
 # chunked_send, multipart_split, build_mtu1440, ip65_bss_guard,
-# uci_short_read) run serially afterwards, then the default build
-# is restored.
+# uci_short_read, uci_dhcp_iface, uci_wait_carry) run serially afterwards,
+# then the default build is restored.
 #
 # A suite must also not write into a directory another suite READS. tools/ is
 # scanned as input by test_cold_init_seam, so scratch files belong in a

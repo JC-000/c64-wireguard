@@ -293,14 +293,18 @@ TESTS = [
     # Issue #69. The gate builds REU=1 (Makefile `REU ?= 1`) and 24 VICE
     # suites booted it with NO REU: boot_ready set, x25519_reu_fault $02, and
     # every X25519 after that silently wrong (RFC 7748 vector 1 mismatched).
-    # They passed only because none reaches an REU multiply. Every VICE suite
+    # They passed only because none executes the REU multiply path (BRK
+    # planted at fe25519_mul/_sqr and the reu_fetch/clear entries never fired
+    # in any of them). Every VICE suite
     # listed here now takes its REU flags from vice_util.vice_reu_args(labels)
     # (derived from the built image's contract §5 REU_BANKS_USED manifest) and
     # binary_wait_for_boot_ready refuses a non-zero fault. This suite asserts
     # that statically (set equality over both lists, scanner proven able to
-    # fire) and in VICE: derived attachment boots with fault $00, and the
-    # opposite attachment is refused — the alarm, run every time. Pooled:
-    # reads the gate's build, mutates nothing; two short boots, no crypto.
+    # fire) and in VICE, in THREE boots: R1 derived attachment boots with
+    # fault $00 and computes RFC 7748 vector 1; R2 no REU is refused; R3 one
+    # REU size down miscomputes vector 1. R1 and R3 each run a full
+    # x25519_scalarmult (~76 s for the suite in the gate). Pooled: reads the
+    # gate's build, mutates nothing.
     ("vice_reu", ["tools/test_vice_reu_matches_build.py"]),
     # NOT listed, deliberately: tools/test_uci_*_live.py and
     # tools/test_wg_responder*.py need real hardware or a live responder.
