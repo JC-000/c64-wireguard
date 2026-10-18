@@ -28,10 +28,10 @@ USE_X25519_SIBLING ?= 1
 USE_CHACHA_SIBLING ?= 1
 
 ifneq ($(USE_X25519_SIBLING),1)
-$(error USE_X25519_SIBLING=$(USE_X25519_SIBLING) is no longer supported: the legacy in-tree crypto build was RETIRED (issue #69). The sibling archives are the only crypto build; drop the variable from the command line)
+$(error USE_X25519_SIBLING=$(USE_X25519_SIBLING) is no longer supported: the legacy in-tree crypto build was RETIRED (issue #69). The sibling archives are the only crypto build; drop the variable from the command line, environment or MAKEFLAGS)
 endif
 ifneq ($(USE_CHACHA_SIBLING),1)
-$(error USE_CHACHA_SIBLING=$(USE_CHACHA_SIBLING) is no longer supported: the legacy in-tree crypto build was RETIRED (issue #69). The sibling archives are the only crypto build; drop the variable from the command line)
+$(error USE_CHACHA_SIBLING=$(USE_CHACHA_SIBLING) is no longer supported: the legacy in-tree crypto build was RETIRED (issue #69). The sibling archives are the only crypto build; drop the variable from the command line, environment or MAKEFLAGS)
 endif
 
 # --- REU knob ---

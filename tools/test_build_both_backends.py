@@ -314,8 +314,15 @@ def test_retired_sibling_knobs_refused():
             assert f"{knob} {RETIRED_SIBLING_MSG}" in combined, (
                 f"make BACKEND=uci {' '.join(args)} failed, but not with the "
                 f"retirement diagnostic for {knob!r}:\n{combined[-1500:]}")
-            assert not os.path.exists(PRG_PATH), (
-                f"a PRG exists after the refused {' '.join(args)} build")
+            # The refusal must happen at PARSE time, before any rule runs:
+            # `make clean` above removed every object, so any .o now under
+            # build/ means the build started and was stopped later (e.g. by
+            # a link-time error), which is not the guard this checks.
+            built = [os.path.join(d, f) for d, _, fs in os.walk(BUILD_DIR)
+                     for f in fs if f.endswith((".o", ".a", ".prg"))]
+            assert not built, (
+                f"the refused {' '.join(args)} build produced artifacts "
+                f"before failing ({built[:3]}) — the guard is not at parse time")
             print(f"[retired {' '.join(args)}] refused: "
                   f"{[l for l in combined.splitlines() if 'RETIRED' in l][0].strip()}")
         _run_make("clean")
