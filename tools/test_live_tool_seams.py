@@ -1354,18 +1354,72 @@ def _hs_aliases(tree) -> set:
 
 
 def _delegates(tree) -> bool:
+    """live.main() via `import test_uci_handshake_live as live`, OR a bare
+    call to `main` imported `from test_uci_handshake_live import main [as x]`
+    (adversarial review: the from-import form was invisible)."""
     al = _hs_aliases(tree)
-    return any(isinstance(c.func, ast.Attribute) and c.func.attr == "main"
-               and isinstance(c.func.value, ast.Name)
-               and c.func.value.id in al for c in _calls_in(tree))
+    fn_names = {a.asname or a.name for n in ast.walk(tree)
+                if isinstance(n, ast.ImportFrom) and n.module == _HS_MODULE
+                for a in n.names if a.name == "main"}
+    for c in _calls_in(tree):
+        f = c.func
+        if (isinstance(f, ast.Attribute) and f.attr == "main"
+                and isinstance(f.value, ast.Name) and f.value.id in al):
+            return True
+        if isinstance(f, ast.Name) and f.id in fn_names:
+            return True
+    return False
+
+
+def _structure_problems(tree, is_hs: bool) -> list:
+    """Shapes the audit cannot follow, so it refuses them instead of
+    passing them (adversarial review, M2/M2b/M7/M8):
+
+    * a device API imported under ANOTHER NAME — `teardown_device as td`
+      is neither credited nor flagged, so it must not exist;
+    * the mode changed without an assignment — `.update(...)`, `setattr`
+      — which the assignment evaluator cannot see, and which mutates the
+      shared module-level default in place.
+    """
+    out = []
+    watched = set(_DEVICE_CALLS) | {"get_turbo_mhz"}
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.Import, ast.ImportFrom)):
+            for a in n.names:
+                base = a.name.rsplit(".", 1)[-1]
+                if a.asname and a.asname != base and (
+                        base in watched or (
+                            isinstance(n, ast.ImportFrom)
+                            and n.module == _HS_MODULE and base == "main")):
+                    out.append(f"line {n.lineno}: `{a.name} as {a.asname}` — "
+                               f"the teardown audit keys on the real name; "
+                               f"import it unaliased")
+        if (not is_hs and isinstance(n, ast.Attribute)
+                and n.attr == _MODE_NAME and isinstance(n.ctx, ast.Load)):
+            out.append(f"line {n.lineno}: {_MODE_NAME} READ/mutated in place "
+                       f"(e.g. .update()) — that also changes the shared "
+                       f"default for every later caller; assign one literal")
+        if (isinstance(n, ast.Call) and _callee(n) in ("setattr", "delattr")
+                and len(n.args) >= 2 and isinstance(n.args[1], ast.Constant)
+                and n.args[1].value == _MODE_NAME):
+            out.append(f"line {n.lineno}: {_callee(n)}(..., '{_MODE_NAME}') "
+                       f"— assign one literal dict instead")
+    return out
 
 
 def _eval_mode(node):
-    """A post_session_teardown value -> teardown kwargs, None (skip the
-    teardown entirely: master's old `False`), or _UNKNOWN. A computed value
-    is UNKNOWN and FAILS — it might opt out while reading as opted in."""
+    """A post_session_teardown value -> teardown kwargs, None (no teardown
+    at all), or _UNKNOWN. A computed value is UNKNOWN and FAILS — it might
+    opt out while reading as opted in.
+
+    The old BOOLEANS are not modes any more and must not read as one. `True`
+    was the old default, so an old branch or a copied snippet will write it:
+    at runtime `teardown_device(**True)` raises TypeError, main()'s
+    BaseException guard swallows it with a warning, and NOTHING is restored
+    (adversarial review, finding 1). So True is UNKNOWN, and False — which
+    fails the same way — is None: no teardown."""
     if isinstance(node, ast.Constant) and node.value is True:
-        return {}
+        return _UNKNOWN
     if isinstance(node, ast.Constant) and node.value is False:
         return None
     if isinstance(node, ast.Dict):
@@ -1419,7 +1473,22 @@ def _helper_facts(ds_tree):
     called = {}
     for c in _calls_in(td):
         called.setdefault(_callee(c), []).append(c)
-    if "set_turbo_mhz" in called and "get_turbo_mhz" in called:
+    parents = {ch: p for p in ast.walk(td) for ch in ast.iter_child_nodes(p)}
+
+    def _gated_by(node, names) -> bool:
+        while node in parents:
+            node = parents[node]
+            if isinstance(node, ast.If) and any(
+                    isinstance(x, ast.Name) and x.id in names
+                    for x in ast.walk(node.test)):
+                return True
+        return False
+    # The clock is the ONE stage the gentle mode keeps, so crediting it
+    # requires the set to be unconditional on reu_off/reset: gated behind
+    # either, wg_chat's {"reset": False, "reu_off": False} would skip it.
+    if ("get_turbo_mhz" in called and any(
+            not _gated_by(c, {"reu_off", "reset"})
+            for c in called.get("set_turbo_mhz", []))):
         does.add("set_turbo_mhz")          # set AND read back
     if any(len(c.args) >= 2 and _is_false(c.args[1])
            for c in called.get("set_reu", [])):
@@ -1464,8 +1533,10 @@ def _discharge(calls, defaults, does, mode):
         nm, args = _effective(c)
         ln = getattr(c, "lineno", "?")
         if nm == "teardown_device":
-            if not (len(c.args) >= 2
-                    or any(k.arg == "client" for k in c.keywords)):
+            client_arg = (c.args[1] if len(c.args) >= 2 else next(
+                (k.value for k in c.keywords if k.arg == "client"), None))
+            if client_arg is None or (isinstance(client_arg, ast.Constant)
+                                      and client_arg.value is None):
                 problems.append(
                     f"line {ln}: teardown_device() without client= takes a "
                     f"SECOND lock after this tool released its own — an "
@@ -1522,9 +1593,37 @@ def _discharge(calls, defaults, does, mode):
             done.add("set_reu")
         elif nm == "reset_and_verify" or (
                 nm == "reset" and isinstance(c.func, ast.Attribute)
-                and not c.args):
+                and not c.args and isinstance(c.func.value, ast.Name)
+                and (c.func.value.id == "c"
+                     or "client" in c.func.value.id)):
+            # A device client's reset — not listener.reset() or any other
+            # object's (adversarial review, M6).
             done.add("reset")
     return done, problems
+
+
+_RESTORE_CALLEES = {"teardown_device", "set_turbo_mhz", "set_reu",
+                    "reset", "reset_and_verify"}
+
+
+def _released_before_restore(tree) -> list:
+    """A restore that runs AFTER a `.release()` in the same `finally:` is
+    outside the lock however it is spelled (adversarial review, M3). Source
+    order within one finalbody is execution order for straight-line code,
+    which is what every teardown here is."""
+    out = []
+    for t in ast.walk(tree):
+        if not (isinstance(t, ast.Try) and t.finalbody):
+            continue
+        calls = [c for s in t.finalbody for c in _calls_in(s)]
+        rel = [c.lineno for c in calls if _callee(c) == "release"
+               and isinstance(c.func, ast.Attribute)]
+        for c in calls:
+            if _effective(c)[0] in _RESTORE_CALLEES and rel and min(rel) < c.lineno:
+                out.append(f"line {c.lineno}: {_effective(c)[0]}() runs "
+                           f"after a .release() at line {min(rel)} in the "
+                           f"same finally — outside the lock")
+    return out
 
 
 def _teardown_audit(tools_dir: Path, overrides: dict | None = None) -> dict:
@@ -1592,6 +1691,8 @@ def _teardown_audit(tools_dir: Path, overrides: dict | None = None) -> dict:
         done, problems = _discharge(_finally_calls(tree), defaults, does,
                                     own_mode)
         missing = need - done
+        problems += _structure_problems(tree, rel == _HS_FILE)
+        problems += _released_before_restore(tree)
         info = {"need": set(need), "missing": missing,
                 "problems": problems, "delegates": False}
         if rel != _HS_FILE and _delegates(tree):
@@ -1766,6 +1867,76 @@ def check_live_tool_teardown_alarms(check) -> None:
                    != set(EXPECTED_SHORTFALL.get(tool, set()))
                    or want_problem),
               f"audit returned {got}")
+
+    # The adversarial review's false greens (M-numbers from that report).
+    # Each must now turn its tool red — missing an obligation OR reporting
+    # a problem. Anchors are the post-fix shapes; a non-applying anchor
+    # fails rather than skips.
+    demo_hook = "live.post_session_hook = build_demo_loop()"
+    echo_fin = ("        teardown_device(host, client=client, logger=log)\n"
+                "        lock.release()\n")
+    review = [
+        ("M1 wg_demo writes the old default `= True` (**True raises at "
+         "runtime; nothing restored)", "wg_demo.py",
+         _mutated("wg_demo.py", demo_hook,
+                  demo_hook + "\n    live.post_session_teardown = True")),
+        ("M2 wg_demo mutates the mode in place with .update()", "wg_demo.py",
+         _mutated("wg_demo.py", demo_hook, demo_hook +
+                  "\n    live.post_session_teardown.update(reset=False)")),
+        ("M2b wg_demo sets the mode with setattr()", "wg_demo.py",
+         _mutated("wg_demo.py", demo_hook, demo_hook +
+                  "\n    setattr(live, 'post_session_teardown', {})")),
+        ("M3 echo_live releases the lock BEFORE the teardown", echo,
+         _mutated(echo, echo_fin,
+                  "        lock.release()\n"
+                  "        teardown_device(host, client=client, logger=log)\n")),
+        ("M4 echo_live passes client=None", echo,
+         _mutated(echo, echo_call,
+                  "teardown_device(host, client=None, logger=log)")),
+        ("M6 echo_live 'resets' a listener, not the device", echo,
+         _mutated(echo, echo_call,
+                  "teardown_device(host, client=client, reset=False, "
+                  "logger=log); listener.reset()")),
+        ("M8 echo_live imports teardown_device under an alias", echo,
+         _mutated(echo, "        from device_session import teardown_device\n"
+                  "        teardown_device(host, client=client, logger=log)\n",
+                  "        from device_session import teardown_device as td\n"
+                  "        td(host, client=client, idle_mhz=48, logger=log)\n")),
+        ("M10 a from-import delegator is discovered (and unclassified)",
+         "zz_from_import_delegator.py",
+         {"zz_from_import_delegator.py":
+          "from test_uci_handshake_live import main as hs\nhs()\n"}),
+    ]
+    for label, tool, ov in review:
+        if ov is None:
+            check(f"alarm-proof (review): {label}", False,
+                  "the mutation did not apply (anchor not found exactly "
+                  "once) — update the anchor, do not drop the case")
+            continue
+        r = _teardown_audit(tools_dir, ov)
+        if tool not in LIVE_TOOLS:
+            check(f"alarm-proof (review): {label}",
+                  tool in r["discovered"], f"discovered={sorted(r['discovered'])}")
+            continue
+        info = r["tools"].get(tool)
+        allowed = set(EXPECTED_SHORTFALL.get(tool, set()))
+        red = info is not None and (info["missing"] != allowed
+                                    or bool(info["problems"]))
+        check(f"alarm-proof (review): {label} -> red", red,
+              f"audit returned {info}")
+
+    # The helper's clock credit requires an UNCONDITIONAL set: gated behind
+    # reu_off, the gentle mode would silently skip it (review finding 6).
+    ov = _mutated("device_session.py",
+                  "                set_turbo_mhz(c, idle_mhz)\n",
+                  "                if reu_off: set_turbo_mhz(c, idle_mhz)\n")
+    r = _teardown_audit(tools_dir, ov) if ov else None
+    check("alarm-proof (review): a clock set gated on reu_off withdraws the "
+          "clock credit (wg_chat goes red)",
+          r is not None and "set_turbo_mhz" not in r["helper"]["does"]
+          and "set_turbo_mhz" in r["tools"]["wg_chat.py"]["missing"],
+          "mutation did not apply" if r is None else
+          f"does={sorted(r['helper']['does'])}")
 
     # Mutations that SHOULD SURVIVE: equivalent spellings of a correct
     # restore. A guard that also fires on these keys on spelling, not on

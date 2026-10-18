@@ -132,8 +132,12 @@ still gets its clock restored to 1 MHz **inside** `main()`'s held lock. Until
 lock, leaving a window in which another lane could acquire the box at 48 MHz.
 If you add a non-interactive mode to an operator tool, that mode takes the
 full teardown back. `tools/test_live_tool_seams.py` derives what every live
-tool owes from what it changes and fails if a `finally:` does not pay it
-inside the lock.
+tool owes from what it changes and fails unless a `finally:` pays it — with
+`teardown_device(client=...)` (or a hand-written restore) placed before any
+`.release()` in that `finally`, and no `restore_idle()` / host-only
+`teardown_device()` taking a second lock. It is a static check: it cannot
+see a restore that is skipped at runtime (e.g. behind an `if` that is never
+true).
 
 Two things measured on 2026-09-03/04 are why:
 

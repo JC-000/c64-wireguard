@@ -119,6 +119,29 @@ def main():
           "and the reset is still verified", str(st))
     check(st["turbo"] is None, "the clock failure is still reported", str(st))
 
+    # --- the GENTLE mode wg_chat runs inside main()'s lock (#166) --------
+    # reset=False, reu_off=False must still set the clock to 1 MHz and read
+    # it back, and must touch neither the REU nor the reset. Before #166
+    # nothing exercised these kwargs; wg_chat now depends on them.
+    calls = []
+    saved_h = (H.set_turbo_mhz, H.get_turbo_mhz, H.set_reu)
+    H.set_turbo_mhz = lambda cl, mhz: calls.append(("set_turbo", mhz))
+    H.get_turbo_mhz = lambda cl: (calls.append(("get_turbo",)), 1)[1]
+    H.set_reu = lambda cl, on, *a, **k: calls.append(("set_reu", on))
+    try:
+        c = FakeClient(reset_takes=True)
+        st = ds.teardown_device("fake", client=c, reset=False, reu_off=False)
+    finally:
+        H.set_turbo_mhz, H.get_turbo_mhz, H.set_reu = saved_h
+    check(("set_turbo", 1) in calls and ("get_turbo",) in calls,
+          "gentle mode: clock set to 1 MHz AND read back", str(calls))
+    check(not any(k[0] == "set_reu" for k in calls),
+          "gentle mode: the REU is not touched (set_reu may reset)",
+          str(calls))
+    check(c.resets == 0 and st["reset"] is None,
+          "gentle mode: no reset", f"resets={c.resets} st={st}")
+    check(st["turbo"] == 1, "gentle mode: the read-back is reported", str(st))
+
     # --- and the case that reaches the OUTER scope: the harness import
     # itself fails (a broken venv, a partial install — the shape that took
     # down every restore path at once). The reset lives in a `finally`

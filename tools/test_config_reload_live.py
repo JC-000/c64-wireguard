@@ -539,8 +539,16 @@ def run_soak(args) -> int:
         # client is passed in; teardown_device never raises.
         try:
             if client is not None:
-                from device_session import teardown_device
-                teardown_device(args.host, client=client, logger=log)
+                # Import INSIDE a BaseException guard, as main() in
+                # test_uci_handshake_live does: an ImportError (or a second
+                # Ctrl-C) escaping a `finally` replaces the traceback that
+                # says what actually ended the soak.
+                try:
+                    from device_session import teardown_device
+                    teardown_device(args.host, client=client, logger=log)
+                except BaseException as exc:                  # noqa: BLE001
+                    log.warning("teardown skipped (%r); device may be left "
+                                "at turbo", exc)
         finally:
             lock.release()
             sink.close()
