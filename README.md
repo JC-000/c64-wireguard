@@ -145,7 +145,7 @@ The full memory layout is defined in `cfg/c64-wireguard-ip65.cfg` and `cfg/c64-w
 | `src/constants.inc` | Zero page variables, hardware equates (header, not assembled directly) |
 | `src/crypto_abi.inc` | Public crypto ABI contract (fe25519_*, x25519_*, chacha20_*, poly1305_*, aead_*, blake2s_*) matching the sibling libraries |
 | `src/net_abi.inc` | Public UDP networking ABI contract (net_init, net_dhcp_acquire, net_poll, net_udp_*) |
-| `src/contract_asserts.s` | Link-time c64-lib-contract checks: REU bank masks disjoint, §8.0 shared-primitive ownership, sibling ABI version, exact linked-segment size ratchets, declared-vs-linked footprint, and the §8.1 `mul_tables_init` presence import that keeps the sibling link order-independent |
+| `src/contract_asserts.s` | Link-time c64-lib-contract checks: REU bank masks disjoint, §8.0 shared-primitive ownership, sibling ABI version, exact linked-segment size ratchets, x25519 declared-vs-linked COLD footprint, and the §8.1 `mul_tables_init` presence import that keeps the sibling link order-independent |
 | `libs/x25519/` | c64-x25519 submodule (v0.16.0) — X25519 + fe25519, the shipped implementation; built via its own `make lib` |
 | `libs/chacha20poly1305/` | c64-ChaCha20-Poly1305 submodule (v0.11.0) — ChaCha20/Poly1305/AEAD/word32, the shipped implementation |
 | `src/crypto/blake2s.s` | BLAKE2s-256: init, update, final, compress, G function, keyed hashing (in-tree by design — no sibling library) |
