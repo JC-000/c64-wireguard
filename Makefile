@@ -27,11 +27,20 @@ BACKEND ?= ip65
 USE_X25519_SIBLING ?= 1
 USE_CHACHA_SIBLING ?= 1
 
+# Every knob $(error) guard in this file fires at parse time, which would also
+# refuse e.g. `make clean BACKEND=uci WG_MTU1440=1`. KNOB_GUARDS is non-empty
+# whenever something other than `clean` is going to be built (an empty goal
+# list means the default target), so clean always works and every build is
+# still guarded. Defined here, ahead of its first user.
+KNOB_GUARDS := $(if $(MAKECMDGOALS),$(filter-out clean,$(MAKECMDGOALS)),all)
+
+ifneq ($(KNOB_GUARDS),)
 ifneq ($(USE_X25519_SIBLING),1)
 $(error USE_X25519_SIBLING=$(USE_X25519_SIBLING) is no longer supported: the legacy in-tree crypto build was RETIRED (issue #69). The sibling archives are the only crypto build; drop the variable from the command line, environment or MAKEFLAGS)
 endif
 ifneq ($(USE_CHACHA_SIBLING),1)
 $(error USE_CHACHA_SIBLING=$(USE_CHACHA_SIBLING) is no longer supported: the legacy in-tree crypto build was RETIRED (issue #69). The sibling archives are the only crypto build; drop the variable from the command line, environment or MAKEFLAGS)
+endif
 endif
 
 # --- REU knob ---
@@ -90,11 +99,8 @@ endif
 # build is byte-identical to a tree without this flag. UCI only — ip65 has
 # no chunked path and its caps are already 1472/1472 (clamped by
 # WG_DATAGRAM_CAP for RAM, see src/constants.inc).
-# The knob $(error) guards below fire at parse time, which would also refuse
-# `make clean BACKEND=uci WG_MTU1440=1`. KNOB_GUARDS is non-empty whenever
-# something other than `clean` is going to be built (an empty goal list means
-# the default target), so clean always works and every build is still guarded.
-KNOB_GUARDS := $(if $(MAKECMDGOALS),$(filter-out clean,$(MAKECMDGOALS)),all)
+# The knob $(error) guards below are gated on KNOB_GUARDS (defined at the top
+# of this file, above the USE_*_SIBLING guards) so `make clean` always works.
 UCI_CHUNKED_WRITE ?= 0
 ifeq ($(UCI_CHUNKED_WRITE),1)
 ifneq ($(BACKEND),uci)

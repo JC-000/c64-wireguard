@@ -53,8 +53,9 @@ EXPORT_RE = re.compile(r"^\s*\.export(?:zp)?\s+(.+?)\s*(?:;.*)?$")
 WG_ONLY_PREFIXES = ("blake2s_", "hmac_blake2s", "kdf_")
 WG_ONLY_EXACT = {
     "kdf_1", "kdf_2", "kdf_3",
-    # fe25519 WG-only helpers explicitly called out in crypto_abi.inc:
-    "fe25519_cmp_p", "fe25519_reduce_wide",
+    # fe25519_cmp_p / fe25519_reduce_wide were whitelisted here until the
+    # in-tree fe25519.s (their only implementation) was retired, issue #69.
+    # Removed so a re-added import of either is flagged as drift.
 }
 
 

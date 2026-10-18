@@ -255,9 +255,16 @@ def main():
               "what to zero and this test cannot know what to check.")
         return 1
     if size == 0:
-        print("SKIP: LIB_X25519_INIT_CODE is empty (USE_X25519_SIBLING=0) — "
-              "there is no cold segment to reclaim in this build")
-        return 0
+        # This used to SKIP with rc=0, for the legacy USE_X25519_SIBLING=0
+        # build, which linked no cold segment. That build was RETIRED
+        # 2026-10-18 (issue #69): every build links the x25519 archive and
+        # its LIB_X25519_INIT_CODE is never empty (826 B at REU=1, 160 B at
+        # REU=0), so an empty span is a broken link or a stale labels.txt.
+        print("FAIL: LIB_X25519_INIT_CODE is EMPTY (size 0) — every build "
+              "links the x25519 archive's cold segment; the build that had "
+              "none was retired (issue #69), so there is nothing legitimate "
+              "to skip")
+        return 1
 
     _fe_scratch(labels)
     for n in ("fe_tmp1", "fe_tmp2", "fe_tmp3", "fe25519_src1", "fe25519_src2",

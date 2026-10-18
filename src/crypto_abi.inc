@@ -63,13 +63,13 @@
 .import kdf_2
 .import kdf_3
 
-; --- One-off helpers that are NOT part of any sibling-lib ABI but are
-;     currently WG-internal. Group separately so future ABI-drift
-;     verification (tools/check_abi_drift.py in Phase 3.5) ignores them.
-
-; fe25519 WG-only helpers (no sibling equivalent)
-.import fe25519_cmp_p
-.import fe25519_reduce_wide
+; --- Boot-time helpers ---
+; (fe25519_cmp_p and fe25519_reduce_wide used to be imported here as
+; "WG-only helpers". Their only implementation was the in-tree
+; src/crypto/fe25519.s, retired 2026-10-18 with the legacy build, issue
+; #69; nothing referenced them, which is why the dangling .imports linked.
+; tools/check_abi_drift.py no longer whitelists them, so re-adding either
+; is reported as drift.)
 
 ; REU setup — called once at boot. reu_mul_init does not exist in the
 ; REU-less build (x25519 onchip profile drops the whole §8.2 surface),

@@ -325,6 +325,25 @@ def test_retired_sibling_knobs_refused():
                 f"before failing ({built[:3]}) — the guard is not at parse time")
             print(f"[retired {' '.join(args)}] refused: "
                   f"{[l for l in combined.splitlines() if 'RETIRED' in l][0].strip()}")
+        # `clean` must still work with a retired value on the line — the
+        # Makefile's KNOB_GUARDS convention every other knob guard follows —
+        # but `clean` followed by a real goal must still be refused.
+        result = _run_make("clean", "USE_X25519_SIBLING=0",
+                           "USE_CHACHA_SIBLING=0")
+        assert result.returncode == 0, (
+            "make clean USE_X25519_SIBLING=0 USE_CHACHA_SIBLING=0 was refused "
+            "— clean must always work (KNOB_GUARDS):\n"
+            f"{((result.stderr or '') + (result.stdout or ''))[-1500:]}")
+        print("[clean USE_*_SIBLING=0] clean still runs")
+        result = _run_make("clean", "all", "BACKEND=uci",
+                           "USE_X25519_SIBLING=0")
+        combined = (result.stderr or "") + (result.stdout or "")
+        assert (result.returncode != 0 and
+                f"USE_X25519_SIBLING=0 {RETIRED_SIBLING_MSG}" in combined), (
+            "make clean all USE_X25519_SIBLING=0 was not refused with the "
+            f"retirement diagnostic — a `clean` goal must not exempt a real "
+            f"build:\n{combined[-1500:]}")
+        print("[clean all USE_X25519_SIBLING=0] refused")
         _run_make("clean")
         result = _run_make("BACKEND=uci", "USE_X25519_SIBLING=1",
                            "USE_CHACHA_SIBLING=1")
