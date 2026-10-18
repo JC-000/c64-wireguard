@@ -20,6 +20,11 @@ so it runs in milliseconds anywhere:
 
 It deliberately does NOT test what the hooks do — that needs the device.
 It tests that the wiring they hang from is still there.
+
+It also audits every device tool's TEARDOWN (check_live_tool_teardown,
+#134/#166): what each tool owes is derived from what it changes, the tools
+are discovered rather than listed, and each must pay in a `finally:`
+inside its own lock.
 """
 
 from __future__ import annotations
@@ -1654,11 +1659,9 @@ def check_live_tool_teardown(check, tools_dir: Path | None = None) -> None:
           h["defaults"] == {"idle_mhz": 1, "reu_off": True, "reset": True},
           "a bare teardown_device(host, client=c) is credited as the FULL "
           "restore on the strength of these defaults")
-    check(f"test_uci_handshake_live: {_MODE_NAME} defaults to the full "
-          f"teardown {{}} (got {r['hs_default']!r})",
-          r["hs_default"] == {},
-          "the default is what every delegator that does not override it "
-          "gets; anything else weakens all of them at once")
+    # The default being {} is pinned once, on the imported module, by the
+    # "teardown mode defaults to the full teardown" check further up; the
+    # audit uses r["hs_default"] but does not report it a second time.
     check(f"test_uci_handshake_live: {_MODE_NAME} is read ONLY as the "
           f"**splat into teardown_device ({r['mode_loads']} reads, "
           f"{r['mode_splats']} splats)",
@@ -1763,6 +1766,33 @@ def check_live_tool_teardown_alarms(check) -> None:
                    != set(EXPECTED_SHORTFALL.get(tool, set()))
                    or want_problem),
               f"audit returned {got}")
+
+    # Mutations that SHOULD SURVIVE: equivalent spellings of a correct
+    # restore. A guard that also fires on these keys on spelling, not on
+    # the property, and gets "fixed" by whoever trips it next.
+    survivors = [
+        ("echo_live: idle_mhz=1 spelled out", echo,
+         _mutated(echo, echo_call,
+                  "teardown_device(host, client=client, idle_mhz=1, "
+                  "reu_off=True, reset=True, logger=log)"), echo),
+        ("wg_chat: the same gentle mode, keys reordered", chat,
+         _mutated(chat, chat_mode, '{"reu_off": False, "reset": False}'),
+         chat),
+        ("echo_live: a COMMENT naming restore_idle() in the finally", echo,
+         _mutated(echo, echo_call,
+                  echo_call + "  # not restore_idle(host): #166"), echo),
+    ]
+    for label, rel, ov, tool in survivors:
+        if ov is None:
+            check(f"should-survive: {label}", False,
+                  f"the mutation did not apply to {rel}")
+            continue
+        info = _teardown_audit(tools_dir, ov)["tools"].get(tool)
+        allowed = set(EXPECTED_SHORTFALL.get(tool, set()))
+        check(f"should-survive: {label} stays green",
+              info is not None and info["missing"] == allowed
+              and not info["problems"],
+              f"audit returned {info}")
 
     # Discovery, both directions.
     ov = {"zz_new_live_tool.py": "def main(c):\n    c.run_prg(b'')\n"}
