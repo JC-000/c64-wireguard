@@ -465,6 +465,9 @@ def group_bytes(transport, L, put_byte_stub, rng, part_max, store, capture,
         # suite whose check count drops when the adapter changes shape is the
         # exact failure mode this location trick could otherwise introduce.
         for total in (part_max + 1, EXPECT_SEND_MAX):
+            # Consume the same RNG draws as the located branch, so every
+            # later group sees the same payloads at the same seed either way.
+            bytes(rng.randrange(256) for _ in range(total))
             check(False, f"{total} B: C=0 with the sink captured", why)
             check(False, f"{total} B: exactly {total} payload bytes pushed "
                          f"across all parts", why)
@@ -485,12 +488,15 @@ def group_bytes(transport, L, put_byte_stub, rng, part_max, store, capture,
         pushed = end - CAPBUF
         got = bytes(read_bytes(transport, CAPBUF, total)) if 0 < pushed else b""
         print(f"\n--- {total}-byte datagram, {len(parts)} parts ---")
-        # NOT dominated by group_splitting's C=0 at these lengths: that is a
-        # different net_udp_send call, made before the sink was patched. This
-        # is the only verdict on THIS call's carry, and a capture run can push
-        # every byte correctly and still return C=1 (proved by forcing the
-        # completing part's reply count to 1 for this call alone: with this
-        # check removed the suite stayed green).
+        # The only verdict on THIS call's carry. The adapter code is the same
+        # as in group_splitting's 889/1472 calls; what differs is the call
+        # history: here 889 follows a 1472 send (and 1472 follows 889),
+        # there 889 follows 888 and 1472 follows 1471. A defect that leaves
+        # state behind from the previous send could fail here and not there.
+        # Measured with a HARNESS-state mutant, not an adapter change: the
+        # read_resp stub's count forced to 1 for these calls alone makes the
+        # adapter push every byte and return C=1 ($87), and without this check
+        # the suite stayed green.
         check(carry == 0, f"{total} B: C=0 with the sink captured",
               f"carry={carry} net_last_error=${err:02X}")
         check(pushed == total,

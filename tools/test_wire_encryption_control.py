@@ -351,8 +351,14 @@ def leg_d(seed: int) -> None:
     body = text.encode("ascii")
     dgram = hdr + bytes((b * 29 + 5) & 0xFF for b in range(len(body) + 16))
     if pair_fn is None:
-        check(False, "the live tool's absence calls go through a wrapper "
-                     "that scores a refused search", "no _absence_pair")
+        # Same two claims as the branch below, recorded as failures, so a
+        # tree without the wrapper is a named rc=1 rather than a count
+        # mismatch (EXPECTED_CHECKS) that hides which claims went missing.
+        why = "no _absence_pair in test_wire_encryption_live"
+        check(False, "on the normal path _absence_pair returns exactly what "
+                     "the searcher returns", why)
+        check(False, "a refused search lands as scored FAILs, not a "
+                     "traceback", why)
     else:
         check(pair_fn(dgram, body, {"m": text}, "")
               == wps.absence_and_control(dgram, body, {"m": text}, ""),
@@ -376,7 +382,8 @@ def leg_d(seed: int) -> None:
                                   ("MARKER_ALIVE", "alive"))}
     for name, fn in builders.items():
         if fn is None:
-            check(False, f"{name} is seeded",
+            check(False, f"{name} is seeded: different per seed, "
+                         f"reproducible per seed",
                   f"no _build_marker_* builder: {name} is a fixed string "
                   f"({getattr(live, name, None)!r})")
             continue
