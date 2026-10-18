@@ -196,10 +196,15 @@ def main() -> int:
         "--turbo", str(CHAT_TURBO_MHZ),
         *passthrough,
     ]
+    # live.main() is @fails_on_bad_teardown; Ctrl-C bypasses its return
+    # value, so judge the recorded restore here too.
+    import device_session
+    n = device_session.teardown_failure_count()
     try:
         return live.main()
     except KeyboardInterrupt:
-        return 0
+        return device_session.exit_code_after_teardown(
+            0, device_session.teardown_failures_since(n))
 
 
 if __name__ == "__main__":

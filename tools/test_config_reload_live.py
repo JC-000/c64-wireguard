@@ -545,10 +545,13 @@ def run_soak(args) -> int:
                 # says what actually ended the soak.
                 try:
                     from device_session import teardown_device
-                    teardown_device(args.host, client=client, logger=log)
+                    td = teardown_device(args.host, client=client,
+                                         logger=log)
+                    check_teardown(td, logger=log)
                 except BaseException as exc:                  # noqa: BLE001
                     log.warning("teardown skipped (%r); device may be left "
                                 "at turbo", exc)
+                    check_teardown(None, logger=log)
         finally:
             lock.release()
             sink.close()
@@ -578,6 +581,12 @@ def run_soak(args) -> int:
 # on the soak path. tools/test_live_tool_seams.py audits both.
 
 
+# A restore that does not take must fail the run (round-3 review of
+# PR #178): check_teardown records it, the decorator exits non-zero.
+from device_session import check_teardown, fails_on_bad_teardown  # noqa: E402
+
+
+@fails_on_bad_teardown
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--host", default=os.environ.get("U64_HOST"))

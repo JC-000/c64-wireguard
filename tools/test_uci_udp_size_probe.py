@@ -654,6 +654,12 @@ def self_check() -> int:
     return 0
 
 
+# A restore that does not take must fail the run (round-3 review of
+# PR #178): check_teardown records it, the decorator exits non-zero.
+from device_session import check_teardown, fails_on_bad_teardown  # noqa: E402
+
+
+@fails_on_bad_teardown
 def main() -> int:
     if "--self-check" in sys.argv:
         return self_check()
@@ -828,7 +834,8 @@ def main() -> int:
         # strands one per run. We hold the lock, so pass the client.
         try:
             from device_session import teardown_device
-            teardown_device(host, client=client, logger=log)
+            check_teardown(teardown_device(host, client=client, logger=log),
+                           logger=log)
         finally:
             lock.release()
 

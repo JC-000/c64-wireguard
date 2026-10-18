@@ -691,6 +691,12 @@ def _safe(fn, *args, **kw):
         return None
 
 
+# A restore that does not take must fail the run (round-3 review of
+# PR #178): check_teardown records it, the decorator exits non-zero.
+from device_session import check_teardown, fails_on_bad_teardown  # noqa: E402
+
+
+@fails_on_bad_teardown
 def main() -> int:
     seed = _resolve_seed_from_argv()
     print(f"Random seed: {seed} (reproduce with --seed {seed} or "
@@ -881,7 +887,8 @@ def main() -> int:
         # SOCKET — reading as a regression in whatever it changed.
         # We hold the lock here, so the client is passed in.
         from device_session import teardown_device
-        teardown_device(host, client=client, logger=log)
+        check_teardown(teardown_device(host, client=client, logger=log),
+                       logger=log)
         lock.release()
 
 

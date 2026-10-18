@@ -448,7 +448,12 @@ def run_size_probe(*, capture_down: bool, mutate_summary: bool = False,
 
         def fake_teardown(*a, **k):
             rec.teardowns += 1
-            return {}
+            # A SUCCESSFUL restore. Since PR #178 round 3 the tools judge
+            # this result (check_teardown) and exit non-zero on a failed
+            # one, so the old `{}` now reads — correctly — as "restore not
+            # confirmed".
+            return {"turbo": 1, "reu": True, "reset": "verified",
+                    "mode": {"idle_mhz": 1, "reu_off": True, "reset": True}}
 
         ft = FakeTime()
         patches = {

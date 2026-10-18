@@ -330,9 +330,12 @@ def teardown_device(host: str, client=None, idle_mhz: int = 1,
     Never raises.
     """
     out = logger or log
+    # Carried in the result so check_teardown() judges it against the mode
+    # it was ASKED for, without each caller repeating the kwargs.
+    mode = {"idle_mhz": idle_mhz, "reu_off": reu_off, "reset": reset}
 
     def _body(c) -> dict:
-        st = {"turbo": None, "reu": False, "reset": None}
+        st = {"turbo": None, "reu": False, "reset": None, "mode": mode}
         try:
             # The import is INSIDE the try. It was outside once, and the
             # test for this (a stubbed harness module) showed the helper
@@ -351,13 +354,22 @@ def teardown_device(host: str, client=None, idle_mhz: int = 1,
             # does: a device flaky enough to throw on the clock is a device
             # whose REU also needs detaching, and vice versa. Sharing one
             # try makes each restore conditional on the one before it.
+            # Read FIRST, and skip the write only when the clock is KNOWN to
+            # be idle already. A CPU-speed write — even a redundant one —
+            # loses the next UCI command on the C64U (restore_idle() always
+            # skipped it). This matters only when a tool already left the
+            # box at 1 MHz: wg_chat runs at 48, so its gentle teardown
+            # always writes. The read has its OWN try: if it throws, or
+            # returns None (Turbo Off), we do not know, so we WRITE — a
+            # failed probe must never cost the restore (round-3 review).
             try:
-                # Read FIRST, and write only if the clock is not already
-                # idle. A CPU-speed write — even a redundant one — loses the
-                # next UCI command on the C64U, and in wg_chat's gentle mode
-                # the session is still live when this runs (review of PR
-                # #178). restore_idle() always skipped it; this now does too.
-                if get_turbo_mhz(c) != idle_mhz:
+                cur = get_turbo_mhz(c)
+            except Exception as exc:                          # noqa: BLE001
+                out.warning("clock pre-read failed (%r) — writing anyway",
+                            exc)
+                cur = None
+            try:
+                if cur != idle_mhz:
                     set_turbo_mhz(c, idle_mhz)
                     time.sleep(1.0)
                 # Read back: set_turbo_mhz returning is not the clock having
@@ -391,9 +403,92 @@ def teardown_device(host: str, client=None, idle_mhz: int = 1,
     try:
         with locked_client(host, purpose="teardown", logger=out) as c:
             if c is None:
-                return {"turbo": None, "reu": False, "reset": None}
+                return {"turbo": None, "reu": False, "reset": None, "mode": mode}
             return _body(c)
     except Exception as exc:                                  # noqa: BLE001
         out.error("teardown of %s failed outright (%r) — device state is "
                   "UNKNOWN and its UDP sockets may be stranded", host, exc)
-        return {"turbo": None, "reu": False, "reset": None}
+        return {"turbo": None, "reu": False, "reset": None, "mode": mode}
+
+
+# ── a failed restore must FAIL the run ───────────────────────────────────
+#
+# teardown_device never raises, by design (it runs from `finally`). The cost
+# of that was that every caller discarded its result: a box left at 48 MHz,
+# or with the REU attached, or with a reset that did not take, still exited
+# 0 (round-3 review of PR #178). check_teardown() judges the result against
+# the mode it was asked for and RECORDS a failure; @fails_on_bad_teardown on
+# a tool's main() turns a recorded failure into a non-zero exit, keeping the
+# tool's own failure code if it already had one.
+# tools/test_live_tool_seams.py fails any live tool that discards the result
+# or whose main() lacks the decorator.
+
+_teardown_failures: list[str] = []
+_FULL_MODE = {"idle_mhz": 1, "reu_off": True, "reset": True}
+
+
+def teardown_failure(st) -> Optional[str]:
+    """Why teardown result *st* is a failed restore, or None if it is not."""
+    if not isinstance(st, dict):
+        return f"teardown returned {st!r}, not a result"
+    mode = dict(_FULL_MODE, **(st.get("mode") or {}))
+    why = []
+    if st.get("turbo") != mode["idle_mhz"]:
+        why.append(f"clock reads {st.get('turbo')!r}, wanted "
+                   f"{mode['idle_mhz']} MHz")
+    if mode["reu_off"] and not st.get("reu"):
+        why.append("REU detach not confirmed")
+    if mode["reset"] and st.get("reset") in ("failed", None):
+        why.append(f"reset {st.get('reset') or 'not issued'}")
+    return "; ".join(why) or None
+
+
+def check_teardown(st, logger=None) -> Optional[str]:
+    """Judge and RECORD a teardown result. Never raises (runs in finally)."""
+    try:
+        why = teardown_failure(st)
+    except Exception as exc:                                  # noqa: BLE001
+        why = f"teardown result unreadable ({exc!r})"
+    if why:
+        _teardown_failures.append(why)
+        (logger or log).error("DEVICE RESTORE FAILED: %s — the shared device "
+                              "is NOT idle; this run will exit non-zero", why)
+    return why
+
+
+def teardown_failure_count() -> int:
+    return len(_teardown_failures)
+
+
+def teardown_failures_since(n: int) -> list[str]:
+    return _teardown_failures[n:]
+
+
+def exit_code_after_teardown(rc, failures: list[str]):
+    """*rc* unless a restore failed: then 1, or *rc* if it was already a
+    failure. 0, None and 77 (skip) are not failures."""
+    if failures and rc in (0, None, 77):
+        print(f"FAIL — device restore failed: {'; '.join(failures)}",
+              file=sys.stderr, flush=True)
+        return 1
+    return rc
+
+
+def fails_on_bad_teardown(fn):
+    """Decorate a live tool's main(): a restore recorded as failed during the
+    call makes it exit non-zero (via its return value or its SystemExit)."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*a, **k):
+        n = teardown_failure_count()
+        try:
+            rc = fn(*a, **k)
+        except SystemExit as exc:
+            new = teardown_failures_since(n)
+            if new and exc.code in (0, None, 77):
+                raise SystemExit(exit_code_after_teardown(exc.code, new)) \
+                    from None
+            raise
+        return exit_code_after_teardown(rc, teardown_failures_since(n))
+    return wrapper

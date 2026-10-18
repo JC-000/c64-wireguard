@@ -22,6 +22,11 @@ from c64_test_harness.backends.device_lock import DeviceLock
 from c64_test_harness.backends.ultimate64 import Ultimate64Transport
 from c64_test_harness.backends.ultimate64_client import Ultimate64Client
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from device_session import (  # noqa: E402
+    check_teardown, fails_on_bad_teardown, teardown_device,
+)
+
 
 HOST = os.environ.get("U64_HOST")
 
@@ -60,6 +65,7 @@ class EchoThread(threading.Thread):
         self.sock.close()
 
 
+@fails_on_bad_teardown
 def main():
     if not HOST:
         print("ERROR: set U64_HOST=<ip> (the device address moves; there "
@@ -75,6 +81,7 @@ def main():
     if not lock.acquire(timeout=60.0):
         print("could not acquire device lock")
         return 2
+    client = None           # the finally reads it; never unbound
     try:
         client = Ultimate64Client(host=HOST, timeout=10.0)
         if not get_uci_enabled(client):
@@ -148,7 +155,16 @@ def main():
                   "write path works; receive path does not")
             return 1
     finally:
-        lock.release()
+        # This tool OPENS A UCI SOCKET (uci_udp_connect) and used to close it
+        # only on the happy path; an exception stranded a firmware PCB, and
+        # only a C64 reset closes it (#58, GideonZ/1541ultimate#814). So the
+        # shared teardown — 1 MHz, REU off, verified reset — runs here, inside
+        # the lock, on every exit (round-3 review of PR #178).
+        try:
+            if client is not None:
+                check_teardown(teardown_device(HOST, client=client))
+        finally:
+            lock.release()
 
 if __name__ == "__main__":
     sys.exit(main())

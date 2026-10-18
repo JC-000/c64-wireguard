@@ -64,6 +64,7 @@ from test_uci_udp_echo_live import (  # noqa: E402
     REQUEST_BYTE_ALPHABET, REPLY_BYTE_ALPHABET, SEND_BUF, resolve_seed,
 )
 
+from device_session import check_teardown, fails_on_bad_teardown  # noqa: E402
 from wg_responder.keys import generate_keypair  # noqa: E402
 from wg_responder.responder import (  # noqa: E402
     MSG_TYPE_INITIATION, MSG_TYPE_RESPONSE, MSG_TYPE_TRANSPORT,
@@ -861,6 +862,7 @@ def _chat_loop(tr: Ultimate64Transport, L: dict[str, int],
 
 # ── Main flow ─────────────────────────────────────────────────────────────
 
+@fails_on_bad_teardown
 def main(argv: list[str] | None = None) -> int:
     """Run the tool.  ``argv`` defaults to ``sys.argv[1:]`` as usual.
 
@@ -873,6 +875,10 @@ def main(argv: list[str] | None = None) -> int:
     if mode_err:
         print(f"ERROR: {mode_err}", file=sys.stderr)
         return 2
+    # SNAPSHOT what was validated; the finally splats this copy, never the
+    # module global, so nothing that rebinds or mutates the global mid-run
+    # can change the teardown after the check (round-3 review).
+    teardown_mode = dict(post_session_teardown)
     p = argparse.ArgumentParser()
     p.add_argument("--stage", type=int, choices=[1, 2, 3], default=2,
                    help="1=Type-1 accepted; 2=SESSION_ACTIVE (default); "
@@ -1352,8 +1358,11 @@ def main(argv: list[str] | None = None) -> int:
             # replaces the traceback that says what actually ended the run.
             try:
                 from device_session import teardown_device
-                teardown_device(args.host, client=client, logger=log,
-                                **post_session_teardown)
+                td = teardown_device(args.host, client=client, logger=log,
+                                     **teardown_mode)
+                # A restore that did not take FAILS the run (main() is
+                # @fails_on_bad_teardown); it used to be discarded.
+                check_teardown(td, logger=log)
             except BaseException as exc:                      # noqa: BLE001
                 # BaseException, not Exception: a second Ctrl-C landing in
                 # teardown_device's sleep would otherwise propagate past the
@@ -1361,6 +1370,7 @@ def main(argv: list[str] | None = None) -> int:
                 # of the process.
                 log.warning("teardown skipped (%r); device may be left at "
                             "turbo with the REU attached", exc)
+                check_teardown(None, logger=log)
         lock.release()
         if skipped:
             print("SKIP — UCI WireGuard handshake not run (exit 77)")

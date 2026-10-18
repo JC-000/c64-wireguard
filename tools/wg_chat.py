@@ -219,11 +219,17 @@ def main() -> int:
     # tools/test_live_tool_seams.py evaluates this assignment from the AST
     # and fails on anything it cannot read as a constant.
     live.post_session_teardown = {"reset": False, "reu_off": False}
+    # live.main() is @fails_on_bad_teardown, so a clock that did not come
+    # back to 1 MHz already makes its return value non-zero. Ctrl-C bypasses
+    # that return, so judge the recorded restore here too.
+    import device_session
+    n = device_session.teardown_failure_count()
     try:
         return live.main()
     except KeyboardInterrupt:
         print("\n-- interrupted --", file=sys.stderr)
-        return 0
+        return device_session.exit_code_after_teardown(
+            0, device_session.teardown_failures_since(n))
 
 
 if __name__ == "__main__":

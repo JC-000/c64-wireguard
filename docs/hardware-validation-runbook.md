@@ -136,10 +136,18 @@ mode (not a dict, unknown key, wrong type, `idle_mhz` ≠ 1) with exit 2
 BEFORE it takes the lock. `tools/test_live_tool_seams.py` derives each live
 tool's obligations from the device calls it recognises — clock, REU, and a
 reset for any tool that starts a PRG via `run_prg`/`run_prg_via_sys`/
-`load_prg`/`load_prg_verified`/`run_crt` or a typed `SYS`/`RUN` — pinned by
-set equality to a hand-reviewed `PRG_STARTERS` list, so a tool that starts a
-PRG some other way fails until it is classified. It fails unless a
-`finally:` pays those obligations — with
+`load_prg`/`load_prg_verified`/`run_crt` or a typed `SYS`/`RUN`, or opens a
+UCI socket from the host (`uci_udp_connect`/`uci_tcp_connect`/
+`uci_tcp_listen_start`). The derived set is pinned by equality to a
+hand-reviewed `OWES_RESET` list. What that does and does NOT catch: an
+EXISTING listed tool that stops using a recognised call fails (it drops out
+of the derived set); a NEW tool that uses a recognised call fails until it
+is classified. A NEW tool that starts a PRG or opens a socket by a means
+the triggers do not recognise is in neither set and is NOT caught. Every
+`teardown_device` result must go to `check_teardown()` and the tool's
+`main()` must be `@fails_on_bad_teardown`, so a restore that does not take
+(clock not idle, REU detach unconfirmed in full mode, reset failed) exits
+non-zero. It fails unless a `finally:` pays those obligations — with
 `teardown_device(client=...)` (or a hand-written restore) placed before any
 `.release()` in that `finally`, and no `restore_idle()` / host-only
 `teardown_device()` taking a second lock. It is a static check: it cannot
