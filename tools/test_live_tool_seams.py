@@ -580,16 +580,27 @@ def main() -> int:
               _restore_in_finally(uci_live, restore_call="teardown_device"),
               "the tools that delegate to this main() stopped tearing down "
               "themselves; if it does not happen here it happens nowhere")
-        check("test_uci_handshake_live: teardown is ON by default",
-              uci_live.post_session_teardown is True,
-              "a default of False would silently stop restoring the shared "
-              "device for every delegating tool at once")
+        # #166: the flag became a MODE — kwargs splatted into
+        # teardown_device inside the held lock. The default is the FULL
+        # teardown, i.e. no overrides at all.
+        check("test_uci_handshake_live: teardown mode defaults to the full "
+              f"teardown {{}} (got {uci_live.post_session_teardown!r})",
+              isinstance(uci_live.post_session_teardown, dict)
+              and uci_live.post_session_teardown == {},
+              "any override in the default silently weakens the restore for "
+              "every delegating tool at once")
 
-        # The opt-out is asserted by SET EQUALITY, not membership: exactly
-        # one tool may skip the teardown. A second one appearing here is
-        # the regression — an operator-tool exemption quietly spreading to
-        # a batch tool that ought to restore the box it borrowed.
-        _OPT_OUT_EXPECTED = {"wg_chat.py"}
+        # The departure from the full teardown is asserted by SET
+        # EQUALITY, not membership: exactly one tool may run a gentler
+        # mode. A second one appearing here is the regression — an
+        # operator-tool exemption quietly spreading to a batch tool that
+        # ought to restore the box it borrowed.
+        _GENTLE_EXPECTED = {"wg_chat.py"}
+        # ...and the gentle mode is pinned EXACTLY: no reset, no REU detach
+        # (set_reu may itself reset the machine), but the clock IS restored
+        # inside the held lock. Before #166 wg_chat opted out entirely and
+        # restored the clock afterwards under a second lock.
+        _GENTLE_MODE = {"reset": False, "reu_off": False}
         _delegators = ("wg_chat.py", "wg_demo.py",
                        "test_wire_encryption_live.py",
                        "test_config_reload_live.py")
@@ -633,56 +644,46 @@ def main() -> int:
               not (_importers - set(_delegators) - _NOT_DELEGATORS),
               "a new tool delegating to live.main() must be added to "
               "_delegators, or the opt-out equality below cannot see it")
-        # STRUCTURAL, not textual. A substring search for
-        # "post_session_teardown = False" also matches the sentence in
-        # test_wire_encryption_live.py's comment explaining what opting out
-        # WOULD mean — it reported that file as an opt-out on the first run
-        # of this check. Only a real assignment of the literal False counts.
-        # Three states, not two. `post_session_teardown = bool(args.keep)`
-        # opts out for real, but a check that only recognises a literal
-        # False reads it as NOT opting out — green while the device is left
-        # unrestored. That is the false-green direction, so an assignment
-        # this check cannot evaluate is reported as UNKNOWN and fails.
+        # STRUCTURAL, not textual. A substring search for an assignment
+        # also matches the sentence in test_wire_encryption_live.py's
+        # comment explaining what opting out WOULD mean — it reported that
+        # file as an opt-out on the first run of this check. Only a real
+        # assignment counts, evaluated by _eval_mode (the teardown audit's
+        # evaluator, so the two cannot disagree about what a mode means).
+        # A computed value — `{"reset": bool(args.keep)}` — is UNKNOWN and
+        # FAILS: it may opt out for real while reading as opted in, which
+        # is the false-green direction.
         def _teardown_assignments(path: Path):
-            out = []
-            for node in ast.walk(ast.parse(path.read_text())):
-                if not isinstance(node, (ast.Assign, ast.AnnAssign)):
-                    continue
-                targets = (node.targets if isinstance(node, ast.Assign)
-                           else [node.target])
-                for t in targets:
-                    if (getattr(t, "attr", getattr(t, "id", None))
-                            == "post_session_teardown"):
-                        v = node.value
-                        if isinstance(v, ast.Constant) and v.value is False:
-                            out.append(False)
-                        elif isinstance(v, ast.Constant) and v.value is True:
-                            out.append(True)
-                        else:
-                            out.append("UNKNOWN")
-            return out
+            return _mode_assignments(ast.parse(path.read_text()),
+                                     module_level=False)
 
-        _unknown = {n for n in _delegators
-                    if "UNKNOWN" in _teardown_assignments(
-                        Path(__file__).resolve().parent / n)}
+        _modes = {n: _teardown_assignments(_tools_dir / n)
+                  for n in _delegators}
+        _unknown = {n for n, ms in _modes.items()
+                    if _UNKNOWN in ms or len(ms) > 1}
         check("no delegator sets post_session_teardown to a value this "
               f"check cannot evaluate (found {sorted(_unknown)})",
               not _unknown,
-              "a computed value opts out for real while reading as "
-              "opted-in; pin it to a literal or teach this check")
-
-        def _opts_out(path: Path) -> bool:
-            return False in _teardown_assignments(path)
-
-        _opt_out_found = set()
-        for _name in _delegators:
-            if _opts_out(Path(__file__).resolve().parent / _name):
-                _opt_out_found.add(_name)
-        check("exactly wg_chat opts out of the shared teardown "
-              f"(found {sorted(_opt_out_found)})",
-              _opt_out_found == _OPT_OUT_EXPECTED,
+              "a computed value (or two assignments) may opt out for real "
+              "while reading as opted-in; pin ONE literal dict")
+        _skippers = {n for n, ms in _modes.items() if None in ms}
+        check("no delegator skips the shared teardown outright "
+              f"(found {sorted(_skippers)})",
+              not _skippers,
+              "the boolean opt-out is gone (#166): a tool that must not "
+              "reset passes a gentler mode, it does not skip the restore")
+        _gentle_found = {n for n, ms in _modes.items()
+                         if ms and ms[0] not in ({}, _UNKNOWN)}
+        check("exactly wg_chat departs from the full teardown "
+              f"(found {sorted(_gentle_found)})",
+              _gentle_found == _GENTLE_EXPECTED,
               "wg_chat is the deliberate exception because a human is at "
               "the machine (issue #134); every other delegator must restore")
+        _chat_modes = _modes.get("wg_chat.py", [])
+        check(f"wg_chat's mode is exactly {_GENTLE_MODE} (got {_chat_modes})",
+              _chat_modes == [_GENTLE_MODE],
+              "the clock must still be restored INSIDE the lock (#166); "
+              "dropping more than reset/REU leaves the box at 48 MHz")
 
         # Alarm-proof: parse two synthetic ASTs directly (bypassing
         # inspect.getsource, which needs a real backing file) with
@@ -1076,6 +1077,10 @@ def main() -> int:
     print("\n=== uncalled verdict functions (the #128 instrument shape) ===")
     check_no_uncalled_verdicts(check)
 
+    print("\n=== live-tool teardown, by obligation (#134, #166) ===")
+    check_live_tool_teardown(check)
+    check_live_tool_teardown_alarms(check)
+
     check_multipart_builder(SEED)
 
     total = passed + failed
@@ -1194,6 +1199,615 @@ def check_no_uncalled_verdicts(check) -> None:
     check("alarm-proof: a defined-but-uncalled _verify_* IS reported", hit,
           "the scan did not flag a file written to contain exactly the "
           "shape it exists to catch, so its clean verdict means nothing")
+
+
+# ---------------------------------------------------------------------------
+# Live-tool teardown, by OBLIGATION (#134, #166).
+#
+# The pins further up this file guard ONE copy of the teardown — the one in
+# test_uci_handshake_live.main() — and the opt-out flag. Nothing guarded the
+# other tools' copies: deleting the teardown_device call from
+# test_uci_udp_echo_live.py left this suite 177/177 and
+# test_live_tools_wifi.py 59/59 (adversarial review, 2026-10). The same was
+# true of test_config_reload_live.py. So this audit does not look for a
+# particular call in a particular file; it asks every device tool what it
+# OWES and whether a `finally:` pays it.
+#
+# OBLIGATIONS ARE DERIVED, never listed (ported from be36f9a, which was
+# never merged; master solved #134 with teardown_device instead):
+#
+#   set_turbo_mhz  the tool sets a clock that is not literally 1 MHz
+#   set_reu        the tool calls set_reu with anything but literal False
+#   reset          the tool runs a PRG (run_prg / run_prg_via_sys) — the
+#                  reset is the only thing that closes its UDP sockets
+#
+# and a tool that delegates to test_uci_handshake_live.main() inherits that
+# file's obligations, discharged by the teardown main() runs INSIDE its lock
+# with the delegator's `post_session_teardown` kwargs. A hardcoded list
+# would let a new tool arrive owing nothing; a hardcoded file list would let
+# a new tool arrive unaudited — so the files are DISCOVERED too, and the
+# discovered set must EQUAL the classified set in both directions.
+#
+# Two ledgers, not one. A delegator that ALSO drives the device itself
+# (test_config_reload_live's --soak path) owes its own obligations from its
+# own finally; crediting it with main()'s teardown would let a deleted soak
+# teardown pass because a different code path restores.
+# ---------------------------------------------------------------------------
+
+_HS_MODULE = "test_uci_handshake_live"
+_HS_FILE = "test_uci_handshake_live.py"
+_MODE_NAME = "post_session_teardown"
+_TEARDOWN_KWARGS = ("idle_mhz", "reu_off", "reset")
+_OBLIGATIONS = frozenset({"reset", "set_reu", "set_turbo_mhz"})
+_UNKNOWN = "UNKNOWN"
+
+# A file is a device tool if it CALLS one of these (or delegates to
+# live.main()). Calls, not mentions: a docstring naming run_prg is not a
+# device access.
+_DEVICE_CALLS = frozenset({
+    "set_turbo_mhz", "set_reu", "run_prg", "run_prg_via_sys", "DeviceLock",
+    "locked_client", "teardown_device", "restore_idle", "reset_and_verify",
+    "Ultimate64Client",
+})
+
+# Every device tool this audit checks. Adding a tool means adding it here
+# (or to _NOT_LIVE_TOOLS with a reason) — the equality check below fails
+# until you do, which is the point.
+LIVE_TOOLS = frozenset({
+    "test_uci_handshake_live.py",
+    "test_uci_udp_echo_live.py",
+    "test_uci_udp_size_probe.py",
+    "test_config_reload_live.py",
+    "test_warp_live.py",
+    "test_wire_encryption_live.py",
+    "test_ip65_rrnet_hw.py",
+    "wg_chat.py",
+    "wg_demo.py",
+    "u64_firmware.py",
+    "uci/udp_probe_harness.py",
+})
+
+# Files that call a device API but are not tools that borrow the device.
+# (Suites that only STUB these names — `"set_reu": lambda ...`,
+# `ds.teardown_device = fake` — make no call and are not discovered.)
+_NOT_LIVE_TOOLS = {
+    "device_session.py": "the shared lock/teardown helpers themselves",
+    "test_device_teardown.py": "unit suite for teardown_device, fake clients",
+}
+
+# The ONLY permitted shortfalls, by SET EQUALITY: a tool listed here must
+# be missing exactly these and no more (a regression) and no fewer (a
+# stale exemption that would quietly cover a future regression).
+#
+# wg_chat is an operator tool attached to a machine a human is using: a
+# reset — and set_reu, which may reset (test_uci_handshake_live.py's
+# REU-before-turbo comment) — would destroy the session that is its whole
+# purpose (#134). It still restores the CLOCK, inside the lock (#166).
+EXPECTED_SHORTFALL = {"wg_chat.py": frozenset({"reset", "set_reu"})}
+
+_TREE_CACHE: dict[str, ast.AST] = {}
+
+
+def _parse_cached(text: str) -> ast.AST:
+    t = _TREE_CACHE.get(text)
+    if t is None:
+        t = _TREE_CACHE[text] = ast.parse(text)
+    return t
+
+
+def _callee(c: ast.Call):
+    f = c.func
+    return (f.id if isinstance(f, ast.Name)
+            else f.attr if isinstance(f, ast.Attribute) else None)
+
+
+def _calls_in(node) -> list:
+    return [n for n in ast.walk(node) if isinstance(n, ast.Call)]
+
+
+def _effective(c: ast.Call):
+    """(callee, positional args), with `_safe(fn, *args)` unwrapped — the
+    echo/probe tools route set_reu through it."""
+    if _callee(c) == "_safe" and c.args and isinstance(
+            c.args[0], (ast.Name, ast.Attribute)):
+        inner = c.args[0]
+        return (inner.id if isinstance(inner, ast.Name) else inner.attr,
+                list(c.args[1:]))
+    return _callee(c), list(c.args)
+
+
+def _is_one(node) -> bool:
+    return (isinstance(node, ast.Constant) and type(node.value) is int
+            and node.value == 1)
+
+
+def _is_false(node) -> bool:
+    return isinstance(node, ast.Constant) and node.value is False
+
+
+def _direct_need(tree) -> set:
+    """What this file's OWN calls leave on the device. A missing or
+    non-literal argument counts as the unsafe value: it might be."""
+    need = set()
+    for c in _calls_in(tree):
+        nm, args = _effective(c)
+        if nm == "set_turbo_mhz":
+            if not (len(args) >= 2 and _is_one(args[1])):
+                need.add("set_turbo_mhz")
+        elif nm == "set_reu":
+            if not (len(args) >= 2 and _is_false(args[1])):
+                need.add("set_reu")
+        elif nm in ("run_prg", "run_prg_via_sys"):
+            need.add("reset")
+    return need
+
+
+def _hs_aliases(tree) -> set:
+    return {a.asname or a.name for n in ast.walk(tree)
+            if isinstance(n, ast.Import) for a in n.names
+            if a.name == _HS_MODULE}
+
+
+def _delegates(tree) -> bool:
+    al = _hs_aliases(tree)
+    return any(isinstance(c.func, ast.Attribute) and c.func.attr == "main"
+               and isinstance(c.func.value, ast.Name)
+               and c.func.value.id in al for c in _calls_in(tree))
+
+
+def _eval_mode(node):
+    """A post_session_teardown value -> teardown kwargs, None (skip the
+    teardown entirely: master's old `False`), or _UNKNOWN. A computed value
+    is UNKNOWN and FAILS — it might opt out while reading as opted in."""
+    if isinstance(node, ast.Constant) and node.value is True:
+        return {}
+    if isinstance(node, ast.Constant) and node.value is False:
+        return None
+    if isinstance(node, ast.Dict):
+        out = {}
+        for k, v in zip(node.keys, node.values):
+            if not (isinstance(k, ast.Constant) and k.value in _TEARDOWN_KWARGS
+                    and isinstance(v, ast.Constant)):
+                return _UNKNOWN
+            out[k.value] = v.value
+        return out
+    return _UNKNOWN
+
+
+def _mode_assignments(tree, module_level: bool) -> list:
+    nodes = tree.body if module_level else list(ast.walk(tree))
+    out = []
+    for n in nodes:
+        if not isinstance(n, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+        for t in targets:
+            name = (t.id if isinstance(t, ast.Name) and module_level
+                    else t.attr if isinstance(t, ast.Attribute)
+                    and not module_level else None)
+            if name == _MODE_NAME:
+                out.append(_eval_mode(n.value) if n.value is not None
+                           else _UNKNOWN)
+    return out
+
+
+def _helper_facts(ds_tree):
+    """What device_session.teardown_device ACTUALLY does, and its defaults.
+
+    The credit given to a bare `teardown_device(host, client=c)` rests on
+    both. Read from the AST, not imported, so a mutated copy is audited as
+    written."""
+    fns = {n.name: n for n in getattr(ds_tree, "body", [])
+           if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    td = fns.get("teardown_device")
+    defaults = {k: _UNKNOWN for k in _TEARDOWN_KWARGS}
+    does: set = set()
+    if td is None:
+        return defaults, does
+    a = td.args
+    pos = a.posonlyargs + a.args
+    pairs = list(zip(pos[len(pos) - len(a.defaults):], a.defaults))
+    pairs += [(p, d) for p, d in zip(a.kwonlyargs, a.kw_defaults) if d]
+    for p, d in pairs:
+        if p.arg in defaults and isinstance(d, ast.Constant):
+            defaults[p.arg] = d.value
+    called = {}
+    for c in _calls_in(td):
+        called.setdefault(_callee(c), []).append(c)
+    if "set_turbo_mhz" in called and "get_turbo_mhz" in called:
+        does.add("set_turbo_mhz")          # set AND read back
+    if any(len(c.args) >= 2 and _is_false(c.args[1])
+           for c in called.get("set_reu", [])):
+        does.add("set_reu")
+    rv = fns.get("reset_and_verify")
+    if ("reset_and_verify" in called and rv is not None
+            and any(_callee(c) == "reset" for c in _calls_in(rv))):
+        does.add("reset")
+    return defaults, does
+
+
+def _finally_calls(tree) -> list:
+    """Calls reachable from any `finally:`, following module-level helpers
+    up to three levels (config-reload's `_turbo_down` shape). A helper
+    that does nothing is followed and credits nothing."""
+    helpers = {n.name: n for n in getattr(tree, "body", [])
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    frontier = []
+    for t in ast.walk(tree):
+        if isinstance(t, ast.Try) and t.finalbody:
+            for s in t.finalbody:
+                frontier += _calls_in(s)
+    out, seen = [], set()
+    for depth in range(4):
+        nxt = []
+        for c in frontier:
+            out.append(c)
+            nm = _callee(c)
+            if (depth < 3 and isinstance(c.func, ast.Name)
+                    and nm in helpers and nm not in seen):
+                seen.add(nm)
+                nxt += _calls_in(helpers[nm])
+        frontier = nxt
+    return out
+
+
+def _discharge(calls, defaults, does, mode):
+    """(obligations paid, problems) by *calls*. *mode* is the value a
+    `**post_session_teardown` splat expands to here."""
+    done, problems = set(), []
+    for c in calls:
+        nm, args = _effective(c)
+        ln = getattr(c, "lineno", "?")
+        if nm == "teardown_device":
+            if not (len(c.args) >= 2
+                    or any(k.arg == "client" for k in c.keywords)):
+                problems.append(
+                    f"line {ln}: teardown_device() without client= takes a "
+                    f"SECOND lock after this tool released its own — an "
+                    f"unserialised window another lane can acquire into "
+                    f"(#166). Pass client= from inside the locked region.")
+                continue
+            params = dict(defaults)
+            skip = False
+            for k in c.keywords:
+                if k.arg is None:
+                    if (isinstance(k.value, ast.Name)
+                            and k.value.id == _MODE_NAME):
+                        if mode is None:
+                            skip = True
+                        elif mode == _UNKNOWN:
+                            problems.append(
+                                f"line {ln}: {_MODE_NAME} cannot be "
+                                f"evaluated — pin it to a literal dict of "
+                                f"{list(_TEARDOWN_KWARGS)}")
+                            skip = True
+                        else:
+                            params.update(mode)
+                    else:
+                        problems.append(f"line {ln}: teardown_device(**...) "
+                                        f"splat this audit cannot evaluate")
+                        skip = True
+                elif k.arg in _TEARDOWN_KWARGS:
+                    params[k.arg] = (k.value.value
+                                     if isinstance(k.value, ast.Constant)
+                                     else _UNKNOWN)
+            if skip:
+                continue
+            idle = params["idle_mhz"]
+            if type(idle) is int and idle == 1:
+                if "set_turbo_mhz" in does:
+                    done.add("set_turbo_mhz")
+            else:
+                problems.append(
+                    f"line {ln}: teardown_device restores to idle_mhz="
+                    f"{idle!r}, not 1 MHz. Idle is 1 MHz + REU off "
+                    f"(runbook §4/§5a, red-green.md); 'whatever it was when "
+                    f"we arrived' hands on another lane's leftover clock.")
+            if params["reu_off"] is True and "set_reu" in does:
+                done.add("set_reu")
+            if params["reset"] is True and "reset" in does:
+                done.add("reset")
+        elif nm == "restore_idle":
+            problems.append(
+                f"line {ln}: restore_idle() from a finally takes its own "
+                f"lock, after this tool's was released — the #166 window.")
+        elif nm == "set_turbo_mhz" and len(args) >= 2 and _is_one(args[1]):
+            done.add("set_turbo_mhz")
+        elif nm == "set_reu" and len(args) >= 2 and _is_false(args[1]):
+            done.add("set_reu")
+        elif nm == "reset_and_verify" or (
+                nm == "reset" and isinstance(c.func, ast.Attribute)
+                and not c.args):
+            done.add("reset")
+    return done, problems
+
+
+def _teardown_audit(tools_dir: Path, overrides: dict | None = None) -> dict:
+    """The whole audit as data, so the alarm proofs can run it on a mutated
+    tree (*overrides*: relpath -> source text, or None to delete)."""
+    texts: dict[str, str] = {}
+    for p in sorted(tools_dir.rglob("*.py")):
+        if "__pycache__" in p.parts:
+            continue
+        try:
+            texts[p.relative_to(tools_dir).as_posix()] = p.read_text()
+        except OSError:
+            pass
+    for rel, text in (overrides or {}).items():
+        if text is None:
+            texts.pop(rel, None)
+        else:
+            texts[rel] = text
+
+    res = {"discovered": set(), "parse_errors": [], "tools": {},
+           "helper": {}, "mode_refs_ok": False}
+    trees: dict[str, ast.AST] = {}
+    needles = tuple(_DEVICE_CALLS) + (_HS_MODULE,)
+    for rel, text in texts.items():
+        if not any(s in text for s in needles):
+            continue
+        try:
+            tree = _parse_cached(text)
+        except SyntaxError as exc:
+            res["parse_errors"].append(f"{rel}: {exc}")
+            continue
+        trees[rel] = tree
+        if (any(_effective(c)[0] in _DEVICE_CALLS for c in _calls_in(tree))
+                or _delegates(tree)):
+            res["discovered"].add(rel)
+
+    ds_tree = trees.get("device_session.py", ast.Module(body=[],
+                                                        type_ignores=[]))
+    defaults, does = _helper_facts(ds_tree)
+    res["helper"] = {"defaults": defaults, "does": does}
+
+    hs_tree = trees.get(_HS_FILE, ast.Module(body=[], type_ignores=[]))
+    hs_modes = _mode_assignments(hs_tree, module_level=True)
+    hs_default = hs_modes[0] if len(hs_modes) == 1 else _UNKNOWN
+    res["hs_default"] = hs_default
+    hs_need = _direct_need(hs_tree)
+    hs_fin = _finally_calls(hs_tree)
+    # The mode may be READ in exactly one place: the splat into the
+    # teardown call. A second read — `if post_session_teardown:` — would
+    # turn the default `{}` (falsy) into a silent skip for every delegator.
+    loads = [n for n in ast.walk(hs_tree) if isinstance(n, ast.Name)
+             and n.id == _MODE_NAME and isinstance(n.ctx, ast.Load)]
+    splats = [k.value for c in _calls_in(hs_tree)
+              if _callee(c) == "teardown_device" for k in c.keywords
+              if k.arg is None and isinstance(k.value, ast.Name)
+              and k.value.id == _MODE_NAME]
+    res["mode_refs_ok"] = bool(splats) and len(loads) == len(splats)
+    res["mode_loads"] = len(loads)
+    res["mode_splats"] = len(splats)
+
+    for rel in sorted(res["discovered"] & LIVE_TOOLS):
+        tree = trees[rel]
+        need = _direct_need(tree)
+        own_mode = hs_default if rel == _HS_FILE else _UNKNOWN
+        done, problems = _discharge(_finally_calls(tree), defaults, does,
+                                    own_mode)
+        missing = need - done
+        info = {"need": set(need), "missing": missing,
+                "problems": problems, "delegates": False}
+        if rel != _HS_FILE and _delegates(tree):
+            info["delegates"] = True
+            modes = _mode_assignments(tree, module_level=False)
+            if not modes:
+                mode = hs_default
+            elif len(modes) == 1:
+                mode = modes[0]
+            else:
+                mode = _UNKNOWN
+                problems.append(f"{len(modes)} assignments to {_MODE_NAME}; "
+                                f"pin exactly one literal")
+            info["mode"] = mode
+            d_done, d_prob = _discharge(hs_fin, defaults, does, mode)
+            # Problems inside main()'s own finally are reported against
+            # test_uci_handshake_live itself; only an UNEVALUABLE mode is
+            # this delegator's fault.
+            problems += [p for p in d_prob if _MODE_NAME in p]
+            info["need"] |= hs_need
+            missing |= hs_need - d_done
+        res["tools"][rel] = info
+    return res
+
+
+def check_live_tool_teardown(check, tools_dir: Path | None = None) -> None:
+    """Gate check: every device tool restores what it changed, in a
+    `finally`, inside its lock — derived, discovered, set-equal."""
+    tools_dir = tools_dir or (PROJECT_ROOT / "tools")
+    r = _teardown_audit(tools_dir)
+    disc = r["discovered"]
+    classified = LIVE_TOOLS | set(_NOT_LIVE_TOOLS)
+    check("teardown audit: every tools/ file parses",
+          not r["parse_errors"], "; ".join(r["parse_errors"]))
+    check(f"teardown audit: discovery found the live tools "
+          f"({len(disc & LIVE_TOOLS)}/{len(LIVE_TOOLS)})",
+          LIVE_TOOLS <= disc and len(disc) >= len(LIVE_TOOLS),
+          "a discovery that finds fewer files than are classified is "
+          "vacuous for the ones it missed")
+    check("teardown audit: LIVE_TOOLS and _NOT_LIVE_TOOLS are disjoint",
+          not (LIVE_TOOLS & set(_NOT_LIVE_TOOLS)),
+          f"both: {sorted(LIVE_TOOLS & set(_NOT_LIVE_TOOLS))}")
+    check(f"teardown audit: discovered device tools == classified "
+          f"(unclassified {sorted(disc - classified)}, "
+          f"stale {sorted(classified - disc)})",
+          disc == classified,
+          "a NEW file calling a device API must be added to LIVE_TOOLS "
+          "(audited) or _NOT_LIVE_TOOLS (with a reason); a STALE entry "
+          "means a tool stopped matching discovery — find out why before "
+          "deleting it")
+    check("teardown audit: every EXPECTED_SHORTFALL key is a live tool",
+          set(EXPECTED_SHORTFALL) <= LIVE_TOOLS,
+          f"{sorted(set(EXPECTED_SHORTFALL) - LIVE_TOOLS)}")
+
+    h = r["helper"]
+    check("teardown_device itself sets+reads back the clock, detaches the "
+          f"REU and does a verified reset (does {sorted(h['does'])})",
+          h["does"] == _OBLIGATIONS,
+          f"missing {sorted(_OBLIGATIONS - h['does'])} — every tool "
+          f"crediting this helper is relying on work it does not do")
+    check(f"teardown_device defaults are idle_mhz=1, reu_off=True, "
+          f"reset=True (got {h['defaults']})",
+          h["defaults"] == {"idle_mhz": 1, "reu_off": True, "reset": True},
+          "a bare teardown_device(host, client=c) is credited as the FULL "
+          "restore on the strength of these defaults")
+    check(f"test_uci_handshake_live: {_MODE_NAME} defaults to the full "
+          f"teardown {{}} (got {r['hs_default']!r})",
+          r["hs_default"] == {},
+          "the default is what every delegator that does not override it "
+          "gets; anything else weakens all of them at once")
+    check(f"test_uci_handshake_live: {_MODE_NAME} is read ONLY as the "
+          f"**splat into teardown_device ({r['mode_loads']} reads, "
+          f"{r['mode_splats']} splats)",
+          r["mode_refs_ok"],
+          "an `if post_session_teardown:` guard turns the default {} into "
+          "a silent skip; a missing splat ignores every delegator's mode")
+
+    for rel in sorted(LIVE_TOOLS & disc):
+        info = r["tools"][rel]
+        allowed = set(EXPECTED_SHORTFALL.get(rel, set()))
+        ok = info["missing"] == allowed and not info["problems"]
+        detail = (f"missing {sorted(info['missing'])} (allowed "
+                  f"{sorted(allowed)})")
+        if info["problems"]:
+            detail += "; " + " | ".join(info["problems"])
+        check(f"teardown/{rel}: owes {sorted(info['need'])}"
+              + (" via live.main()" if info["delegates"] else "")
+              + (f", exempt {sorted(allowed)}" if allowed else "")
+              + " — paid in a finally, inside the lock",
+              ok, detail)
+
+
+def _mutated(rel: str, old: str, new: str) -> dict | None:
+    """{rel: text with *old* -> *new*}, or None when *old* does not occur
+    exactly once — a mutation that did not apply proves nothing."""
+    try:
+        text = (PROJECT_ROOT / "tools" / rel).read_text()
+    except OSError:
+        return None
+    if text.count(old) != 1:
+        return None
+    return {rel: text.replace(old, new)}
+
+
+def check_live_tool_teardown_alarms(check) -> None:
+    """Each mutation is the regression the audit exists for, near its
+    boundary; each must turn exactly the expected tool red, with the
+    expected shortfall. Run on overrides, never on files in tools/."""
+    tools_dir = PROJECT_ROOT / "tools"
+    echo, cfg, chat = ("test_uci_udp_echo_live.py",
+                       "test_config_reload_live.py", "wg_chat.py")
+    echo_call = ("teardown_device(host, client=client, logger=log)")
+    cfg_call = ("teardown_device(args.host, client=client, logger=log)")
+    chat_mode = '{"reset": False, "reu_off": False}'
+    full = set(_OBLIGATIONS)
+    cases = [
+        # (label, rel, override, tool, expected missing, expect a problem)
+        ("echo_live: teardown call deleted", echo,
+         _mutated(echo, echo_call, "pass"), echo, full, False),
+        ("echo_live: clock restore dropped only (idle_mhz=48)", echo,
+         _mutated(echo, echo_call,
+                  "teardown_device(host, client=client, idle_mhz=48, "
+                  "logger=log)"), echo, {"set_turbo_mhz"}, True),
+        ("echo_live: reset dropped only (reset=False)", echo,
+         _mutated(echo, echo_call,
+                  "teardown_device(host, client=client, reset=False, "
+                  "logger=log)"), echo, {"reset"}, False),
+        ("echo_live: restore taken AFTER release (no client=)", echo,
+         _mutated(echo, echo_call, "teardown_device(host, logger=log)"),
+         echo, full, True),
+        ("config_reload --soak: teardown call deleted", cfg,
+         _mutated(cfg, cfg_call, "pass"), cfg,
+         {"reset", "set_turbo_mhz"}, False),
+        ("config_reload --soak: clock restore dropped only", cfg,
+         _mutated(cfg, cfg_call,
+                  "teardown_device(args.host, client=client, idle_mhz=48, "
+                  "logger=log)"), cfg, {"set_turbo_mhz"}, True),
+        ("wg_chat: gentle mode stops restoring the clock", chat,
+         _mutated(chat, chat_mode,
+                  '{"reset": False, "reu_off": False, "idle_mhz": 48}'),
+         chat, full, True),
+        ("wg_chat: back to the boolean opt-out", chat,
+         _mutated(chat, chat_mode, "False"), chat, full, False),
+        ("wg_chat: exemption no longer needed (full mode) is STALE", chat,
+         _mutated(chat, chat_mode, "{}"), chat, set(), False),
+        ("wg_demo: quietly adopts the gentle mode", "wg_demo.py",
+         _mutated("wg_demo.py", "live.post_session_hook = build_demo_loop()",
+                  "live.post_session_hook = build_demo_loop()\n"
+                  "    live.post_session_teardown = {\"reset\": False}"),
+         "wg_demo.py", {"reset"}, False),
+        ("wire_encryption_live: computed mode is UNKNOWN, not opted-in",
+         "test_wire_encryption_live.py",
+         _mutated("test_wire_encryption_live.py",
+                  "live.post_session_hook = build_probe()",
+                  "live.post_session_hook = build_probe()\n"
+                  "    live.post_session_teardown = dict(reset=args.turbo)"),
+         "test_wire_encryption_live.py", full, True),
+    ]
+    for label, rel, ov, tool, want_missing, want_problem in cases:
+        if ov is None:
+            check(f"alarm-proof: {label}", False,
+                  f"the mutation did not apply to {rel} (anchor text not "
+                  f"found exactly once) — update the anchor, do not drop "
+                  f"the case")
+            continue
+        info = _teardown_audit(tools_dir, ov)["tools"].get(tool)
+        got = (info["missing"], bool(info["problems"])) if info else None
+        check(f"alarm-proof: {label} -> missing {sorted(want_missing)}"
+              + (" + a problem" if want_problem else ""),
+              got == (set(want_missing), want_problem)
+              and (set(want_missing)
+                   != set(EXPECTED_SHORTFALL.get(tool, set()))
+                   or want_problem),
+              f"audit returned {got}")
+
+    # Discovery, both directions.
+    ov = {"zz_new_live_tool.py": "def main(c):\n    c.run_prg(b'')\n"}
+    r = _teardown_audit(tools_dir, ov)
+    check("alarm-proof: a NEW file calling run_prg is discovered and "
+          "unclassified",
+          "zz_new_live_tool.py" in r["discovered"]
+          and "zz_new_live_tool.py" not in LIVE_TOOLS | set(_NOT_LIVE_TOOLS))
+    r = _teardown_audit(tools_dir, {"test_uci_udp_size_probe.py": None})
+    check("alarm-proof: a classified tool that vanishes is STALE",
+          "test_uci_udp_size_probe.py" not in r["discovered"])
+
+    # The helper's credit is verified, not assumed.
+    ov = _mutated("device_session.py",
+                  "st[\"reset\"] = reset_and_verify(c, logger=out)",
+                  "st[\"reset\"] = None")
+    r = _teardown_audit(tools_dir, ov) if ov else None
+    check("alarm-proof: gutting teardown_device's reset withdraws the "
+          "reset credit from EVERY tool that relies on it",
+          r is not None and "reset" not in r["helper"]["does"]
+          and "reset" in r["tools"][echo]["missing"]
+          and "reset" in r["tools"]["test_warp_live.py"]["missing"],
+          "mutation did not apply" if r is None else
+          f"does={sorted(r['helper']['does'])}")
+
+    # A second read of the mode in main() (the falsy-{} trap).
+    ov = _mutated(_HS_FILE, "        if client is not None:\n"
+                  "            # The import is INSIDE",
+                  "        if client is not None and post_session_teardown:\n"
+                  "            # The import is INSIDE")
+    r = _teardown_audit(tools_dir, ov) if ov else None
+    check("alarm-proof: `if ... post_session_teardown:` in main() is "
+          "flagged (it would skip the default {} teardown)",
+          r is not None and not r["mode_refs_ok"],
+          "mutation did not apply" if r is None else "")
+
+    # A local helper that does nothing credits nothing.
+    src = ("def _restore(c):\n    pass\n\n"
+           "def main(c):\n    try:\n        c.run_prg(b'')\n"
+           "    finally:\n        _restore(c)\n")
+    tree = ast.parse(src)
+    done, _ = _discharge(_finally_calls(tree), {"idle_mhz": 1,
+                         "reu_off": True, "reset": True}, set(_OBLIGATIONS),
+                         {})
+    check("alarm-proof: a do-nothing helper called from a finally pays "
+          "nothing", _direct_need(tree) - done == {"reset"},
+          f"done={sorted(done)}")
 
 
 def _classify(warp, lab):
