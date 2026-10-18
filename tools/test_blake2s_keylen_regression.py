@@ -44,7 +44,7 @@ def main():
     os.chdir(PROJECT_ROOT)
     if not os.environ.get("C64_SKIP_BUILD"):
         subprocess.run(["make", "clean"], capture_output=True)
-        r = subprocess.run(["make", "BACKEND=uci", "USE_X25519_SIBLING=1"],
+        r = subprocess.run(["make", "BACKEND=uci"],
                            capture_output=True, text=True)
         if r.returncode != 0:
             print(f"Build failed:\n{r.stderr}")

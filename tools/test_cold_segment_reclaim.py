@@ -70,20 +70,6 @@ WG_SQTAB_HI = 0x8200
 P = 2**255 - 19
 
 
-def _fe_scratch(labels):
-    """Resolve the three field-element scratch buffers on either build.
-
-    The in-tree fe25519 exports fe_tmp{1..3}; the c64-x25519 sibling calls
-    the same buffers fe25519_tmp{1..3}. Same shim test_fe25519.py carries.
-    """
-    for legacy, canonical in (("fe_tmp1", "fe25519_tmp1"),
-                              ("fe_tmp2", "fe25519_tmp2"),
-                              ("fe_tmp3", "fe25519_tmp3")):
-        if labels.address(legacy) is None and labels.address(canonical) is not None:
-            labels._by_name[legacy] = labels._by_name[canonical]
-    return labels["fe_tmp1"], labels["fe_tmp2"], labels["fe_tmp3"]
-
-
 def le32_to_int(b):
     return int.from_bytes(b, "little")
 
@@ -139,7 +125,8 @@ def check_reu_tables_intact(tr, labels):
     if "fe25519_mul" not in labels:
         print("SKIP T3: no fe25519_mul label")
         return True
-    t1, t2, t3 = _fe_scratch(labels)
+    t1, t2, t3 = (labels["fe25519_tmp1"], labels["fe25519_tmp2"],
+                  labels["fe25519_tmp3"])
     cases = [
         (2, 3),
         (P - 1, P - 1),
@@ -238,7 +225,7 @@ def main():
     os.chdir(PROJECT_ROOT)
     if not os.environ.get("C64_SKIP_BUILD"):
         subprocess.run(["make", "clean"], capture_output=True)
-        r = subprocess.run(["make", "BACKEND=uci", "USE_X25519_SIBLING=1"],
+        r = subprocess.run(["make", "BACKEND=uci"],
                            capture_output=True, text=True)
         if r.returncode != 0:
             print(f"Build failed:\n{r.stderr}")
@@ -266,8 +253,7 @@ def main():
               "to skip")
         return 1
 
-    _fe_scratch(labels)
-    for n in ("fe_tmp1", "fe_tmp2", "fe_tmp3", "fe25519_src1", "fe25519_src2",
+    for n in ("fe25519_tmp1", "fe25519_tmp2", "fe25519_tmp3", "fe25519_src1", "fe25519_src2",
               "fe25519_dst", "fe25519_mul"):
         if labels.address(n) is None:
             print(f"FATAL: label {n} missing")
