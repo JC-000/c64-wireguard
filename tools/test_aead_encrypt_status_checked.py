@@ -69,7 +69,7 @@ from c64_test_harness import (
 )
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from vice_util import binary_wait_for_boot_ready   # noqa: E402
+from vice_util import binary_wait_for_boot_ready, vice_reu_args   # noqa: E402
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "wireguard.prg")
@@ -306,7 +306,7 @@ def main():
     # once the §8.2 fault is surfaced at boot, such a machine will not boot at
     # all. Same two flags tools/test_fe25519.py already passes.
     cfg = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
-                     extra_args=["-reu", "-reusize", "512"])
+                     extra_args=vice_reu_args(labels))
     passed = failed = 0
     state = {}
     with ViceInstanceManager(config=cfg) as mgr:

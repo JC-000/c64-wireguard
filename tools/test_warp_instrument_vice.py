@@ -77,7 +77,7 @@ from c64_test_harness import (  # noqa: E402
     write_bytes,
 )
 from c64_test_harness.encoding.screen_codes import SCREEN_CODE_TABLE  # noqa: E402
-from vice_util import binary_wait_for_boot_ready  # noqa: E402
+from vice_util import binary_wait_for_boot_ready, vice_reu_args  # noqa: E402
 
 PRG_PATH = PROJECT_ROOT / "build" / "wireguard.prg"
 LABELS_PATH = PROJECT_ROOT / "build" / "labels.txt"
@@ -362,7 +362,8 @@ def main(argv=None) -> int:
 
     res = Result()
     config = ViceConfig(prg_path=str(PRG_PATH), warp=True, ntsc=True,
-                        sound=False)
+                        sound=False,
+                        extra_args=vice_reu_args(L))
     with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         print(f"VICE PID={inst.pid}, port={inst.port}")

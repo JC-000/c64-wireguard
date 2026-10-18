@@ -72,7 +72,7 @@ from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
     read_bytes, write_bytes, jsr,
 )
-from vice_util import binary_wait_for_boot_ready
+from vice_util import binary_wait_for_boot_ready, vice_reu_args
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "tools"))
@@ -675,7 +675,8 @@ def _run(rng):
     # this constant, the image, and the wire -- and the pair of checks pins
     # all three together. The measurement stays: the label says what the image
     # was told, only the wire says what the adapter did.
-    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
+    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
+                        extra_args=vice_reu_args(labels))
     with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         print(f"VICE PID={inst.pid}, port={inst.port}")

@@ -60,7 +60,7 @@ from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
     read_bytes, write_bytes, jsr,
 )
-from vice_util import binary_wait_for_boot_ready
+from vice_util import binary_wait_for_boot_ready, vice_reu_args
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "wireguard.prg")
@@ -378,7 +378,7 @@ def main():
     # stubbed so it costs nothing, but a REU=1 build with no cartridge is not
     # the tree that was built.
     cfg = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
-                     extra_args=["-reu", "-reusize", "512"])
+                     extra_args=vice_reu_args(labels))
     t0 = time.time()
     with ViceInstanceManager(config=cfg) as mgr:
         inst = mgr.acquire()

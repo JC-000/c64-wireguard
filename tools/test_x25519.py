@@ -23,7 +23,7 @@ from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
     read_bytes, write_bytes, jsr,
 )
-from vice_util import binary_wait_for_boot_ready
+from vice_util import binary_wait_for_boot_ready, vice_reu_args
 
 try:
     from cryptography.hazmat.primitives.asymmetric.x25519 import (
@@ -373,7 +373,7 @@ def main():
 
     # Launch VICE
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
-                        extra_args=["-reu", "-reusize", "512"])
+                        extra_args=vice_reu_args(labels))
 
     with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
