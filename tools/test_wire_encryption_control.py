@@ -60,6 +60,12 @@ from test_uci_handshake_live import ascii_to_petscii          # noqa: E402
 from wg_responder.keys import generate_keypair                # noqa: E402
 from wg_responder.responder import WireGuardResponder         # noqa: E402
 
+#: Fixed identity (issue #159). Every run emits exactly these checks for any
+#: seed, so two runs are comparable and a check that silently stopped running
+#: is a hard error rather than a smaller denominator nobody notices. Update
+#: deliberately when adding a check.
+EXPECTED_CHECKS = 48
+
 results: list[tuple[bool, str]] = []
 
 
@@ -345,8 +351,14 @@ def leg_d(seed: int) -> None:
     body = text.encode("ascii")
     dgram = hdr + bytes((b * 29 + 5) & 0xFF for b in range(len(body) + 16))
     if pair_fn is None:
-        check(False, "the live tool's absence calls go through a wrapper "
-                     "that scores a refused search", "no _absence_pair")
+        # Same two claims as the branch below, recorded as failures, so a
+        # tree without the wrapper is a named rc=1 rather than a count
+        # mismatch (EXPECTED_CHECKS) that hides which claims went missing.
+        why = "no _absence_pair in test_wire_encryption_live"
+        check(False, "on the normal path _absence_pair returns exactly what "
+                     "the searcher returns", why)
+        check(False, "a refused search lands as scored FAILs, not a "
+                     "traceback", why)
     else:
         check(pair_fn(dgram, body, {"m": text}, "")
               == wps.absence_and_control(dgram, body, {"m": text}, ""),
@@ -370,7 +382,8 @@ def leg_d(seed: int) -> None:
                                   ("MARKER_ALIVE", "alive"))}
     for name, fn in builders.items():
         if fn is None:
-            check(False, f"{name} is seeded",
+            check(False, f"{name} is seeded: different per seed, "
+                         f"reproducible per seed",
                   f"no _build_marker_* builder: {name} is a fixed string "
                   f"({getattr(live, name, None)!r})")
             continue
@@ -479,6 +492,13 @@ def main() -> int:
     for label in failed:
         print(f"  FAILED: {label}", flush=True)
     print("=" * 60, flush=True)
+    if len(results) != EXPECTED_CHECKS:
+        print(f"FATAL: {len(results)} checks ran, expected exactly "
+              f"{EXPECTED_CHECKS}. A moving denominator makes two runs "
+              "incomparable and is how a case that silently stopped running "
+              "hides. Update EXPECTED_CHECKS deliberately when adding one.",
+              flush=True)
+        return 2
     return 1 if failed else 0
 
 
