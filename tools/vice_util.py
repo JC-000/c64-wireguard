@@ -71,7 +71,10 @@ def binary_wait_for_boot_ready(transport, labels, timeout=120.0, poll_interval=2
     raised rather than folded into the ``None`` return because callers print
     "boot did not complete" for ``None``, which would name the wrong cause.
     A build without the label (the legacy in-tree crypto) is not checked.
-    Host-side only: nothing is added to the PRG.
+    Host-side only: nothing is added to the PRG. NECESSARY, NOT SUFFICIENT:
+    an REU that is present but too small boots with $00 (its high banks
+    alias the low ones), so the size comes from ``vice_reu_args`` and is
+    proven by tools/test_vice_reu_matches_build.py R1/R3, not by this check.
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:

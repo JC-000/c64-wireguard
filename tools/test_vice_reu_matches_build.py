@@ -47,11 +47,16 @@ WHAT THIS CHECKS:
      legacy in-tree build (no manifest, reu_mul_init present) -> REU; nothing
      to go on -> refuse.
   R  Runtime, in VICE, on the gate's own build: booting with the derived
-     arguments must give x25519_reu_fault == 0, and booting with the OPPOSITE
-     attachment must make binary_wait_for_boot_ready raise. The second arm is
-     the alarm proof, run every time rather than trusted from a report. On an
-     REU=0 build there is no REU path that can fault, so that arm reports N/A
-     (and says so) instead of passing.
+     arguments must give x25519_reu_fault == 0 AND compute RFC 7748 vector 1
+     correctly (R1); booting with NO REU must make binary_wait_for_boot_ready
+     raise (R2); booting with the next REU size DOWN must miscompute (R3).
+     The fault byte is necessary but NOT sufficient: an REU that is present
+     but too small boots with $00 (its high banks alias the low ones —
+     measured at 128 and 256 KiB in review), which is why R1 runs the vector
+     and R3 proves that check can see a wrong size. R2 and R3 are alarm
+     proofs, run every time rather than trusted from a report. On an REU=0
+     build there is no REU path that can fault or alias, so they report N/A
+     (and say so) instead of passing.
 
     python3 tools/test_vice_reu_matches_build.py [--static-only] [--verbose]
 """
@@ -76,6 +81,8 @@ STATIC_ONLY = "--static-only" in sys.argv[1:]
 DERIVE_FN = "vice_reu_args"
 BOOT_FN = "binary_wait_for_boot_ready"
 FORBIDDEN_LITERALS = {"-reu", "-reusize", "+reu"}
+# Ways to start VICE that bypass ViceConfig's extra_args entirely.
+RAW_LAUNCHERS = {"ViceProcess", "EthVice"}
 
 # The ONLY gate file allowed to start VICE on a non-derived attachment: this
 # one, whose R2 arm deliberately boots the OPPOSITE attachment to prove the
@@ -125,19 +132,35 @@ def scan_source(src: str, filename: str = "<src>"):
     tree = ast.parse(src, filename)
     vice_sites, bad, literal_hits = [], [], []
     has_boot_wait = False
+    # Names ViceConfig is reachable under in this file (`import ... as VC`).
+    cfg_names = {"ViceConfig"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for a in node.names:
+                if a.name == "ViceConfig" and a.asname:
+                    cfg_names.add(a.asname)
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             name = _call_name(node)
             if name == BOOT_FN:
                 has_boot_wait = True
-            if name == "ViceConfig":
+            if name in RAW_LAUNCHERS:
+                # Starts VICE without a ViceConfig the scanner could check.
+                vice_sites.append(node.lineno)
+                bad.append((node.lineno, f"{name}() starts VICE outside a checked "
+                                         f"ViceConfig"))
+            if name in cfg_names:
                 vice_sites.append(node.lineno)
                 kw = next((k for k in node.keywords if k.arg == "extra_args"), None)
                 if kw is None:
                     bad.append((node.lineno, "no extra_args (REU attachment not derived)"))
-                elif not any(isinstance(n, ast.Call) and _call_name(n) == DERIVE_FN
-                             for n in ast.walk(kw.value)):
-                    bad.append((node.lineno, f"extra_args does not call {DERIVE_FN}()"))
+                elif not (isinstance(kw.value, ast.Call)
+                          and _call_name(kw.value) == DERIVE_FN):
+                    # Exactly the call, nothing wrapped around it: a slice,
+                    # a conditional or a concatenation could discard or
+                    # override what it derived.
+                    bad.append((node.lineno, f"extra_args is not exactly "
+                                             f"{DERIVE_FN}(...)"))
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             if node.value.strip() in FORBIDDEN_LITERALS:
                 literal_hits.append(node.lineno)
@@ -178,6 +201,22 @@ def static_checks(chk: Check):
     chk.ok(len(b) == 1 and lit, "S0c hardcoded -reu literal is flagged", f"bad={b} lit={lit}")
     s, b, w, lit = scan_source(no_wait)
     chk.ok(not w, "S0d missing boot wait is detected", f"wait={w}")
+    # Bypasses found by adversarial review of this suite's first draft.
+    bypasses = [
+        ("S0f aliased import (ViceConfig as VC) is still a site",
+         "from c64_test_harness import ViceConfig as VC\nc = VC(prg_path=P)\n"),
+        ("S0g derived args discarded by a slice are flagged",
+         "c = ViceConfig(prg_path=P, extra_args=vice_reu_args(l)[:0])\n"),
+        ("S0h derived args overridden by a conditional are flagged",
+         "c = ViceConfig(prg_path=P, extra_args=[] if vice_reu_args(l) else [])\n"),
+        ("S0i ViceProcess launch is flagged",
+         "p = ViceProcess(cfg)\n"),
+        ("S0j EthVice rig launch is flagged",
+         "r = EthVice(prg, labels, reu=False)\n"),
+    ]
+    for what, src in bypasses:
+        s, b, w, lit = scan_source(src)
+        chk.ok(bool(s) and len(b) == 1, what, f"sites={s} bad={b}")
 
     print("S   gate suites: REU attachment derived from the build, at every site")
     files = gate_suite_files()
@@ -259,10 +298,15 @@ def derivation_checks(chk: Check):
 
 
 # --------------------------------------------------------------- runtime ---
+VECTORS_PATH = PROJECT_ROOT / "test" / "rfc7748_vectors.json"
+
+
 def runtime_checks(chk: Check):
-    print("R   runtime, gate build: derived attachment boots clean; opposite refuses")
+    print("R   runtime, gate build: derived attachment boots clean AND computes "
+          "X25519 correctly; no REU refuses; an undersized REU miscomputes")
+    import json
     from c64_test_harness import (Labels, ViceConfig, ViceInstanceManager,
-                                  read_bytes)
+                                  jsr, read_bytes, write_bytes)
     import vice_util
     if not hasattr(vice_util, "vice_reu_args") or not hasattr(vice_util, "BootReuFault"):
         chk.ok(False, "R0 vice_util provides vice_reu_args and BootReuFault")
@@ -275,40 +319,76 @@ def runtime_checks(chk: Check):
     fault_addr = labels.address("x25519_reu_fault")
     print(f"        build needs REU: {bool(derived)} (args {derived}); "
           f"x25519_reu_fault @ {fault_addr and hex(fault_addr)}")
+    vec = json.loads(VECTORS_PATH.read_text())["x25519_scalarmult"][0]
+    scalar = bytearray(bytes.fromhex(vec["scalar"]))
+    scalar[0] &= 0xF8
+    scalar[31] = (scalar[31] & 0x7F) | 0x40
+    u = bytes.fromhex(vec["u_coordinate"])
+    expected = bytes.fromhex(vec["expected"])
 
-    def boot(extra):
+    def boot(extra, kat):
+        """-> (state, fault byte, KAT result bytes or None)."""
         cfg = ViceConfig(prg_path=str(PRG_PATH), warp=True, ntsc=True,
                          sound=False, extra_args=list(extra))
         with ViceInstanceManager(config=cfg) as mgr:
             inst = mgr.acquire()
+            t = inst.transport
             try:
                 try:
-                    r = vice_util.binary_wait_for_boot_ready(
-                        inst.transport, labels, timeout=180.0)
+                    r = vice_util.binary_wait_for_boot_ready(t, labels, timeout=180.0)
                 except vice_util.BootReuFault as exc:
-                    return "refused", str(exc)
+                    return "refused", str(exc), None
                 if r is None:
-                    return "timeout", None
-                f = (read_bytes(inst.transport, fault_addr, 1)[0]
+                    return "timeout", None, None
+                f = (read_bytes(t, fault_addr, 1)[0]
                      if fault_addr is not None else None)
-                return "booted", f
+                got = None
+                if kat:
+                    write_bytes(t, 0x0339, bytes([0x4C, 0x39, 0x03]))
+                    write_bytes(t, labels["x25_scalar"], bytes(scalar))
+                    write_bytes(t, labels["x25_u"], u)
+                    jsr(t, labels["x25519_scalarmult"], timeout=1800.0)
+                    got = read_bytes(t, labels["x25_result"], 32)
+                return "booted", f, got
             finally:
                 mgr.release(inst)
 
-    state, val = boot(derived)
-    chk.ok(state == "booted" and (val in (None, 0)),
-           f"R1 derived attachment {derived or '(none)'}: boots, x25519_reu_fault == $00",
+    # R1: the fault byte alone is NOT sufficient — an REU that is present but
+    # too small also boots with $00 (its high banks alias the low ones; review
+    # of this suite measured 128 and 256 KiB: fault $00, vector 1 wrong). So
+    # the derived attachment must also COMPUTE the RFC 7748 vector.
+    state, val, got = boot(derived, kat=True)
+    chk.ok(state == "booted" and val in (None, 0) and got == expected,
+           f"R1 derived attachment {derived or '(none)'}: boots, fault $00, "
+           f"RFC 7748 vector 1 correct",
+           f"state={state} fault={val} got={got.hex() if got else got} "
+           f"want={expected.hex()}")
+    if not derived:
+        print("  N/A   R2/R3: REU=0 build — no REU path exists that could fault or "
+              "alias, so neither alarm can be provoked here (not counted as a pass)")
+        return
+    # R2: the alarm for the fault-byte refusal.
+    state, val, _ = boot([], kat=False)
+    chk.ok(state == "refused",
+           "R2 alarm proof: same REU build with NO REU -> boot wait refuses",
            f"state={state} value={val}")
-    if derived:
-        state, val = boot([])
-        chk.ok(state == "refused",
-               "R2 alarm proof: same REU build with NO REU -> boot wait refuses",
-               f"state={state} value={val}")
-        if state == "refused":
-            print(f"        refusal text: {val}")
-    else:
-        print("  N/A   R2: REU=0 build — no REU path exists that could fault, so the "
-              "refusal cannot be provoked here (not counted as a pass)")
+    if state == "refused":
+        print(f"        refusal text: {val}")
+    # R3: the next VICE size DOWN from the derived one must miscompute. This is
+    # what makes R1's KAT a check on the SIZE (not just on presence), and it is
+    # the boundary vice_reu_args' rounding has to get right.
+    size = int(derived[derived.index("-reusize") + 1])
+    smaller = size // 2
+    if smaller < 128:
+        print(f"  N/A   R3: derived size {size} KiB is VICE's smallest")
+        return
+    state, val, got = boot(["-reu", "-reusize", str(smaller)], kat=True)
+    chk.ok(state == "refused" or (state == "booted" and got != expected),
+           f"R3 alarm proof: one size down ({smaller} KiB) gives a wrong vector "
+           f"(or is refused)",
+           f"state={state} fault={val} got={got.hex() if got else got}")
+    print(f"        {smaller} KiB: state={state} fault={val} "
+          f"vector={'MATCH' if got == expected else 'mismatch'}")
 
 
 def main() -> int:
