@@ -120,7 +120,7 @@ config_read_file:
         ; Do NOT copy a byte count out of this comment -- the slack differs
         ; per backend (BACKEND=uci also puts UCI_BSS in MAIN_AREA_LO) and
         ; goes stale on every link. The authority is the link itself:
-        ; src/contract_asserts.s:240 asserts __MAIN_AREA_LO_LAST__ <=
+        ; src/contract_asserts.s (§6.7) asserts __MAIN_AREA_LO_LAST__ <=
         ; WG_SQTAB_BASE with lderror, so an over-budget image fails to link
         ; rather than silently overrunning. That assert, not a number in a
         ; comment, is why this is not a repeat of the "176 free bytes" trap.

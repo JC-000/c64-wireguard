@@ -7,7 +7,7 @@
 ; Pins: c64-x25519 v0.11.2, c64-ChaCha20-Poly1305 v0.9.0.
 ;
 ; Contract obligations covered (SPEC v0.10.3, the latest tagged contract
-; release; the siblings' own ledgers run through SPEC v0.10.6, which adds
+; release when this list was written — §6.6b below cites v1.3.0; the siblings' own ledgers run through SPEC v0.10.6, which adds
 ; no obligation on this side — see the v0.11.2 notes):
 ;   §1   per-library ABI generation pins.
 ;   §3   REU bank budget — x25519 vs chacha vs WG's own claims.
@@ -285,8 +285,8 @@ WG_REU_BANKS_USED = $00
 ; inert. MEASURED at these pins, they carried 1176 B (x25519, both
 ; profiles) and 8921 B (chacha, all six release variants) of slack, and
 ; neither fired when its manifest's RESIDENT_BYTES was mutated by one byte.
-; Any real movement in linked size trips the exact-equality ratchets in §6.6
-; first anyway, because ld65 reports only its first error. They gave the
+; And any real movement in linked size, even one byte either way, already
+; fails the exact-equality ratchets in §6.6. They gave the
 ; look of coverage without the coverage, and c64-lib-contract v1.3.0 §5
 ; (which permits over-declaration and has no numeric cap) cannot make them
 ; meaningful. The RESIDENT_BYTES imports went with them.
