@@ -60,6 +60,12 @@ from test_uci_handshake_live import ascii_to_petscii          # noqa: E402
 from wg_responder.keys import generate_keypair                # noqa: E402
 from wg_responder.responder import WireGuardResponder         # noqa: E402
 
+#: Fixed identity (issue #159). Every run emits exactly these checks for any
+#: seed, so two runs are comparable and a check that silently stopped running
+#: is a hard error rather than a smaller denominator nobody notices. Update
+#: deliberately when adding a check.
+EXPECTED_CHECKS = 48
+
 results: list[tuple[bool, str]] = []
 
 
@@ -479,6 +485,13 @@ def main() -> int:
     for label in failed:
         print(f"  FAILED: {label}", flush=True)
     print("=" * 60, flush=True)
+    if len(results) != EXPECTED_CHECKS:
+        print(f"FATAL: {len(results)} checks ran, expected exactly "
+              f"{EXPECTED_CHECKS}. A moving denominator makes two runs "
+              "incomparable and is how a case that silently stopped running "
+              "hides. Update EXPECTED_CHECKS deliberately when adding one.",
+              flush=True)
+        return 2
     return 1 if failed else 0
 
 
