@@ -107,6 +107,13 @@ TRAMP_SEND = 0xC7A0               # LDA/LDX ptr; JSR net_udp_send; capture C
 TRAMP_MSG = 0xC7C0                # do_message_input's tail: build + send
 CARRY = 0xC7F0
 
+#: Fixed identity. Every run emits exactly these checks, whichever branch it
+#: takes (an unlocatable push sink still emits group_bytes' six claims, as
+#: failures), so two runs are comparable and a check that silently stopped
+#: running is a hard error rather than a smaller denominator nobody notices.
+#: Update deliberately when adding a check.
+EXPECTED_CHECKS = 90
+
 VERBOSE = False
 results: list[tuple[bool, str]] = []
 
@@ -454,10 +461,11 @@ def group_bytes(transport, L, put_byte_stub, rng, part_max, store, capture,
     buf = L["udp_recv_buf"]
     if store is None:
         # The sink could not be located, so these claims are UNTESTED. Say so
-        # as failures rather than by quietly running four checks fewer: a
+        # as failures rather than by quietly running six checks fewer: a
         # suite whose check count drops when the adapter changes shape is the
         # exact failure mode this location trick could otherwise introduce.
         for total in (part_max + 1, EXPECT_SEND_MAX):
+            check(False, f"{total} B: C=0 with the sink captured", why)
             check(False, f"{total} B: exactly {total} payload bytes pushed "
                          f"across all parts", why)
             check(False, f"{total} B: the pushed bytes are the datagram, "
@@ -477,13 +485,17 @@ def group_bytes(transport, L, put_byte_stub, rng, part_max, store, capture,
         pushed = end - CAPBUF
         got = bytes(read_bytes(transport, CAPBUF, total)) if 0 < pushed else b""
         print(f"\n--- {total}-byte datagram, {len(parts)} parts ---")
-        # No C=0 check here: group_splitting already asserts it at both of
-        # these lengths, and a check that can only ever agree with another
-        # is noise.
+        # NOT dominated by group_splitting's C=0 at these lengths: that is a
+        # different net_udp_send call, made before the sink was patched. This
+        # is the only verdict on THIS call's carry, and a capture run can push
+        # every byte correctly and still return C=1 (proved by forcing the
+        # completing part's reply count to 1 for this call alone: with this
+        # check removed the suite stayed green).
+        check(carry == 0, f"{total} B: C=0 with the sink captured",
+              f"carry={carry} net_last_error=${err:02X}")
         check(pushed == total,
               f"{total} B: exactly {total} payload bytes pushed across all "
-              f"parts", f"pushed {pushed} (carry={carry} "
-                        f"net_last_error=${err:02X})")
+              f"parts", f"pushed {pushed}")
         diff = next((i for i in range(min(len(got), len(payload)))
                      if got[i] != payload[i]), None)
         check(got == payload,
@@ -722,6 +734,12 @@ def _run(rng):
           f"{len(failed)} failed")
     for l in failed:
         print(f"  FAILED: {l}")
+    if len(results) != EXPECTED_CHECKS:
+        print(f"FATAL: {len(results)} checks ran, expected exactly "
+              f"{EXPECTED_CHECKS}. A moving denominator makes two runs "
+              "incomparable and is how a case that silently stopped running "
+              "hides. Update EXPECTED_CHECKS deliberately when adding one.")
+        return 2
     return 1 if failed else 0
 
 
