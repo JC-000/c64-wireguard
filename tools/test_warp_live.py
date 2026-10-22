@@ -2703,6 +2703,8 @@ def run_stage_c(tr: Ultimate64Transport, client: Ultimate64Client, L: dict,
         if recv_len:
             recv_ptr = int.from_bytes(tr.read_memory(L["msg_recv_ptr"], 2), "little")
             dns_payload = bytes(tr.read_memory(recv_ptr, min(recv_len, 1450)))
+            # Exposed to the keepalive buffer-reuse race fixed in
+            # test_warp_ip65_vice (snapshot_inbound): read field by field.
             ip_hdr = bytes(tr.read_memory(L["tp_packet"] + 16, 20))
             udp_hdr = bytes(tr.read_memory(L["tp_packet"] + 16 + 20, 8))
             src_ip = ".".join(str(b) for b in ip_hdr[12:16])

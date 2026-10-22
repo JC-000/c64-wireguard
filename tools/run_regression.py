@@ -290,6 +290,13 @@ TESTS = [
     # records and REFUSES non-loopback sockets, DeviceLock acquisition and
     # subprocesses. Unseeded here; the seed is on its first line.
     ("live_tools_wifi", ["tools/test_live_tools_wifi.py"]),
+    # The bridged WARP suite's identity step, against a STUB wgcf (no
+    # network, no VICE): exit 77 for every precondition, exit 1 for a
+    # failure after registration, the 0700 temp dir wiped on every path
+    # including SIGTERM, and the private key never in the log. The live
+    # run is rig-only and stays out of the gate; this is the part that can
+    # be proved without it.
+    ("warp_identity", ["tools/test_warp_identity.py"]),
     # Issue #69. The gate builds REU=1 (Makefile `REU ?= 1`) and 24 VICE
     # suites booted it with NO REU: boot_ready set, x25519_reu_fault $02, and
     # every X25519 after that silently wrong (RFC 7748 vector 1 mismatched).

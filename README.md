@@ -196,11 +196,16 @@ Note: $02-$1B overlaps with ip65's cc65 ZP usage. The `src/net/ip65/net.s` wrapp
 ## Testing
 
 Tests use the [c64-test-harness](https://github.com/JC-000/c64-test-harness) package with VICE emulator.
+The ethernet-VICE and RR-Net suites need **c64-test-harness at master `e32bc69`
+or later** (#547: the patched `vice-eth` build and its `vice_elevation` API);
+an older install makes them stop with that message at import. The VICE-ethernet
+suites also want that harness's keg-only `vice-eth` (`scripts/build-vice-eth.sh`),
+and `brew install wgcf` for the bridged WARP run.
 
 ```bash
 pip install c64-test-harness
 
-# All 54 suites — the canonical run, and the gate for any change.
+# All 55 suites — the canonical run, and the gate for any change.
 # Most run in a staggered parallel pool against a single build; the ELEVEN that
 # rebuild the tree themselves (x25519, write_bytes, uci_stub, both_backends,
 # chunked_send, multipart_split, build_mtu1440, ip65_bss_guard,

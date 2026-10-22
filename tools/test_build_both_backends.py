@@ -10,8 +10,10 @@ Usage:
     pytest tools/test_build_both_backends.py       # under pytest
 """
 
+import hashlib
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -356,6 +358,70 @@ def test_retired_sibling_knobs_refused():
         _run_make("clean")
 
 
+def _build_tree_digest():
+    """sha256 of every file under build/, by relative path."""
+    out = {}
+    for root, _, files in os.walk(os.path.join(PROJECT_ROOT, "build")):
+        for f in files:
+            p = os.path.join(root, f)
+            with open(p, "rb") as fh:
+                out[os.path.relpath(p, PROJECT_ROOT)] = \
+                    hashlib.sha256(fh.read()).hexdigest()
+    return out
+
+
+#: Variables that select a build configuration; stripped from make's env.
+_MAKE_KNOBS = {"REU", "BACKEND", "WG_MTU1440", "MAKEFLAGS", "MFLAGS",
+               "MAKELEVEL", "BUILD_DIR", "UCI_CHUNKED_WRITE", "CA65FLAGS",
+               "X25519_PROFILE", "MSG_PORT", "HTTPS_PORT"}
+
+#: tools/test_ip65_rrnet_hw.py PINGSTATIC_SHA256 -- the measured control.
+PINGSTATIC_SHA256 = ("daec793dfaf587c33e797846ffe870496f90dbf6"
+                     "fec20742bb61c0079e54ed7c")
+
+
+def test_pingstatic_never_touches_build():
+    """`make pingstatic` must leave build/ byte-identical (review F1).
+
+    The CA65FLAGS reconcile runs at parse time for every goal, and for a
+    bare `make pingstatic` it compared the DEFAULT flags (REU ?= 1) with a
+    tree last built REU=0 -- and deleted wireguard.prg, labels and map.
+    The live RR-Net suite builds its control exactly that way, right after
+    building (or, under --skip-build, instead of building) the PRG it runs.
+    """
+    # A CLEAN environment for make: an exported REU=0 (or BACKEND, or
+    # MAKEFLAGS) would make `make pingstatic`'s default flags equal the
+    # REU=0 build's, the reconcile a no-op, and this check vacuous.
+    env = {k: v for k, v in os.environ.items()
+           if k not in _MAKE_KNOBS and not k.startswith("USE_")}
+
+    def make(*a):
+        return subprocess.run(["make", *a], cwd=PROJECT_ROOT, env=env,
+                              capture_output=True, text=True, check=False)
+    make("clean")
+    try:
+        build = make("BACKEND=ip65", "REU=0", "WG_MTU1440=1")
+        assert build.returncode == 0, f"REU=0 build failed:\n{build.stderr[-1500:]}"
+        before = _build_tree_digest()
+        assert "build/wireguard.prg" in before, "the REU=0 build left no PRG"
+        shutil.rmtree(os.path.join(PROJECT_ROOT, "build_pingstatic"),
+                      ignore_errors=True)
+        ps = make("pingstatic")
+        assert ps.returncode == 0, f"make pingstatic failed:\n{ps.stderr[-1500:]}"
+        after = _build_tree_digest()
+        changed = sorted(k for k in set(before) | set(after)
+                         if before.get(k) != after.get(k))
+        assert not changed, (f"make pingstatic changed build/: {changed[:6]} "
+                             "(the CA65FLAGS reconcile ran for it)")
+        with open(os.path.join(PROJECT_ROOT, "build_pingstatic",
+                               "pingstatic-1066.prg"), "rb") as fh:
+            got = hashlib.sha256(fh.read()).hexdigest()
+        assert got == PINGSTATIC_SHA256, (
+            f"pingstatic-1066.prg sha256 {got}, pinned {PINGSTATIC_SHA256}")
+    finally:
+        make("clean")
+
+
 def _main():
     checks = [
         ("ip65 build + labels", lambda: _check_backend("ip65")),
@@ -373,6 +439,8 @@ def _main():
         # Issue #69 — the legacy in-tree crypto build is retired.
         ("retired USE_*_SIBLING values refused, =1 accepted",
          test_retired_sibling_knobs_refused),
+        ("make pingstatic leaves build/ byte-identical (and builds the "
+         "pinned control)", test_pingstatic_never_touches_build),
     ]
     failures = []
     for name, fn in checks:

@@ -122,6 +122,7 @@ from c64_test_harness.backends.vice_lifecycle import (  # noqa: E402
 # /dev/bpf* is open"), so this import had been raising ImportError and this
 # suite could not start at all. Ask VICE's own gate instead.
 from vice_eth_rig import (  # noqa: E402
+    DEFAULT_VICE_BIN, DNSMASQ_PIDFILE, RIG_UP_HELPER, _dnsmasq_alive,
     libpcap_node_note, vice_holders, vice_rawnet_problems,
 )
 from c64_test_harness.backends.vice_manager import PortAllocator  # noqa: E402
@@ -135,8 +136,6 @@ UDP_SRC_PATH = os.path.join(PROJECT_ROOT, "ip65", "ip65", "udp.s")
 
 HOST_IP = "10.0.65.1"
 ETH_IFACE = "feth0"
-DNSMASQ_PIDFILE = "/tmp/c64-rig-dnsmasq.pid"
-DEFAULT_VICE_BIN = os.path.expanduser("~/opt/vice-eth/bin/x64sc")
 
 KBD_BUFFER = 0x0277
 KBD_COUNT = 0x00C6
@@ -191,9 +190,9 @@ def vlog(msg: str) -> None:
 def rig_problems(vice_bin: str, iface: str = ETH_IFACE) -> list[str]:
     """Prerequisites for whichever rig *iface* names.
 
-    Two shapes. ``feth0`` is the feth/dnsmasq rig from c64-https'
-    rig-up-macos.sh, which needs its host end at 10.0.65.1 and a dnsmasq
-    serving DHCP. Any other name is a REAL NIC in bridged mode: VICE binds
+    Two shapes. ``feth0`` is the feth/dnsmasq rig from the host's
+    c64-https-rig-up.sh helper, which needs its host end at 10.0.65.1 and a
+    dnsmasq serving DHCP. Any other name is a REAL NIC in bridged mode: VICE binds
     a libpcap interface by name, so the wired port IS the bridge, the C64
     joins the real LAN and the router does DHCP — no feth1, no dnsmasq.
     Nothing this suite measures (udp_cbcount, listen/close ownership) cares
@@ -225,14 +224,10 @@ def rig_problems(vice_bin: str, iface: str = ETH_IFACE) -> list[str]:
                            text=True)
         if r.returncode != 0 or f"inet {HOST_IP} " not in r.stdout:
             problems.append(f"feth1 missing or not at {HOST_IP}")
-        try:
-            pid = int(open(DNSMASQ_PIDFILE).read().strip())
-            os.kill(pid, 0)
-        except PermissionError:
-            pass
-        except (OSError, ValueError):
+        if not _dnsmasq_alive():
             problems.append(f"rig dnsmasq not running ({DNSMASQ_PIDFILE} "
-                            "stale or absent) — no DHCP server on the wire")
+                            "stale or absent, no `dnsmasq --interface=feth1`)"
+                            " — no DHCP server on the wire")
     return problems
 
 
@@ -371,7 +366,7 @@ def call_carry(tr, addr: int, timeout: float = 20.0, *,
             regs["A"] = a
         if x is not None:
             regs["X"] = x
-        tr.set_registers(regs)
+        tr.set_registers(regs)    # exposed to c64-test-harness#556 (same class)
         tr.resume()
         tr.wait_for_stopped(timeout=timeout)
         after = tr.read_registers()
@@ -699,7 +694,7 @@ def main() -> int:
         for p in problems:
             log(f"    - {p}")
         log("  The rig needs one privileged setup per boot and is not created "
-            "here; see c64-https' tools/rig-up-macos.sh.")
+            f"here; run `sudo -n {RIG_UP_HELPER}`.")
         return 77
 
     build_ip65()

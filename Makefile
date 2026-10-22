@@ -298,7 +298,7 @@ PRG_DEPS     := $(CA65_OBJS) $(CFG_FILE) $(SIBLING_ARCHIVES)
 OBJ_EXTRADEP :=
 endif
 
-.PHONY: all clean run ip65-libs release
+.PHONY: all clean run ip65-libs release pingstatic
 
 # If a recipe fails AFTER its target file has been written, delete the
 # target. Without this, a link that dies partway (disk full, an ld65 error
@@ -326,6 +326,24 @@ all: $(PRG)
 # (Declared after `all` — the first rule in the file is the default goal.)
 release:
 	bash tools/release/build_release.sh
+
+# The RR-Net bench-health control: stock ip65, static IP, one ping
+# (tools/pingstatic/). Not a prerequisite of `all`. Built OUTSIDE build/:
+# `make clean` leaves it alone, so tools/test_ip65_rrnet_hw.py can build it
+# before its own clean+build -- and inside build/ it survived every clean
+# and read as output of the refused build in test_build_both_backends'
+# parse-time check. That suite checks the bytes against a pinned sha256.
+# ip65-libs is phony, so every `make pingstatic` re-links the PRG (same
+# bytes; accepted -- it is what makes a fresh clone build).
+PINGSTATIC_DIR = build_pingstatic
+PINGSTATIC_PRG = $(PINGSTATIC_DIR)/pingstatic-1066.prg
+pingstatic: $(PINGSTATIC_PRG)
+
+$(PINGSTATIC_PRG): tools/pingstatic/pingstatic-1066.s ip65-libs
+	mkdir -p $(PINGSTATIC_DIR)
+	$(CA65) -I $(IP65_DIR)/inc -o $(PINGSTATIC_DIR)/pingstatic-1066.o $<
+	$(LD65) -o $@ -C c64.cfg $(PINGSTATIC_DIR)/pingstatic-1066.o \
+	    $(IP65_DIR)/ip65/ip65_tcp.lib $(IP65_DIR)/drivers/c64rrnet.lib c64.lib
 
 $(PRG): $(PRG_DEPS) | $(BUILD_DIR)
 	$(LD65) $(LD65FLAGS) -o $@ $(CA65_OBJS) $(SIBLING_ARCHIVES)
@@ -455,13 +473,21 @@ FLAGGED_ARTIFACTS = $(PRG) $(LABELS) $(MAP) $(DBG) \
 # must not mutate the tree. The cost is that `make -n` right after a flag flip
 # under-reports what a real build would do; predicting the rebuild is not worth
 # performing part of it.
+# Not for a `make pingstatic` alone: that goal builds nothing CA65FLAGS
+# governs, and reconciling for it compared the DEFAULT flags (REU ?= 1)
+# against whatever build/ was last built with -- so `make pingstatic` after
+# `make BACKEND=ip65 REU=0` deleted wireguard.prg, labels and map, this
+# lane's or any other's. Any other goal on the same line still reconciles.
+RECONCILE_GOALS := $(filter-out pingstatic,$(or $(MAKECMDGOALS),all))
 ifeq (,$(findstring n,$(firstword -$(MAKEFLAGS))))
+ifneq (,$(RECONCILE_GOALS))
 CA65_FLAGS_RECONCILE := $(shell \
     [ "`cat $(CA65_FLAGSTAMP) 2>/dev/null`" = '$(CA65_FLAGTEXT)' ] || { \
         rm -rf $(FLAGGED_ARTIFACTS); \
         mkdir -p $(BUILD_DIR) && \
         printf '%s\n' '$(CA65_FLAGTEXT)' > $(CA65_FLAGSTAMP); \
     })
+endif
 endif
 
 # Build ip65 libraries (only if not already built)

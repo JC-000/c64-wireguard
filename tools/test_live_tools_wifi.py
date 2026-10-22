@@ -54,11 +54,13 @@ import json
 import logging
 import os
 import random
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
 import textwrap
+import time as _time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1085,6 +1087,7 @@ def case_rrnet_probe_under_lock(res):
     patches = dict(
         selftest_library=lambda *a, **k: [], selftest_wire_gate=lambda *a, **k: [],
         selftest_rig_probe=lambda *a, **k: [], rig_problems=lambda *a, **k: [],
+        try_rig_up=lambda *a, **k: False, ensure_pingstatic=lambda: (0, ""),
         iface_state=lambda *a, **k: {}, assert_ip65_build=lambda *a, **k: None,
         fingerprint=lambda *a, **k: {"sha256": "0" * 64},
         load_labels=lambda *a, **k: AutoLabels(), Capture=FakeCap,
@@ -1116,6 +1119,536 @@ def case_rrnet_probe_under_lock(res):
 
 
 # =============================================================================
+# 9: test_ip65_rrnet_hw.py puts the device back to its ENTRY state
+# =============================================================================
+class FakeConfigClient:
+    """The config store, as the harness's snapshot/restore talk to it."""
+
+    U64, CART, SID = ("U64 Specific Settings", "C64 and Cartridge Settings",
+                      "SID Addressing")
+
+    def __init__(self, ignore=()):
+        self.cfg = {
+            self.U64: {"Turbo Control": "Off", "CPU Speed": " 1",
+                       "Badline Timing": "Enabled"},
+            self.CART: {"RAM Expansion Unit": "Disabled", "REU Size": "2 MB",
+                        "Cartridge": "", "Bus Operation Mode": "Quiet",
+                        "Cartridge Preference": "Auto"},
+            self.SID: {"SID Socket 1 Address": "$D400"},
+        }
+        self.ignore = set(ignore)       # items whose writes do not stick
+        self.resets = 0
+
+    def reset(self):
+        self.resets += 1
+
+    def get_config_category(self, cat):
+        return {cat: dict(self.cfg[cat]), "errors": []}
+
+    def set_config_items(self, cat, items):
+        for k, v in items.items():
+            if k not in self.ignore:
+                self.cfg[cat][k] = v
+
+    def set_config_item(self, cat, item, value):
+        self.set_config_items(cat, {item: value})
+
+
+def _fake_set_turbo(client, mhz):
+    # The harness's documented semantics: None -> "Off"; an int -> "Manual"
+    # at that speed (ultimate64_helpers.set_turbo_mhz).
+    if mhz is None:
+        client.cfg[client.U64]["Turbo Control"] = "Off"
+    else:
+        client.cfg[client.U64].update({"Turbo Control": "Manual",
+                                       "CPU Speed": f"{mhz:2d}"})
+
+
+def case_rrnet_restore_entry_state(res):
+    print("\n[9] rrnet_hw: the restore returns the device to its ENTRY state")
+    mod = _load(TOOLS / "test_ip65_rrnet_hw.py", "rrnet_hw_for_restore")
+    mod.time = FakeTime()
+    mod.set_turbo_mhz = _fake_set_turbo
+    mod.get_turbo_mhz = lambda c: (None if c.cfg[c.U64]["Turbo Control"] == "Off"
+                                   else int(c.cfg[c.U64]["CPU Speed"]))
+    mod.set_reu = lambda c, on: c.cfg[c.CART].update(
+        {"RAM Expansion Unit": "Enabled" if on else "Disabled"})
+
+    def run_as_the_suite_does(client):
+        """Snapshot, then what a run writes, then the restore."""
+        entry = mod.snapshot_state(client)
+        _fake_set_turbo(client, 48)
+        client.cfg[client.CART]["Cartridge Preference"] = "External"
+        mod.results.clear()
+        with Capture():
+            mod.restore_device(client, entry, "Auto", {})
+        return entry, list(mod.results)
+
+    import dataclasses
+    snap_fields = {f.name for f in dataclasses.fields(mod.U64StateSnapshot)} \
+        if hasattr(mod, "U64StateSnapshot") else set()
+    res.check(set(mod.RESTORED_FIELDS) == snap_fields,
+              "9/read-back-covers-every-field-restore_state-writes",
+              f"unchecked {sorted(snap_fields - set(mod.RESTORED_FIELDS))}, "
+              f"unknown {sorted(set(mod.RESTORED_FIELDS) - snap_fields)}")
+
+    client = FakeConfigClient()
+    entry, results = run_as_the_suite_does(client)
+    now = mod.snapshot_state(client)
+    diff = {f: (getattr(entry, f), getattr(now, f)) for f in mod.RESTORED_FIELDS
+            if getattr(entry, f) != getattr(now, f)}
+    res.check(not diff, "9/turbo-off-entry-is-restored-as-off",
+              f"(entry, after restore) differ: {diff}")
+    res.check([r[0] for r in results if "entry state" in r[1]] == [mod.PASS],
+              "9/restore-reports-the-entry-state-check",
+              f"results {results}")
+
+    # The reset is in a finally: a SIGTERM (SystemExit) inside the restore
+    # must still reset the C64, and still propagate.
+    sig = FakeConfigClient()
+    entry = mod.snapshot_state(sig)
+    real_restore = mod.restore_state
+
+    def killed(*a, **k):
+        raise SystemExit(143)
+    mod.restore_state = killed
+    exited = False
+    try:
+        with Capture():
+            mod.restore_device(sig, entry, "Auto", {})
+    except SystemExit:
+        exited = True
+    finally:
+        mod.restore_state = real_restore
+    res.check(exited and sig.resets == 1,
+              "9/sigterm-inside-the-restore-still-resets-the-c64",
+              f"SystemExit propagated={exited}, resets={sig.resets}")
+
+    # The read-back can fire: a device that does not take the Turbo
+    # Control write must be reported, not assumed.
+    stuck = FakeConfigClient(ignore={"Turbo Control"})
+    _, results = run_as_the_suite_does(stuck)
+    res.check([r[0] for r in results if "entry state" in r[1]] == [mod.FAIL],
+              "9/a-restore-that-did-not-take-fails-the-run",
+              f"results {results}")
+
+
+# =============================================================================
+# 10: vice_eth_rig.bridged_problems refuses a Wi-Fi interface
+# =============================================================================
+#: `networksetup -listallhardwareports`, this Mac, 2026-10-21 (abridged).
+HARDWARE_PORTS_TEXT = """\
+Hardware Port: USB 10/100/1000 LAN
+Device: en6
+Ethernet Address: a0:ce:c8:dd:f4:f9
+
+Hardware Port: Wi-Fi
+Device: en0
+Ethernet Address: fc:b2:14:46:c7:68
+
+Hardware Port: Thunderbolt 2
+Device: en4
+Ethernet Address: 36:25:15:0b:6f:44
+"""
+
+
+def case_bridged_refuses_wifi(res):
+    print("\n[10] vice_eth_rig: a bridged rig on Wi-Fi is a problem")
+    rig = _load(TOOLS / "vice_eth_rig.py", "vice_eth_rig_for_wifi")
+    ports = rig.hardware_ports(HARDWARE_PORTS_TEXT)
+    res.check(ports == {"en6": "USB 10/100/1000 LAN", "en0": "Wi-Fi",
+                        "en4": "Thunderbolt 2"},
+              "10/port-map-parsed-from-networksetup", f"{ports}")
+    # Everything else about the interface healthy, so the Wi-Fi check is
+    # the only thing that can speak.
+    rig.sys = SimpleNamespace(platform="darwin")
+    rig.vice_rawnet_problems = lambda *a, **k: []
+    rig.libpcap_node_note = lambda: None
+    rig.iface_status = lambda i: {"up": True, "running": True, "active": True,
+                                  "ether": "x", "inet": "10.43.23.99",
+                                  "netmask": 0xFFFFFF00}
+    rig.default_gateway = lambda i: "10.43.23.1"
+    rig.dnsmasq_interfaces = lambda: set()
+    rig.vice_on_iface = lambda i: []
+    rig.hardware_ports = lambda text=None: ports
+    got = rig.bridged_problems("en0", "unused-vice-bin")
+    res.check(len(got) == 1 and "Wi-Fi" in got[0], "10/wifi-port-is-a-problem",
+              f"bridged_problems('en0') = {got}")
+    got = rig.bridged_problems("en6", "unused-vice-bin")
+    res.check(got == [], "10/wired-port-is-ready", f"bridged_problems('en6') = {got}")
+    # F7: libpcap_node_note gates, and only where vice_rawnet_problems is
+    # skipped (the operator opt-out) -- otherwise it duplicated that check.
+    note_rig = _load(TOOLS / "vice_eth_rig.py", "vice_eth_rig_for_note")
+    note_rig.bpf_node_openable = lambda: False
+    saved_allow = os.environ.pop(note_rig.ALLOW_UNELEVATED_ENV, None)
+    try:
+        quiet = note_rig.libpcap_node_note()
+        os.environ[note_rig.ALLOW_UNELEVATED_ENV] = "1"
+        loud = note_rig.libpcap_node_note()
+    finally:
+        os.environ.pop(note_rig.ALLOW_UNELEVATED_ENV, None)
+        if saved_allow is not None:
+            os.environ[note_rig.ALLOW_UNELEVATED_ENV] = saved_allow
+    res.check(quiet is None and loud and "/dev/bpf" in loud,
+              "10/bpf-note-only-under-the-opt-out-no-duplicate",
+              f"without opt-out {quiet!r}; with {loud!r}")
+    rig.hardware_ports = lambda text=None: {}
+    got = rig.bridged_problems("en6", "unused-vice-bin")
+    res.check(len(got) == 1 and "could not read" in got[0],
+              "10/unreadable-port-map-is-a-problem-not-a-pass",
+              f"bridged_problems with no port map = {got}")
+
+
+# =============================================================================
+# 11: test_ip65_rrnet_hw.py holds the DeviceLock from rig-up to rig-down
+# =============================================================================
+def case_rrnet_rig_under_lock(res):
+    """The RR-Net segment is shared with c64-https; the agreed protocol is
+    that whoever raises it holds the U64E's lock until it is lowered again.
+    Driven through main() on three exits: a rig that stays unusable after
+    up (exit 77), a body that stops at the device, and a SIGTERM."""
+    print("\n[11] rrnet_hw: rig-up and rig-down happen inside the DeviceLock")
+
+    def drive(name, *, rig_bad=False, raise_in_body=None, rig_down=True,
+              up_ok=True, cap_ok=True):
+        mod = _load(TOOLS / "test_ip65_rrnet_hw.py", f"rrnet_hw_rig_{name}")
+        order: list[str] = []
+        held = {"n": 0}
+
+        class FakeLock:
+            def __init__(self, host, *a, **k):
+                pass
+
+            def acquire_or_raise(self, *a, **k):
+                held["n"] += 1
+                order.append("acquire")
+
+            def release(self):
+                held["n"] -= 1
+                order.append("release")
+
+        def helper(path):
+            kind = "up" if path == mod.RIG_UP_HELPER else "down"
+            order.append(f"rig-{kind}-" + ("held" if held["n"] > 0 else "UNLOCKED"))
+            return up_ok if kind == "up" else True
+
+        def client(*a, **k):
+            if raise_in_body is not None:
+                raise raise_in_body
+            raise _StopRun("fake device: stop here")
+
+        for k, v in dict(
+                selftest_library=lambda *a, **k: [],
+                selftest_wire_gate=lambda *a, **k: [],
+                selftest_rig_probe=lambda *a, **k: [],
+                ensure_pingstatic=lambda: (0, ""), rig_is_down=lambda: rig_down,
+                _run_helper=helper,
+                rig_problems=lambda *a, **k: ["rig down: fake"] if rig_bad else [],
+                iface_state=lambda *a, **k: {},
+                assert_ip65_build=lambda *a, **k: None,
+                fingerprint=lambda *a, **k: {"sha256": "0" * 64},
+                load_labels=lambda *a, **k: AutoLabels(),
+                Capture=type("C", (), {"mode": "auto", "note": "fake",
+                                       "__init__": lambda self, *a, **k: None,
+                                       "start": lambda self: cap_ok,
+                                       "stop": lambda self: None}),
+                probe_u64=lambda *a, **k: (order.append("probe"), SimpleNamespace(
+                    reachable=True, error=None, latency_ms=1.0, write_ok=True))[1],
+                DeviceLock=FakeLock, Ultimate64Client=client,
+                time=FakeTime()).items():
+            setattr(mod, k, v)
+        mod.hw.provenance = lambda *a, **k: {}
+        mod.hw.format_provenance = lambda *a, **k: []
+        rc = None
+        with contact_guard() as contact, Capture():
+            try:
+                rc = mod.main(["--host", "192.0.2.10", "--skip-build",
+                               "--capture", "auto", "--seed", "1"])
+            except (_StopRun, SystemExit):
+                pass
+        return order, contact, rc
+
+    want = ["acquire", "rig-up-held", "rig-down-held", "release"]
+    order, contact, rc = drive("capture_fails", cap_ok=False)
+    res.check(rc == 77 and order == want and not contact,
+              "11/capture-that-will-not-start-is-77-before-any-device-contact",
+              f"rc {rc}; order {order} (want {want}, no 'probe'); contact {contact}")
+    for name, kw, w in (
+            ("rig-unusable-after-up", {"rig_bad": True}, want),
+            ("body-stops-at-device", {}, want),
+            ("sigterm-in-body", {"raise_in_body": SystemExit(143)}, want),
+            # F3: up fails part-way (the helper has already set the NIC
+            # MANUAL and written rrnet.iface): still ours, still lowered.
+            ("failed-up-is-still-lowered", {"up_ok": False, "rig_bad": True},
+             want),
+            # F2: a rig someone else raised is neither raised nor lowered,
+            # and the lock still spans the run.
+            ("rig-already-up-is-left-alone", {"rig_down": False},
+             ["acquire", "release"])):
+        order, contact, _ = drive(name.replace("-", "_"), **kw)
+        order = [o for o in order if o != "probe"]    # the rig, not the device
+        res.check(order == w and not contact, f"11/{name}",
+                  f"order {order} (want {w}); contact {contact}")
+
+
+# =============================================================================
+# 12: the bridged NIC is found by MAC, not by a BSD name that moves
+# =============================================================================
+def case_bridged_nic_by_mac(res):
+    print("\n[12] vice_eth_rig: the bridged NIC resolves by MAC")
+    rig = _load(TOOLS / "vice_eth_rig.py", "vice_eth_rig_for_nic")
+    belkin = "c0:56:27:b1:16:38"
+    text = HARDWARE_PORTS_TEXT + (
+        "\nHardware Port: Belkin USB-C LAN\nDevice: en5\n"
+        f"Ethernet Address: {belkin}\n"
+        "\nHardware Port: Thunderbolt Bridge\nDevice: bridge0\n"
+        "Ethernet Address: 02:00:00:00:00:00\n")
+    table = rig.hardware_port_table(text)
+    res.check(("Belkin USB-C LAN", "en5", belkin) in table
+              and ("Wi-Fi", "en0", "fc:b2:14:46:c7:68") in table,
+              "12/port-table-carries-addresses", f"{table}")
+    # This Mac: en4 is a Thunderbolt port and the Belkin is en5.
+    got = rig.resolve_bridged_iface(belkin, table)
+    res.check(got == ("en5", None), "12/resolves-the-port-carrying-the-mac",
+              f"resolve_bridged_iface -> {got}")
+    gone = [r for r in table if r[1] != "en5"]
+    dev, why = rig.resolve_bridged_iface(belkin, gone)
+    res.check(dev is None and why and "bridge0" in why and "masked" in why,
+              "12/absent-with-a-masked-row-is-a-problem-naming-it",
+              f"-> {(dev, why)}")
+    twice = table + [("Clone", "en9", belkin)]
+    dev, why = rig.resolve_bridged_iface(belkin, twice)
+    res.check(dev is None and why and "2 hardware ports" in why,
+              "12/two-matches-is-a-problem-not-a-pick", f"-> {(dev, why)}")
+    dev, why = rig.resolve_bridged_iface("02:00:00:00:00:00", table)
+    res.check(dev is None and why and "placeholder" in why,
+              "12/the-masking-placeholder-is-refused-as-a-key",
+              f"-> {(dev, why)}")
+    dev, why = rig.resolve_bridged_iface(belkin, [])
+    res.check(dev is None and why and "could not read" in why,
+              "12/unreadable-table-is-a-problem", f"-> {(dev, why)}")
+
+
+# =============================================================================
+# 13: the bench-health control's prerequisites, and their exit codes
+# =============================================================================
+def case_pingstatic_preconditions(res):
+    print("\n[13] rrnet_hw: ensure_pingstatic — 77 for the environment, 1 for us")
+    mod = _load(TOOLS / "test_ip65_rrnet_hw.py", "rrnet_hw_for_pingstatic")
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        mod.PINGSTATIC_DIR = d / "out"
+        mod.PINGSTATIC_PRG = d / "out" / "pingstatic-1066.prg"
+        real_which = mod.shutil.which
+
+        # shutil is the process-wide module: put which() back on every path.
+        mod.shutil.which = lambda t: None
+        try:
+            with Capture():
+                rc, why = mod.ensure_pingstatic()
+        finally:
+            mod.shutil.which = real_which
+        res.check(rc == 77 and "ca65" in why, "13/no-toolchain-is-77",
+                  f"-> {(rc, why)}")
+
+        # A tree that has everything the build needs except a working make:
+        # independent of where this suite (or a mutant copy of it) runs.
+        (d / "ip65").mkdir()
+        mod.PROJECT_ROOT = d
+        stub = d / "bin"
+        stub.mkdir()
+        (stub / "make").write_text("#!/bin/sh\necho 'pingstatic-1066.s:3: Error' >&2\nexit 2\n")
+        (stub / "make").chmod(0o755)
+        saved = os.environ["PATH"]
+        os.environ["PATH"] = f"{stub}:{saved}"
+        try:
+            with Capture():
+                rc, why = mod.ensure_pingstatic()
+        finally:
+            os.environ["PATH"] = saved
+        res.check(rc == 1 and "tracked source" in why,
+                  "13/make-failure-on-tracked-source-is-1", f"-> {(rc, why)}")
+
+        src = d / "drift.s"
+        src.write_text(mod.PINGSTATIC_SRC.read_text().replace(
+            "my_ip:        .byte 10,0,66,200", "my_ip:        .byte 10,0,67,200"))
+        mod.PINGSTATIC_SRC = src
+        with Capture():
+            rc, why = mod.ensure_pingstatic()
+        res.check(rc == 77 and "re-target" in why and "10.0.67.200" in why,
+                  "13/subnet-drift-is-a-precondition-naming-both", f"-> {(rc, why)}")
+
+
+# =============================================================================
+# 14: a SIGTERM during the rig helper lets it FINISH (review D6)
+# =============================================================================
+def case_rig_helper_survives_sigterm(res):
+    print("\n[14] rrnet_hw: SIGTERM mid-helper lets the helper finish")
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        done = d / "done"
+        helper = d / "rrnet-rig-up.sh"
+        helper.write_text(f"#!/bin/sh\nsleep 2\necho finished > {done}\n")
+        helper.chmod(0o755)
+        child = subprocess.Popen(
+            [sys.executable, "-c",
+             "import signal, sys; sys.path.insert(0, %r)\n"
+             "import test_ip65_rrnet_hw as T\n"
+             "T.HELPER_ARGV_PREFIX = []\n"
+             "signal.signal(signal.SIGTERM, lambda *a: sys.exit(143))\n"
+             "print('ready', flush=True)\n"
+             "T._run_helper(__import__('pathlib').Path(%r))\n"
+             % (str(TOOLS), str(helper))],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        child.stdout.readline()
+        _time.sleep(0.8)
+        child.send_signal(signal.SIGTERM)
+        rc = child.wait(timeout=60)
+        res.check(rc == 143 and done.exists(),
+                  "14/sigterm-mid-helper-waits-for-it-then-exits",
+                  f"rc={rc}, helper finished={done.exists()}")
+
+
+# =============================================================================
+# 15: the blackhole's avoid-list must not shrink silently (review D8)
+# =============================================================================
+def case_known_lan_hosts(res):
+    print("\n[15] arp_first_send: an unreadable device map is a problem")
+    mod = _load(TOOLS / "test_ip65_arp_first_send_vice.py", "arp_for_hosts")
+    saved = os.environ.get("C64_DEVICE_ALIASES_FILE")
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "devices.toml"
+            f.write_text('[devices.abc123]\nhosts = ["192.0.2.77"]\n')
+            os.environ["C64_DEVICE_ALIASES_FILE"] = str(f)
+            hosts, why = mod.known_lan_hosts()
+            res.check("192.0.2.77" in hosts and why is None,
+                      "15/device-map-hosts-are-avoided", f"{why} {sorted(hosts)}")
+            os.environ["C64_DEVICE_ALIASES_FILE"] = str(Path(td) / "absent.toml")
+            hosts, why = mod.known_lan_hosts()
+            res.check(bool(why) and "--blackhole" in why,
+                      "15/unreadable-device-map-is-a-problem-not-a-shorter-list",
+                      f"{why!r}")
+        # --blackhole is validated like a picked one: a known host is
+        # refused before any probe; one that answers a ping is refused.
+        probed: list[str] = []
+        mod.ping_silent = lambda ip, *a, **k: (probed.append(ip), ip == "192.0.2.9")[1]
+        mod.arp_known = lambda ip: False
+        mod.subprocess = SimpleNamespace(run=lambda *a, **k: None)
+        v1 = mod.validate_blackhole("192.0.2.77", {"192.0.2.77"})
+        v2 = mod.validate_blackhole("192.0.2.9", set())
+        v3 = mod.validate_blackhole("192.0.2.10", set())
+        res.check(v1 and "known host" in v1 and "192.0.2.77" not in probed
+                  and v2 and "answers a ping" in v2 and v3 is None,
+                  "15/blackhole-override-is-validated",
+                  f"known={v1!r} answering={v2!r} free={v3!r} probed={probed}")
+    finally:
+        if saved is None:
+            os.environ.pop("C64_DEVICE_ALIASES_FILE", None)
+        else:
+            os.environ["C64_DEVICE_ALIASES_FILE"] = saved
+
+
+# =============================================================================
+# 16: a tap whose tcpdump never starts listening leaves no orphan (E2)
+# =============================================================================
+def case_tap_start_failure_no_orphan(res):
+    print("\n[16] vice_eth_rig.Tap: a failed start stops its own tcpdump")
+    rig = _load(TOOLS / "vice_eth_rig.py", "vice_eth_rig_for_tap")
+    with tempfile.TemporaryDirectory() as td:
+        for name, body in (
+                ("chatty", "echo 'tcpdump: some warning' >&2\nexec sleep 30\n"),
+                ("silent", "exec sleep 30\n")):
+            fake = Path(td) / f"tcpdump-{name}"
+            fake.write_text("#!/bin/sh\n" + body)
+            fake.chmod(0o755)
+            tap = rig.Tap("udp", iface="lo0")
+            tap.TCPDUMP = str(fake)
+            tap.START_TIMEOUT_S = 1.0
+            t0 = _time.monotonic()
+            raised = False
+            try:
+                tap.__enter__()
+            except RuntimeError:
+                raised = True
+            took = _time.monotonic() - t0
+            _time.sleep(0.3)
+            alive = tap._proc is not None and tap._proc.poll() is None
+            if alive:
+                tap._proc.kill()
+            res.check(raised and not alive and took < 5.0,
+                      f"16/{name}-tcpdump-that-never-listens-is-stopped",
+                      f"raised={raised} still running={alive} took={took:.1f}s")
+
+
+# =============================================================================
+# 17: arp_first_send parks off net_poll before its jsr's (E1, #556)
+# =============================================================================
+def case_arp_parks_before_jsr(res):
+    print("\n[17] arp_first_send: park at main_loop before send/pump/floor")
+    mod = _load(TOOLS / "test_ip65_arp_first_send_vice.py", "arp_for_park")
+    order: list[str] = []
+
+    class Tr:
+        def __init__(self):
+            self.pc = 0x0AD0                    # halted inside net_poll
+
+        def read_registers(self):
+            return {"PC": self.pc}
+
+        def set_checkpoint(self, addr):
+            order.append("park")
+            return 1
+
+        def resume(self):
+            pass
+
+        def wait_for_stopped(self, timeout=None):
+            self.pc = 0x0870
+
+        def delete_checkpoint(self, n):
+            pass
+    L = {"main_loop": 0x0870, "net_poll": 0x0ACD, "udp_recv_buf": 0x5000,
+         "net_udp_send_len": 0x5100}
+    mod.jsr = lambda tr, addr, **k: order.append(f"jsr {addr:#x}")
+    mod.write_bytes = lambda *a, **k: None
+    mod.read_bytes = lambda *a, **k: b"\x00"
+    for name, call in (
+            ("send_once", lambda t: mod.send_once(t, L, b"x", timeout=1.0)),
+            ("pump", lambda t: mod.pump(t, L, calls=2)),
+            ("timing_floor", lambda t: mod.timing_floor(t, L))):
+        order.clear()
+        call(Tr())
+        res.check(order and order[0] == "park" and order.count("park") == 1,
+                  f"17/{name}-parks-before-its-first-jsr", f"order {order[:4]}")
+    order.clear()
+    t = Tr()
+    t.pc = 0x0870                               # already parked: no-op
+    mod.pump(t, L, calls=1)
+    res.check(order == [f"jsr {0x0ACD:#x}"],
+              "17/already-parked-is-left-alone", f"order {order}")
+
+
+# =============================================================================
+# 18: a too-old harness: exit 77, a neutral message (E7)
+# =============================================================================
+def case_old_harness_message(res):
+    print("\n[18] a harness without the #547 API: 77, no 'SKIP:' wording")
+    for mod in ("vice_eth_rig", "test_ip65_rrnet_hw"):
+        code = ("import sys; sys.path.insert(0, %r)\n"
+                "import c64_test_harness.backends.vice_elevation as v\n"
+                "del v.bpf_node_openable\n"
+                "import %s\n" % (str(TOOLS), mod))
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                           text=True, timeout=60)
+        res.check(r.returncode == 77
+                  and "needs c64-test-harness >= e32bc69" in r.stderr
+                  and "SKIP" not in r.stderr and "Traceback" not in r.stderr,
+                  f"18/{mod}-old-harness-is-77-with-a-neutral-message",
+                  f"rc={r.returncode} {r.stderr[-200:]!r}")
+
+
+# =============================================================================
 def main(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("--seed", type=int, default=None)
@@ -1130,7 +1663,17 @@ def main(argv=None):
              ("5", lambda: case_payloads(res, seed)),
              ("6", lambda: case_firmware(res)),
              ("7", lambda: case_no_default_host(res)),
-             ("8", lambda: case_rrnet_probe_under_lock(res))]
+             ("8", lambda: case_rrnet_probe_under_lock(res)),
+             ("9", lambda: case_rrnet_restore_entry_state(res)),
+             ("10", lambda: case_bridged_refuses_wifi(res)),
+             ("11", lambda: case_rrnet_rig_under_lock(res)),
+             ("12", lambda: case_bridged_nic_by_mac(res)),
+             ("13", lambda: case_pingstatic_preconditions(res)),
+             ("14", lambda: case_rig_helper_survives_sigterm(res)),
+             ("15", lambda: case_known_lan_hosts(res)),
+             ("16", lambda: case_tap_start_failure_no_orphan(res)),
+             ("17", lambda: case_arp_parks_before_jsr(res)),
+             ("18", lambda: case_old_harness_message(res))]
     for key, fn in cases:
         if a.only and a.only not in (key, "3" if key == "2" else key):
             continue
