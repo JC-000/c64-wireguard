@@ -2,7 +2,7 @@
 """test_ip65_rrnet_hw.py — ip65 / RR-Net on REAL HARDWARE, proven from the wire.
 
 OPT-IN. Not in tools/run_regression.py: it needs a physical RR-Net cartridge,
-a dedicated NIC and a rig script run under sudo.
+a dedicated NIC and the host's sudo-allowlisted rrnet-rig-up.sh helper.
 
 Exit codes:
     0   PASS
@@ -24,12 +24,12 @@ run against a real CS8900a.
 
     [ U64E + real RR-Net (CS8900a, 10baseT) ]
                  |  cable, no switch, two stations
-    [ Mac USB-Ethernet NIC en4 = 10.0.66.1/24 ]
+    [ Mac USB-Ethernet NIC (found by MAC) = 10.0.66.1/24 ]
                  |
         dnsmasq (DHCP) + this suite's in-process WireGuard responder
 
-The addressing above is read from tools/rig-up-rrnet-macos.sh at import,
-not copied: that subnet moved off 10.0.65.0/24 (which the feth rig owns)
+The addressing above is read from the rig helper at import
+(ip65_hw_checks.rig_const), not copied: that subnet moved off 10.0.65.0/24 (which the feth rig owns)
 mid-development, and a second copy of it here would have gone stale
 without failing.
 
@@ -79,9 +79,9 @@ GREEN on a capture that contained the plaintext:
     capture taken without -s 0                  -> reported absent
     cfg_mac == ip65 default 00:80:10:00:51:00   -> accepted
 
-The third is the one that matters operationally: sudo is not available to
-this process, so the capture is started by hand in --capture external
-mode, and that is exactly where a missing -s0 slips in. A truncated
+The third is the one that matters operationally: where this process can
+neither open a /dev/bpf* node nor sudo, the capture is started by hand in
+--capture external mode, and that is exactly where a missing -s0 slips in. A truncated
 capture makes "the plaintext is absent from every frame" structurally
 true and completely meaningless. The library refuses such a file instead
 of searching it.
@@ -282,13 +282,13 @@ So this suite does it the other way round:
 
 Usage::
 
-    # 1. bring the rig up (needs sudo, once per session)
-    sudo bash tools/rig-up-rrnet-macos.sh en4
-    # 2. start the capture (needs sudo; --capture auto does it for you
-    #    when sudo is passwordless, otherwise run this yourself)
-    sudo tcpdump -i en4 -n -s0 -U -w /tmp/rrnet.pcap
-    # 3. run
-    python3 tools/test_ip65_rrnet_hw.py --capture external
+    # 1. the rig: this suite runs the helper itself when the rig is down
+    #    (and runs rig-down at exit only then); by hand it is
+    sudo -n /usr/local/libexec/c64-harness/rrnet-rig-up.sh
+    # 2. run. --capture auto starts tcpdump itself -- as you when a
+    #    /dev/bpf* node opens read-write (group access_bpf), else sudo -n.
+    #    The NIC comes from the helper's /var/run/c64-harness/rrnet.iface.
+    python3 tools/test_ip65_rrnet_hw.py --host <ip>
 
 Exit codes: 0 PASS / 1 FAIL / 77 nothing ran / 78 inconclusive.
 """
@@ -300,11 +300,14 @@ import logging
 import os
 import random
 import re
+import shutil
+import signal
 import socket
 import string
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -321,6 +324,17 @@ from c64_test_harness.backends.ultimate64 import Ultimate64Transport  # noqa: E4
 from c64_test_harness.backends.ultimate64_client import (  # noqa: E402
     Ultimate64Client, Ultimate64RunnerStuckError,
 )
+try:
+    from c64_test_harness.backends.vice_elevation import (  # noqa: E402
+        bpf_node_openable,
+    )
+except ImportError as _exc:  # pragma: no cover - depends on the install
+    print(f"needs c64-test-harness >= e32bc69 (#547); the installed one "
+          f"lacks it ({_exc}). Upgrade it.", file=sys.stderr)
+    raise SystemExit(77) from _exc
+from c64_test_harness.backends.ultimate64_helpers import (  # noqa: E402
+    U64StateSnapshot, restore_state, snapshot_state,
+)
 from c64_test_harness.backends.ultimate64_helpers import (  # noqa: E402
     get_turbo_mhz, recover, runner_health_check, set_reu, set_turbo_mhz,
 )
@@ -335,31 +349,23 @@ logging.basicConfig(level=logging.INFO,
 
 # --- the rig -------------------------------------------------------------
 #
-# tools/rig-up-rrnet-macos.sh is the SINGLE SOURCE OF TRUTH for the segment's
-# addressing, and it is read here rather than copied. That is not tidiness:
-# the script's subnet moved from 10.0.65.0/24 to 10.0.66.0/24 while this file
-# was being written, to stop it colliding with the feth rig's 10.0.65.1. A
-# suite carrying its own copy of that constant would have kept preflighting a
-# subnet nobody serves, reported "rig down", and sent someone to debug a
-# cable. Anything the script stops defining raises here instead of silently
-# falling back to a stale value.
-DEFAULT_IFACE = os.environ.get("RRNET_IFACE", "en4")
-RIG_SCRIPT = PROJECT_ROOT / "tools" / "rig-up-rrnet-macos.sh"
+# The root-owned rrnet-rig-up.sh helper is the SINGLE SOURCE OF TRUTH for
+# the segment's addressing, and it is read here rather than copied (see
+# ip65_hw_checks.rig_const for why, and for the pinned fallback when it is
+# not installed). The NIC is not a constant at all: the helper finds the
+# adapter by MAC, since BSD names move between Macs and re-plugs, and writes
+# the name it found to IFACEFILE. --iface / $RRNET_IFACE override that.
+DEFAULT_IFACE = os.environ.get("RRNET_IFACE") or None
+RIG_UP_HELPER = hw.RRNET_RIG_UP
+RIG_DOWN_HELPER = hw.RRNET_RIG_DOWN
+RIG_UP_HINT = f"sudo -n {RIG_UP_HELPER}"
 
 
 def _rig_const(name: str) -> str:
-    """Read a top-level `NAME=value` assignment out of the rig script."""
     try:
-        text = RIG_SCRIPT.read_text()
-    except OSError as exc:
-        raise SystemExit(f"FATAL: cannot read {RIG_SCRIPT}: {exc}")
-    m = re.search(rf"^{name}=([^\s#]+)\s*$", text, re.M)
-    if not m:
-        raise SystemExit(
-            f"FATAL: {RIG_SCRIPT} no longer defines {name}=. This suite reads "
-            f"the segment's addressing from the rig script so the two cannot "
-            f"drift apart; update both together.")
-    return m.group(1)
+        return hw.rig_const(name)
+    except (hw.RigConstError, OSError) as exc:
+        raise SystemExit(f"FATAL: {exc}")
 
 
 HOST_IP = _rig_const("HOST_IP")                     # the Mac / WireGuard peer
@@ -374,7 +380,11 @@ C64_IP_PINNED = _rig_const("C64_IP")
 DNSMASQ_PIDFILE = _rig_const("PIDFILE")
 DNSMASQ_LEASEFILE = _rig_const("LEASEFILE")
 DNSMASQ_LOGFILE = _rig_const("LOGFILE")
-DEFAULT_PCAP = "/tmp/rrnet.pcap"
+RIG_IFACEFILE = _rig_const("IFACEFILE")
+#: None: --capture auto writes a fresh per-run file (kept, path logged).
+#: A fixed /tmp/rrnet.pcap could be a stale root-owned file from an old
+#: `sudo tcpdump`, which an unprivileged tcpdump cannot replace.
+DEFAULT_PCAP = None
 
 # WireGuard. The C64 both listens and sends on 51820 (src/constants.inc
 # wg_default_port, latched into wg_local_port by src/boot.s), so the
@@ -799,39 +809,144 @@ def iface_state(iface: str) -> dict:
     }
 
 
-def rig_problems(iface: str) -> list[str]:
-    """Why the rig is not usable, or [] if it is."""
+def rig_problems(iface: Optional[str]) -> list[str]:
+    """Why the rig is not usable, or [] if it is.
+
+    *iface* None means "the NIC the helper brought the rig up on"; with no
+    IFACEFILE there is none, and that IS the rig being down.
+    """
     bad = []
+    up_on = hw.rig_iface(RIG_IFACEFILE)
+    if iface is None:
+        if up_on is None:
+            return [f"rig down: no {RIG_IFACEFILE} (the helper writes it on "
+                    f"up and removes it on down) — run `{RIG_UP_HINT}`"]
+        iface = up_on
+    elif up_on is not None and up_on != iface:
+        bad.append(f"the helper brought the rig up on {up_on}, not {iface} "
+                   f"— drop --iface/$RRNET_IFACE or point it there")
     st = iface_state(iface)
     if not st.get("exists"):
-        return [f"no such interface: {iface}"]
+        return bad + [f"no such interface: {iface}"]
     if not st.get("active"):
         bad.append(f"{iface} is not 'status: active' — cable unplugged, or "
                    f"the C64 is off (a CS8900a only lights the link when the "
                    f"cartridge has power)")
     if st.get("inet") != HOST_IP:
         bad.append(f"{iface} holds {st.get('inet')}, expected {HOST_IP} — run "
-                   f"`sudo bash tools/rig-up-rrnet-macos.sh {iface}`")
+                   f"`{RIG_UP_HINT}`")
     if st.get("media") and "10baseT" not in st["media"]:
         bad.append(f"{iface} negotiated '{st['media']}', not 10baseT — an "
                    f"RR-Net (CS8900a) is 10 Mbps only, so this is probably "
                    f"the wrong NIC")
-    if not os.path.exists(DNSMASQ_PIDFILE):
-        bad.append(f"no {DNSMASQ_PIDFILE} — dnsmasq is not serving DHCP on "
-                   f"this segment, and src/boot.s do_net_init RETURNS on a "
-                   f"DHCP failure (there is no static-IP path)")
-    else:
-        try:
-            pid = int(open(DNSMASQ_PIDFILE).read().strip())
-            os.kill(pid, 0)
-        except (ValueError, ProcessLookupError, PermissionError, OSError) as e:
-            if not isinstance(e, PermissionError):
-                bad.append(f"{DNSMASQ_PIDFILE} exists but the process is gone "
-                           f"({e!r}) — a stale pidfile, rig is down")
+    alive, why = dnsmasq_alive()
+    if not alive:
+        bad.append(f"rig down: {why} — dnsmasq is not serving DHCP on this "
+                   f"segment, and src/boot.s do_net_init RETURNS on a DHCP "
+                   f"failure (there is no static-IP path)")
     return bad
 
 
-def selftest_rig_probe(iface: str) -> list[str]:
+def dnsmasq_alive() -> tuple[bool, str]:
+    """(alive, why-not) for the helper's dnsmasq, from its pidfile.
+
+    EPERM from kill(pid, 0) means the process exists: it runs as nobody.
+    """
+    try:
+        pid = int(open(DNSMASQ_PIDFILE).read().strip())
+    except FileNotFoundError:
+        return False, f"no {DNSMASQ_PIDFILE}"
+    except (OSError, ValueError) as e:
+        return False, f"{DNSMASQ_PIDFILE} unreadable ({e!r})"
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True, ""
+    except OSError as e:
+        return False, (f"{DNSMASQ_PIDFILE} names pid {pid} but the process "
+                       f"is gone ({e!r}) — a stale pidfile")
+    return True, ""
+
+
+def rig_is_down() -> bool:
+    """The bring-up predicate: no IFACEFILE, or the helper's dnsmasq dead.
+
+    Deliberately narrower than rig_problems(): a rig that is up but unwell
+    (link down, wrong media) is not ours to restart, because up empties the
+    lease file and log another session may be reading.
+    """
+    return hw.rig_iface(RIG_IFACEFILE) is None or not dnsmasq_alive()[0]
+
+
+#: Set when THIS process ran rig-up; only then does it run rig-down.
+_brought_rig_up = False
+
+
+#: How a rig helper is invoked; the self-test swaps in a stub without sudo.
+HELPER_ARGV_PREFIX = ["sudo", "-n"]
+HELPER_TIMEOUT_S = 120.0
+#: After a SIGTERM (SystemExit) or any interrupt mid-helper: how long the
+#: helper may still run. Killing sudo mid-raise would leave the NIC MANUAL
+#: and rrnet.iface written with no dnsmasq -- a half-raised rig -- so the
+#: helper is allowed to FINISH, and rig-down then lowers what it raised.
+HELPER_GRACE_S = 30.0
+
+
+def _run_helper(path: Path) -> bool:
+    """`sudo -n <path>` -- never prompts; False (with the reason) if refused."""
+    if not os.access(path, os.X_OK):
+        log.error("%s not installed", path)
+        return False
+    p = subprocess.Popen(HELPER_ARGV_PREFIX + [str(path)],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         text=True)
+    try:
+        out, err = p.communicate(timeout=HELPER_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        p.communicate()
+        log.error("%s did not finish in %.0fs", path, HELPER_TIMEOUT_S)
+        return False
+    except BaseException:
+        try:
+            p.communicate(timeout=HELPER_GRACE_S)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.communicate()
+        raise
+    for line in (out + err).splitlines():
+        log.info("    %s", line)
+    if p.returncode != 0:
+        log.error("%s exited %d", path, p.returncode)
+        return False
+    return True
+
+
+def try_rig_up() -> bool:
+    """Run rig-up iff the rig is down. True = the helper succeeded.
+
+    Whenever the helper is CALLED, this process owns the rig from then on,
+    success or not -- see below.
+    """
+    global _brought_rig_up
+    if not rig_is_down():
+        return False
+    log.info("=== rig down — running %s ===", RIG_UP_HINT)
+    # Ours from BEFORE the call: rig-up sets the NIC MANUAL and writes
+    # rrnet.iface before it starts dnsmasq, so an up that fails there (or a
+    # SIGTERM mid-call) has already changed the host. rig-down is safe in
+    # any state, so owning a half-raised rig costs nothing and leaves none.
+    _brought_rig_up = True
+    return _run_helper(RIG_UP_HELPER)
+
+
+def rig_down_if_ours() -> None:
+    if _brought_rig_up:
+        log.info("=== tearing down the rig this run brought up ===")
+        _run_helper(RIG_DOWN_HELPER)
+
+
+def selftest_rig_probe() -> list[str]:
     """Prove rig_problems() can actually say no.
 
     Its answer for a healthy rig is an EMPTY LIST, and an empty list is
@@ -869,8 +984,9 @@ class Capture:
 
     Three modes, and the difference matters for what may be CLAIMED:
 
-      auto      start it here with `sudo -n`. Works only where sudo does
-                not want a password.
+      auto      start it here: as this user when a /dev/bpf* node opens
+                read-write (group access_bpf), else with `sudo -n`, which
+                works only where sudo does not want a password.
       external  someone else started it (the usual case on this bench —
                 sudo prompts). We assert the file exists and GROWS across
                 the run rather than trusting that it is the right one.
@@ -891,16 +1007,23 @@ class Capture:
         self.note = ""
 
     @property
+    def argv(self) -> list[str]:
+        base = ["tcpdump", "-i", self.iface, "-n", "-s0", "-U", "-w",
+                self.path]
+        return base if bpf_node_openable() else ["sudo", "-n"] + base
+
+    @property
     def command(self) -> str:
-        return (f"sudo tcpdump -i {self.iface} -n -s0 -U -w {self.path}")
+        # For a human to paste: interactive sudo, not -n.
+        return " ".join(self.argv).replace("sudo -n ", "sudo ", 1)
 
     def start(self) -> bool:
         if self.mode == "off":
             self.note = "capture disabled (--capture off)"
             return False
         if self.mode == "auto":
-            if subprocess.run(["sudo", "-n", "true"],
-                              capture_output=True).returncode != 0:
+            if self.argv[0] == "sudo" and subprocess.run(
+                    ["sudo", "-n", "true"], capture_output=True).returncode != 0:
                 self.note = ("sudo needs a password, so this process cannot "
                              "start tcpdump; falling back to --capture "
                              "external")
@@ -912,8 +1035,7 @@ class Capture:
                 except OSError:
                     pass
                 self.proc = subprocess.Popen(
-                    ["sudo", "-n", "tcpdump", "-i", self.iface, "-n", "-s0",
-                     "-U", "-w", self.path],
+                    self.argv,
                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
                 time.sleep(2.0)          # let it open the file and attach
                 if self.proc.poll() is not None:
@@ -932,17 +1054,17 @@ class Capture:
                 return False
             self.note = f"external capture at {self.path}"
         self.started_size = os.path.getsize(self.path)
-        # THE BRACKET. In --capture external (the mode we actually use,
-        # because sudo is blocked) the file is NOT ours and may already
+        # THE BRACKET. In --capture external (the mode used wherever this
+        # process cannot start tcpdump itself) the file is NOT ours and may already
         # hold a previous session's traffic; nothing truncates it. Parsing
         # the whole file would then score an earlier run's frames as this
         # run's evidence — including, in the worst case, an earlier run's
         # successful handshake. So the run's start time is recorded here
         # and every frame is filtered against it in stop().
         self.t_start = time.time()
-        # When the CAPTURE started, which is NOT when the run started. On
-        # this rig tcpdump is hand-started (sudo is unavailable to this
-        # process) and has been running for minutes, so every lead-in frame
+        # When the CAPTURE started, which is NOT when the run started. A
+        # hand-started tcpdump (--capture external) has typically been
+        # running for minutes, so every lead-in frame
         # legitimately predates the run. Feeding the run's start time to a
         # bracket check would fire "capture-started-before-the-run" on a
         # perfectly good capture. The tap's own start time is the honest
@@ -1470,8 +1592,9 @@ def set_cartridge_external(client, run: dict) -> Optional[str]:
 
     It is still set per run, which is correct for a different reason: the
     device is shared and another lane may have left it anywhere. The
-    harness's `snapshot_state` does not cover it (that covers `Cartridge`,
-    a different item), so restoring it is ours to do.
+    harness's `snapshot_state` covers it since c64-test-harness#221, and
+    restore_device() puts it back from the entry snapshot; the value
+    returned here is only the fallback when that snapshot failed.
     """
     before = client.get_config_item(CAT_CART, ITEM_CART_PREF)
     log.info("%s raw payload: %r", ITEM_CART_PREF, before)
@@ -1684,6 +1807,85 @@ def set_turbo_checked(client, mhz: int) -> int:
     return actual
 
 
+#: The snapshot fields the restore must read back equal to the entry state:
+#: every field restore_state writes. test_live_tools_wifi case 9 holds this
+#: SET-EQUAL to U64StateSnapshot's fields, so a field the harness adds (or
+#: one dropped here) turns it red instead of going unchecked.
+RESTORED_FIELDS = ("turbo_control", "cpu_speed", "reu_enabled", "reu_size",
+                   "cartridge", "badline_timing", "bus_operation_mode",
+                   "sid_addressing", "cartridge_preference")
+
+
+def restore_device(client, entry, cart_prev: Optional[str], run: dict) -> None:
+    """Restore the entry state, then reset the C64 -- the reset in a
+    finally, so a SIGTERM (SystemExit) or any error inside the restore
+    cannot leave our PRG running and driving the command interface."""
+    try:
+        _restore_entry_state(client, entry, cart_prev, run)
+    finally:
+        try:
+            client.reset()
+            time.sleep(1.0)
+            log.info("restore: C64 reset")
+        except Exception as exc:                              # noqa: BLE001
+            log.error("reset FAILED: %s — our PRG may still be running and "
+                      "driving the command interface for the next lane", exc)
+            check(False, "restore: C64 reset issued", repr(exc))
+
+
+def _restore_entry_state(client, entry, cart_prev: Optional[str],
+                         run: dict) -> None:
+    """Put the shared device back to its ENTRY state, and prove it.
+
+    This used to restore a fixed SAFE state -- set_turbo_mhz(1), REU off,
+    Cartridge Preference back -- which is not the entry state: 1 MHz is
+    Turbo Control "Manual", so a device found at "Off" was left at
+    "Manual" (measured 2026-10-21 on U64E 601A96). The harness's own
+    snapshot/restore covers turbo mode and speed, REU, cartridge and
+    Cartridge Preference (#221), so it does the work, and every field in
+    RESTORED_FIELDS is read back and compared. Without an entry snapshot it
+    falls back to the safe state, and says so.
+    """
+    if entry is None:
+        try:
+            set_turbo_mhz(client, 1)
+            time.sleep(1.0)
+            actual = get_turbo_mhz(client)
+            set_reu(client, False)
+            log.info("restore (no entry snapshot): turbo=%s MHz, REU off",
+                     actual)
+            run["restored_mhz"] = actual
+            check(actual == 1, "restore: clock read back at 1 MHz",
+                  f"device reads {actual!r} MHz")
+        except Exception as exc:                              # noqa: BLE001
+            log.error("clock/REU restore FAILED: %s — the device is "
+                      "shared, check it before you walk away", exc)
+            check(False, "restore: clock and REU restored", repr(exc))
+        try:
+            if cart_prev:
+                client.set_config_item(CAT_CART, ITEM_CART_PREF, cart_prev)
+                log.info("restore: %s back to %r", ITEM_CART_PREF, cart_prev)
+        except Exception as exc:                              # noqa: BLE001
+            log.error("could not restore %s to %r: %s", ITEM_CART_PREF,
+                      cart_prev, exc)
+        return
+    try:
+        restore_state(client, entry)
+        time.sleep(TURBO_SETTLE_S)
+        after = snapshot_state(client)
+        run["exit_state"] = after
+        diff = {f: (getattr(entry, f), getattr(after, f))
+                for f in RESTORED_FIELDS
+                if getattr(entry, f) != getattr(after, f)}
+        log.info("restore: exit state %s", after)
+        check(not diff, "restore: device back at its entry state",
+              f"(entry, now) differ: {diff}")
+    except Exception as exc:                                  # noqa: BLE001
+        log.error("entry-state restore FAILED: %s — the device is shared, "
+                  "check it before you walk away", exc)
+        check(False, "restore: device back at its entry state", repr(exc))
+
+
 def stage_config(tr, L, priv: bytes, pub: bytes, peer_pub: bytes) -> int:
     """Stage cfg_* for the rig's own responder. Returns the TAI64N base."""
     tr.write_memory(L["cfg_static_priv"], priv)
@@ -1715,10 +1917,16 @@ def stage_config(tr, L, priv: bytes, pub: bytes, peer_pub: bytes) -> int:
 # wrong and NOTHING about our build can be concluded from a failure — which
 # is worth two minutes to learn instead of an hour misattributing a failed
 # WireGuard run.
-PINGSTATIC_DIR = Path("/Users/someone/Documents/c64-test-harness/"
-                      ".claude/scratch/rrnet-ip65")
+#
+# Tracked source in tools/pingstatic/, built by `make pingstatic` (it lived in
+# another repo's scratch directory until 2026-10-21, and a migrated Mac did
+# not have it). The bytes are pinned: a toolchain or ip65 change that alters
+# them yields a different control, which nothing has measured.
+PINGSTATIC_DIR = PROJECT_ROOT / "build_pingstatic"
 PINGSTATIC_PRG = PINGSTATIC_DIR / "pingstatic-1066.prg"
-PINGSTATIC_IP = "10.0.66.200"      # static, and the same address the rig pins
+PINGSTATIC_SHA256 = ("daec793dfaf587c33e797846ffe870496f90dbf6"
+                     "fec20742bb61c0079e54ed7c")
+PINGSTATIC_SRC = PROJECT_ROOT / "tools" / "pingstatic" / "pingstatic-1066.s"
 
 
 #: A ~29-byte 6502 stub: enable the RR clockport, set PPPtr = $0000, read
@@ -1811,6 +2019,63 @@ def probe_cs8900a(tr, run: dict, *, reset_first: bool = False) -> Optional[int]:
     return pid
 
 
+def pingstatic_addresses(src: Path | None = None) -> dict:
+    """The static addresses the control is built with: {label: dotted}."""
+    out = {}
+    text = (src or PINGSTATIC_SRC).read_text()
+    for m in re.finditer(r"^(my_ip|my_gateway|peer_ip):\s*\.byte\s+"
+                         r"(\d+),(\d+),(\d+),(\d+)", text, re.M):
+        out[m.group(1)] = ".".join(m.group(i) for i in range(2, 6))
+    return out
+
+
+def ensure_pingstatic() -> tuple[int, str]:
+    """``(0, "")`` when the control is usable, else ``(exit code, why)``.
+
+    Host-only, before rig-up and the lock: a run without its control
+    cannot tell a result from a broken bench, so it should cost neither.
+    The bench-health control's prerequisites are decided HERE, once --
+    rig_problems() and stage_bench_health() used to re-check existence,
+    dominated by this.
+
+      77  the environment lacks something: the toolchain, ip65, a control
+          whose bytes are not the pinned ones (a different toolchain), or a
+          control whose static addresses are not the rig's (subnet drift --
+          which used to read as "the bench never worked").
+       1  `make pingstatic` failed on a toolchain that is present: the
+          source is tracked, so that is our defect, not the bench's.
+    """
+    want = {"my_ip": hw.rig_const("C64_IP"), "my_gateway": hw.rig_const("HOST_IP"),
+            "peer_ip": hw.rig_const("HOST_IP")}
+    got = pingstatic_addresses()
+    if got != want:
+        return EXIT_NOTHING_RAN, (
+            f"{PINGSTATIC_SRC.name} is built for {got} but the rig serves "
+            f"{want}: re-target the control (and re-pin its sha256)")
+    if not PINGSTATIC_PRG.exists():
+        missing = [t for t in ("make", "ca65", "ld65") if not shutil.which(t)]
+        if missing or not (PROJECT_ROOT / "ip65").exists():
+            return EXIT_NOTHING_RAN, (
+                f"cannot build the control: missing "
+                f"{missing or ['the ip65 checkout (PROJECT_ROOT/ip65)']}")
+        p = subprocess.run(["make", "pingstatic"], cwd=PROJECT_ROOT,
+                           capture_output=True, text=True)
+        if p.returncode != 0:
+            return EXIT_FAIL, (f"`make pingstatic` failed on tracked source:\n"
+                               f"{p.stdout[-1500:]}{p.stderr[-1500:]}")
+    got_sha = hashlib.sha256(PINGSTATIC_PRG.read_bytes()).hexdigest()
+    if got_sha != PINGSTATIC_SHA256:
+        return EXIT_NOTHING_RAN, (
+            f"{PINGSTATIC_PRG} has sha256 {got_sha}, not the pinned "
+            f"{PINGSTATIC_SHA256}: a different control than the one "
+            f"recorded. Rebuild (`rm -r {PINGSTATIC_DIR}; make "
+            f"pingstatic`); if it still differs, the toolchain or ip65 "
+            f"moved — re-measure it before re-pinning.")
+    log.info("bench-health control %s sha256 %s… (pinned)", PINGSTATIC_PRG,
+             got_sha[:16])
+    return 0, ""
+
+
 def stage_bench_health(tr, client, run: dict, mhz: int) -> bool:
     """Run the known-good stock-ip65 ping control at *mhz*.
 
@@ -1838,10 +2103,6 @@ def stage_bench_health(tr, client, run: dict, mhz: int) -> bool:
     """
     log.info("--- bench-health control: stock ip65 ping at %d MHz ---", mhz)
     key = f"bench_health_{mhz}mhz"
-    if not PINGSTATIC_PRG.exists():
-        skipped(f"bench-health control passed at {mhz} MHz",
-                f"{PINGSTATIC_PRG} not found")
-        return False
     set_turbo_checked(client, mhz)
     if not load_prg_verified(tr, PINGSTATIC_PRG.read_bytes(),
                              f"pingstatic@{mhz}MHz", run):
@@ -2114,7 +2375,7 @@ def stage_boot_and_dhcp(tr, client, L, args, run: dict) -> bool:
         # than an error.
         check(fmt_mac(mac) == C64_MAC_PINNED.lower(),
               f"cfg_mac is the address the rig pins ({C64_MAC_PINNED})",
-              f"ip65 adopted {fmt_mac(mac)}; tools/rig-up-rrnet-macos.sh "
+              f"ip65 adopted {fmt_mac(mac)}; the rig helper "
               f"reserves {C64_IP_PINNED} for {C64_MAC_PINNED} via "
               f"--dhcp-host. A mismatch means the static lease did not "
               f"apply and this run took a pool address.")
@@ -2636,7 +2897,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                         "network and is unrelated to the RR-Net data path "
                         "under test.")
     p.add_argument("--iface", default=DEFAULT_IFACE,
-                   help="the Mac NIC cabled to the RR-Net (default en4)")
+                   help="the Mac NIC cabled to the RR-Net (default: "
+                        "$RRNET_IFACE, else the one the rig helper wrote "
+                        f"to {RIG_IFACEFILE})")
+    p.add_argument("--no-rig-up", action="store_true",
+                   help="never run the rig helper; a down rig is exit 77")
     p.add_argument("--turbo", type=int, default=48,
                    help="clock the handshake runs at. The budget is DERIVED "
                         "from it (handshake_budget), never inherited.")
@@ -2655,11 +2920,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                         "reported)")
     p.add_argument("--capture", choices=("auto", "external", "off"),
                    default="auto",
-                   help="auto: start tcpdump with `sudo -n`, falling back to "
+                   help="auto: start tcpdump here (as you with BPF group "
+                        "access, else `sudo -n`), falling back to "
                         "external if sudo wants a password. external: a "
                         "capture is already running to --pcap. off: no wire "
                         "stage (its checks are recorded SKIP).")
-    p.add_argument("--pcap", default=DEFAULT_PCAP)
+    p.add_argument("--pcap", default=DEFAULT_PCAP,
+                   help="capture file (default for --capture auto: a fresh "
+                        "per-run file; REQUIRED for --capture external)")
     p.add_argument("--mac", type=parse_mac, default=None, metavar="AA:BB:..",
                    help="patch ip65's CS8900a driver MAC table before 'I'. "
                         "Default is to OBSERVE the address ip65 adopts and "
@@ -2691,21 +2959,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         repo=Path(__file__).resolve().parent.parent)
     for _line in hw.format_provenance(prov):
         log.info("%s", _line)
-    run: dict = {"seed": seed, "iface": args.iface, "host": args.host,
-                 "provenance": prov}
-    # The Mac's own MAC. check_c64_originated needs BOTH to tell a C64
-    # frame from a Mac frame — and on a two-station cable a frame from a
-    # third MAC means the capture is not of this segment at all.
-    _st = iface_state(args.iface)
-    if _st.get("ether"):
-        run["host_mac"] = _st["ether"]
+    run: dict = {"seed": seed, "host": args.host, "provenance": prov}
 
     # --- self-tests first: prove the alarms can sound, before anything ---
     log.info("--- self-tests (proving the checks can fail) ---")
     for name, bad in (("ip65_hw_checks leak/origin alarms",
                        selftest_library()),
                       ("WIRE_CHECKS exit gate", selftest_wire_gate()),
-                      ("rig probe", selftest_rig_probe(args.iface))):
+                      ("rig probe", selftest_rig_probe())):
         if bad:
             log.error("SELF-TEST FAILED (%s):", name)
             for b in bad:
@@ -2716,15 +2977,65 @@ def main(argv: Optional[list[str]] = None) -> int:
         log.info("  ok  %s self-test", name)
 
     # --- rig preflight (host only) ---
+    # Up ONLY when down, and never over a running rig: up empties the lease
+    # file and log, which another session may be scoring against.
+    rc, why = ensure_pingstatic()
+    if rc:
+        log.error("bench-health control unusable (exit %d): %s", rc, why)
+        return rc
+    # THE LOCK SPANS THE RIG. The RR-Net segment is shared with c64-https,
+    # and the agreed protocol is to hold the U64E's DeviceLock from rig-up
+    # to rig-down: up empties the lease file another lane may be scoring,
+    # and down takes the NIC back to DHCP under a run that is using it.
+    lock = DeviceLock(args.host)
+    try:
+        lock.acquire_or_raise(timeout=LOCK_TIMEOUT_S)
+    except DeviceLockTimeout as exc:
+        log.error("DeviceLock busy after %.0fs: %s — another lane has the "
+                  "device; doing nothing rather than racing it",
+                  LOCK_TIMEOUT_S, exc)
+        return EXIT_NOTHING_RAN
+    try:
+        return _main_locked(args, run, rng)
+    finally:
+        # Every exit, SIGTERM included (_main_with_sigterm): rig-down while
+        # the lock is still ours, then the lock.
+        try:
+            rig_down_if_ours()
+        finally:
+            lock.release()
+            log.info("device lock released")
+
+
+def _main_locked(args, run: dict, rng: random.Random) -> int:
+    """Everything from rig-up to the summary. Called holding the lock."""
+    if not args.no_rig_up:
+        try_rig_up()
     problems = rig_problems(args.iface)
     if problems:
         log.error("RIG DOWN — skipping (exit 77):")
         for pr in problems:
             log.error("    %s", pr)
-        log.error("Bring it up with: sudo bash tools/rig-up-rrnet-macos.sh %s",
-                  args.iface)
+        log.error("Bring it up with: %s", RIG_UP_HINT)
         return EXIT_NOTHING_RAN
-    log.info("rig up on %s: %s", args.iface, iface_state(args.iface))
+    iface = args.iface or hw.rig_iface(RIG_IFACEFILE)
+    run["iface"] = iface
+    run["rig_brought_up_by_this_run"] = _brought_rig_up
+    log.info("rig up on %s: %s", iface, iface_state(iface))
+    # The Mac's own MAC. check_c64_originated needs BOTH to tell a C64
+    # frame from a Mac frame — and on a two-station cable a frame from a
+    # third MAC means the capture is not of this segment at all.
+    # NOT ifconfig's word alone: macOS redacts the address to some
+    # processes (hw.REDACTED_MAC), and both 2026-10-21 runs then scored the
+    # Mac's own frames as "frames from unexpected MACs".
+    host_mac, why_not, note = hw.resolve_host_mac(
+        _rig_const("RRNET_NIC_MAC"), iface_state(iface).get("ether"))
+    if why_not:
+        log.error("RIG PROBLEM — skipping (exit 77): %s", why_not)
+        return EXIT_NOTHING_RAN
+    log.info("host MAC %s (%s)", host_mac, note)
+    run["host_mac"] = host_mac
+    run["host_mac_source"] = note
 
     # --- build ---
     build_dir = PROJECT_ROOT / args.build
@@ -2756,23 +3067,28 @@ def main(argv: Optional[list[str]] = None) -> int:
              "never logged)", c64_pub.hex()[:16], host_pub.hex()[:16])
 
     # --- capture BEFORE the device boots, so DHCP is in it ---
-    cap = Capture(args.capture, args.iface, args.pcap)
-    if not cap.start():
-        log.warning("continuing WITHOUT a capture: %s", cap.note)
-    run["capture"] = {"mode": cap.mode, "note": cap.note, "path": args.pcap}
-
-    lock = DeviceLock(args.host)
-    try:
-        lock.acquire_or_raise(timeout=LOCK_TIMEOUT_S)
-    except DeviceLockTimeout as exc:
-        log.error("DeviceLock busy after %.0fs: %s — another lane has the "
-                  "device; doing nothing rather than racing it",
-                  LOCK_TIMEOUT_S, exc)
-        cap.stop()
+    pcap = args.pcap
+    if pcap is None and args.capture == "external":
+        log.error("--capture external needs --pcap PATH (the file the "
+                  "running tcpdump writes) — skipping (exit 77)")
         return EXIT_NOTHING_RAN
+    if pcap is None:
+        pcap = os.path.join(tempfile.mkdtemp(prefix="rrnet-cap-"),
+                            "rrnet.pcap")
+    cap = Capture(args.capture, iface, pcap)
+    # A capture that will not start is found out HERE, before any device
+    # time: the wire assertions are this run's whole claim (exit 78 exists
+    # for a capture that dies mid-run, not for one that never ran).
+    if not cap.start() and args.capture != "off":
+        log.error("the capture did not start — skipping before touching "
+                  "the device (exit 77): %s", cap.note)
+        return EXIT_NOTHING_RAN
+    log.info("capture file: %s", pcap)
+    run["capture"] = {"mode": cap.mode, "note": cap.note, "path": pcap}
 
     client = None
     cart_prev: Optional[str] = None
+    entry = None
     transport: dict = {}
     # True once control is bound for stage_wire (completed body or caught
     # abort), which then owns cap.stop(); see the finally below.
@@ -2786,6 +3102,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         log.info("probe: %s", probe)
         client = Ultimate64Client(host=args.host, timeout=30.0)
         tr = Ultimate64Transport(host=args.host, timeout=30.0, client=client)
+        # The ENTRY state, before this run writes anything: the restore puts
+        # the shared device back to it, not to a "safe" state of our choosing.
+        try:
+            entry = snapshot_state(client)
+            run["entry_state"] = entry
+            log.info("entry state: %s", entry)
+        except Exception as exc:                              # noqa: BLE001
+            log.error("could not snapshot the entry state (%r); the restore "
+                      "falls back to 1 MHz / REU off", exc)
         try:
             runner_health_check(client)
         except Ultimate64RunnerStuckError as exc:
@@ -2800,9 +3125,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 
         # 1. Cartridge Preference = External. Set per run because the
         #    device is SHARED, not because the item self-clears (that claim
-        #    was ours, unmeasured, and our own restore explains it).
-        #    for teardown — the harness's snapshot_state does NOT cover
-        #    this item, only `Cartridge`, which is the preset.
+        #    was ours, unmeasured, and our own restore explains it). The
+        #    entry snapshot above restores it; cart_prev is the fallback.
         sample_de00(tr, run, "1-before-External")
         cart_prev = set_cartridge_external(client, run)
         sample_de00(tr, run, "2-after-External")
@@ -2925,59 +3249,21 @@ def main(argv: Optional[list[str]] = None) -> int:
         check(False, "the run completed without aborting", f"{exc}")
         body_done = True        # an abort still reaches stage_wire
     finally:
-        # lock.release() runs even if the restore raises. stage_wire stops
-        # the capture only when the body reached its end AND this cleanup
-        # finished without raising; every other exit stops it in the
-        # outermost finally here. The two cases are complements: no double stop.
+        # The lock is NOT released here: main() holds it until after
+        # rig-down (see there). stage_wire stops the capture only when the
+        # body reached its end AND this cleanup finished without raising;
+        # every other exit stops it in the outermost finally here. The two
+        # cases are complements: no double stop.
         cleaned_up = False
         try:
-            try:
-                # Restore, and restore on the ABORT path too — that is the path
-                # where it matters most, and the one where "restore" statements
-                # chained onto a successful teardown quietly do not run. Clock and
-                # REU in one try, the reset in its own: the reset is what leaves
-                # the command interface idle for whoever has the device next, and
-                # it must happen even when the clock restore is what failed.
-                if client is not None:
-                    try:
-                        set_turbo_mhz(client, 1)
-                        time.sleep(1.0)
-                        actual = get_turbo_mhz(client)
-                        set_reu(client, False)
-                        log.info("restore: turbo=%s MHz (restored=%s), REU off",
-                                 actual, actual == 1)
-                        run["restored_mhz"] = actual
-                        # A restore that did not take FAILS the run (round-3
-                        # review of PR #178); it used to be logged only.
-                        check(actual == 1, "restore: clock read back at 1 MHz",
-                              f"device reads {actual!r} MHz")
-                    except Exception as exc:                          # noqa: BLE001
-                        log.error("clock/REU restore FAILED: %s — the device is "
-                                  "shared, check it before you walk away", exc)
-                        check(False, "restore: clock and REU restored",
-                              repr(exc))
-                    try:
-                        if cart_prev:
-                            client.set_config_item(CAT_CART, ITEM_CART_PREF, cart_prev)
-                            log.info("restore: %s back to %r", ITEM_CART_PREF,
-                                     cart_prev)
-                    except Exception as exc:                          # noqa: BLE001
-                        log.error("could not restore %s to %r: %s — the device is "
-                                  "shared and this item is not covered by the "
-                                  "harness's snapshot_state", ITEM_CART_PREF,
-                                  cart_prev, exc)
-                    try:
-                        client.reset()
-                        time.sleep(1.0)
-                        log.info("restore: C64 reset")
-                    except Exception as exc:                          # noqa: BLE001
-                        log.error("reset FAILED: %s — our PRG may still be running "
-                                  "and driving the command interface for the next "
-                                  "lane", exc)
-                        check(False, "restore: C64 reset issued", repr(exc))
-            finally:
-                lock.release()
-                log.info("device lock released")
+            # Restore, and restore on the ABORT path too — that is the path
+            # where it matters most, and the one where "restore" statements
+            # chained onto a successful teardown quietly do not run. Clock and
+            # REU in one try, the reset in its own: the reset is what leaves
+            # the command interface idle for whoever has the device next, and
+            # it must happen even when the clock restore is what failed.
+            if client is not None:
+                restore_device(client, entry, cart_prev, run)
             cleaned_up = True
         finally:
             if not (body_done and cleaned_up):
@@ -2993,5 +3279,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     return summarise()
 
 
+def _main_with_sigterm() -> int:
+    # SIGTERM becomes SystemExit so a killed run unwinds through main()'s
+    # finally blocks -- device restore, rig-down, lock release, in that
+    # order -- instead of leaving all three behind.
+    signal.signal(signal.SIGTERM, lambda _sig, _frame: sys.exit(143))
+    return main()
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_main_with_sigterm())

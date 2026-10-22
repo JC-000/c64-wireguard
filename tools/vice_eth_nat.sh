@@ -145,7 +145,7 @@ do_up() {
     require_root
     resolve_egress
     iface_exists "$RIG_IFACE" \
-        || warn "rig interface '$RIG_IFACE' is not up — run rig-up-macos.sh first"
+        || warn "rig interface '$RIG_IFACE' is not up — run 'sudo -n /usr/local/libexec/c64-harness/c64-https-rig-up.sh' first"
 
     # Save prior state exactly once, so a repeated `up` cannot overwrite the
     # real pre-NAT values with the ones this script itself installed.

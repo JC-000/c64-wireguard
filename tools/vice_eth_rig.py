@@ -6,17 +6,22 @@ UDP echo / datagram-count suite and the handshake+rekey suite — share one
 rig preflight, one boot sequence and one set of map parsers instead of
 three drifting copies.
 
-THE RIG (macOS): c64-https' tools/rig-up-macos.sh creates an feth pair,
-puts the host on feth1 (10.0.65.1/24), runs dnsmasq there as the DHCP
-server, and VICE's pcap driver attaches to feth0. One privileged setup per
-boot, NOT done here; a missing prerequisite is reported by
-``rig_problems()`` so a suite can exit 77 (skipped) with the reason rather
+THE RIG (macOS): the host's root-owned helper ``RIG_UP_HELPER`` (run as
+``sudo -n``; it replaced c64-https' tools/rig-up-macos.sh, deleted in
+c64-https ef22225) creates an feth pair, puts the host on feth1
+(10.0.65.1/24), runs dnsmasq there as the DHCP server, and VICE's pcap
+driver attaches to feth0. BPF access is the access_bpf group, not a chmod.
+One privileged setup per boot, NOT done here; a missing prerequisite is
+reported by ``rig_problems()`` so a suite can exit 77 (skipped) with the reason rather
 than fail confusingly against dead silence.
 
-VICE: stock macOS VICE gates pcap on euid 0 and Homebrew's bottle has
-networking compiled out (c64-test-harness#144). ``$VICE_ETHERNET_BIN`` (or
-``--vice-bin``) must name a build that can do it; ~/opt/vice-eth/bin/x64sc
-is the patched 3.10 on this bench.
+VICE: stock VICE — Homebrew's own x64sc included — selects pcap only at
+euid 0, and older bottles had networking compiled out entirely
+(c64-test-harness#144). ``$VICE_ETHERNET_BIN`` (or
+``--vice-bin``) must name a build that can do it; the default is the
+harness's keg-only Homebrew ``vice-eth`` (c64-test-harness
+scripts/build-vice-eth.sh), which runs pcap as this user when a
+``/dev/bpf*`` node opens read-write (``RAWNET_BPF_PERMISSIONS``).
 
 WARP AND DHCP: warp compresses ip65's DHCP retry budget below dnsmasq's
 OFFER latency and DHCP fails every time. ``boot_and_net_init`` therefore
@@ -54,7 +59,6 @@ from __future__ import annotations
 
 import os
 import re
-import stat
 import subprocess
 import sys
 import threading
@@ -69,10 +73,21 @@ from c64_test_harness.backends.vice_lifecycle import (  # noqa: E402
     ViceConfig, ViceProcess,
 )
 from c64_test_harness.backends.vice_manager import PortAllocator  # noqa: E402
-from c64_test_harness.backends.vice_elevation import (  # noqa: E402
-    ALLOW_UNELEVATED_ENV, driver_requires_root, effective_driver_name,
-    rawnet_capability, vice_binary_supports_ethernet,
-)
+try:
+    from c64_test_harness.backends.vice_elevation import (  # noqa: E402
+        ALLOW_UNELEVATED_ENV, BPF_PERMISSIONS_FEATURE, PATCHED_VICE_CANDIDATES,
+        bpf_node_openable, driver_requires_root, effective_driver_name,
+        patched_vice_binary, rawnet_capability, vice_binary_supports_ethernet,
+        vice_features,
+    )
+except ImportError as _exc:  # pragma: no cover - depends on the install
+    # A missing prerequisite: 77, as every other one exits. The message is
+    # neutral -- gate suites import this module too, and "SKIP:" would
+    # misread there; the requirement is what matters.
+    print(f"needs c64-test-harness >= e32bc69 (#547, the patched-VICE "
+          f"API); the installed one lacks it ({_exc}). Upgrade it.",
+          file=sys.stderr)
+    raise SystemExit(77) from _exc
 
 
 def vice_rawnet_problems(vice_bin: str, driver: str = "pcap") -> list[str]:
@@ -90,74 +105,81 @@ def vice_rawnet_problems(vice_bin: str, driver: str = "pcap") -> list[str]:
 
       * the binary was BUILT with raw-network support —
         ``vice_binary_supports_ethernet()``, which reads ``x64sc
-        -features``. This is the one that separates Homebrew's bottle
-        (networking compiled out, c64-test-harness#144) from the patched
-        ~/opt/vice-eth build, and no amount of node permission ever said
-        anything about it.
+        -features``. This is the one that separates a build with
+        networking compiled out (c64-test-harness#144) from one that has
+        it, and no amount of node permission ever said anything about it.
       * ``archdep_rawnet_capability()`` holds for the child —
-        ``rawnet_capability(as_root=...)`` (euid 0, or CAP_NET_RAW on
-        Linux). Without it ``rawnet_arch_driver`` stays NULL and x64sc
+        ``rawnet_capability(as_root=False, binary=...)``: euid 0, CAP_NET_RAW
+        on Linux, or — for a build reporting RAWNET_BPF_PERMISSIONS, the
+        patched vice-eth keg — a /dev/bpf* node this user can open
+        read-write. Without it ``rawnet_arch_driver`` stays NULL and x64sc
         SIGSEGVs on the first reset with no log output.
 
-    The patched build on this bench lifts the euid half deliberately,
-    which is the whole reason it exists, so we run unelevated with
-    VICE_ETHERNET_ALLOW_UNELEVATED=1 (set at import below). That opt-out
-    is the harness's own documented escape hatch for "this host grants
-    the capability by a route we cannot observe".
-
-    /dev/bpf* permissions are libpcap's requirement, not VICE's. For the
-    patched build they do still have to be right, so they are reported as
-    an ADVISORY note — never as the gate.
+    The binary MUST be passed: without it the harness answers for stock
+    VICE, which is root-only, and the patched build's route never counts.
+    Nothing here sets VICE_ETHERNET_ALLOW_UNELEVATED any more — the old
+    ~/opt/vice-eth build lifted the gate invisibly, so the opt-out had to
+    be blanket; the keg reports it, so an opt-out now only masks a stock
+    or stale binary. An operator who sets it by hand is still honoured,
+    as the harness's launch is.
     """
     problems: list[str] = []
     if not os.path.exists(vice_bin):
         problems.append(
             f"{vice_bin} missing — an ethernet-capable x64sc is required. "
-            "Set VICE_ETHERNET_BIN or pass --vice-bin.")
+            "Build the patched one with c64-test-harness "
+            "scripts/build-vice-eth.sh, or set VICE_ETHERNET_BIN / pass "
+            "--vice-bin.")
         return problems
     if not vice_binary_supports_ethernet(vice_bin):
         problems.append(
             f"{vice_bin} was built WITHOUT raw-network support (x64sc "
-            "-features says no rawnet) — Homebrew's macOS bottle compiles "
-            "networking out entirely (c64-test-harness#144). Point "
+            "-features says no rawnet; c64-test-harness#144). Point "
             "VICE_ETHERNET_BIN at a build that has it.")
     if driver_requires_root(driver) \
-            and not rawnet_capability(as_root=False) \
+            and not rawnet_capability(as_root=False, binary=vice_bin) \
             and os.environ.get(ALLOW_UNELEVATED_ENV, "").strip() != "1":
+        if vice_features(vice_bin).bpf_permissions:
+            why = (f"{vice_bin} reports {BPF_PERMISSIONS_FEATURE} yes, but "
+                   "no /dev/bpf* node opens read-write for this user — "
+                   "make sure `id -Gn` lists access_bpf (Wireshark's "
+                   "ChmodBPF; log in again after joining)")
+        else:
+            why = (f"{vice_bin} does not report {BPF_PERMISSIONS_FEATURE}, "
+                   "so it is a stock build that selects pcap only at euid 0 "
+                   "— point VICE_ETHERNET_BIN at the patched vice-eth keg "
+                   "(c64-test-harness scripts/build-vice-eth.sh), or unset "
+                   "it to take the default")
         problems.append(
             f"VICE gates the {effective_driver_name(driver)} driver behind "
-            "archdep_rawnet_capability() and this process is neither root "
-            "nor CAP_NET_RAW; x64sc would SIGSEGV on the first reset with "
-            f"no log output. Set {ALLOW_UNELEVATED_ENV}=1 if this build "
-            "lifts the gate (the patched ~/opt/vice-eth one does), or run "
-            "the launch elevated.")
+            f"archdep_rawnet_capability() and it does not hold unelevated: "
+            f"{why}. x64sc would SIGSEGV on the first reset with no log "
+            "output.")
     return problems
 
 
 def libpcap_node_note() -> str | None:
-    """An ADVISORY line when /dev/bpf* would stop libpcap, or None.
+    """A problem line when no /dev/bpf* node opens for libpcap, or None.
 
-    Not a gate: see vice_rawnet_problems. libpcap needs a bpf node it can
-    open, so an unelevated pcap launch on this bench does depend on the
-    world-rw perms rig-up sets (they reset on reboot) — but that is a
-    property of running unelevated, not the condition VICE tests, and
-    treating it as the gate is the c3fe7aa bug.
+    It GATES: every preflight appends it to its problems, so it stops the
+    run. It fires only under an operator's VICE_ETHERNET_ALLOW_UNELEVATED=1,
+    which skips vice_rawnet_problems' capability check while libpcap still
+    needs a node. Otherwise that check already covers BPF access for the
+    patched build (and a stock build needs root, where nodes are moot), so
+    repeating it here only duplicated the message. Asks the question that
+    matters — can THIS user open one read-write — rather than reading mode
+    bits: on this bench access is via group access_bpf (crw-rw----
+    root:access_bpf), which a world-rw test reports as a false alarm.
     """
-    bad = []
-    for node in ("/dev/bpf0", "/dev/bpf1"):
-        try:
-            m = os.stat(node).st_mode
-        except FileNotFoundError:
-            bad.append(f"{node} missing")
-            continue
-        if not (m & stat.S_IROTH and m & stat.S_IWOTH):
-            bad.append(f"{node} not world-rw")
-    if not bad:
+    if os.environ.get(ALLOW_UNELEVATED_ENV, "").strip() != "1":
         return None
-    return ("advisory: " + ", ".join(bad) + " — VICE does not read these, "
-            "but libpcap does, so an UNELEVATED pcap launch will fail to "
-            "open a capture handle. `sudo chmod o+rw /dev/bpf*` (rig-up "
-            "does this; it resets on reboot).")
+    if bpf_node_openable():
+        return None
+    return (f"{ALLOW_UNELEVATED_ENV}=1 skips the capability check, but no "
+            "/dev/bpf* node opens read-write for this user — "
+            "VICE's stock gate does not read these, but libpcap does, so an "
+            "UNELEVATED pcap launch will fail to open a capture handle. "
+            "Make sure `id -Gn` lists access_bpf (Wireshark's ChmodBPF).")
 
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -170,8 +192,15 @@ CFG_PATH = os.path.join(PROJECT_ROOT, "cfg", "c64-wireguard-ip65.cfg")
 HOST_IP = "10.0.65.1"
 HOST_IFACE = "feth1"          # the host side of the pair; tcpdump taps here
 ETH_IFACE = "feth0"           # VICE's pcap side
-DNSMASQ_PIDFILE = "/tmp/c64-rig-dnsmasq.pid"
-DEFAULT_VICE_BIN = os.path.expanduser("~/opt/vice-eth/bin/x64sc")
+RIG_UP_HELPER = "/usr/local/libexec/c64-harness/c64-https-rig-up.sh"
+DNSMASQ_PIDFILE = "/var/run/c64-harness/dnsmasq.pid"   # RIG_UP_HELPER's
+# The harness's patched keg wherever Homebrew put it; the first candidate
+# when absent, so the preflight names the path that should exist.
+DEFAULT_VICE_BIN = patched_vice_binary() or PATCHED_VICE_CANDIDATES[0]
+# macOS's masked link-layer address, as ip65_hw_checks.REDACTED_MAC
+# (measured 2026-10-21). Copied, not imported: that module reads the RR-Net
+# rig helper at import, which the VICE suites must not depend on.
+REDACTED_MAC = "02:00:00:00:00:00"
 
 # --- BRIDGED mode --------------------------------------------------------
 # The "host" mode above is a private feth pair: the C64 can only reach this
@@ -194,7 +223,13 @@ DEFAULT_VICE_BIN = os.path.expanduser("~/opt/vice-eth/bin/x64sc")
 # attached: the built-in en0 is Wi-Fi, and Apple's Wi-Fi drivers do not
 # accept injected frames with a foreign source MAC, which is why
 # docs/rig said there was no bridged mode on this Mac.
-BRIDGED_IFACE = os.environ.get("VICE_BRIDGED_IFACE", "en4")
+#
+# WHICH NIC: the Belkin USB-C LAN adapter, found by its MAC, not by a BSD
+# name -- it was en4 on the old Mac and is en5 on this one, where en4 is a
+# Thunderbolt port (2026-10-21). $VICE_BRIDGED_IFACE (or a suite's --iface)
+# names one outright; otherwise resolve_bridged_iface() looks the MAC up.
+BRIDGED_IFACE = os.environ.get("VICE_BRIDGED_IFACE") or None
+BRIDGED_NIC_MAC = os.environ.get("VICE_BRIDGED_MAC", "c0:56:27:b1:16:38")
 
 # KERNAL keyboard queue — see tools/wg_c64_input.py for the mechanics.
 KBD_BUFFER = 0x0277
@@ -211,16 +246,6 @@ NET_FAIL_NEEDLES = ("NET INIT FAILED", "DHCP FAILED", "LISTEN FAILED")
 
 SKIP_EXIT = 77
 
-# The harness refuses an unelevated pcap launch unless told the binary
-# grants rawnet capability another way (c64_test_harness/backends/
-# vice_elevation.py). Stock VICE selects pcap only at euid 0; the patched
-# ~/opt/vice-eth build lifts that gate and runs on the world-rw BPF nodes
-# as uid 501 — which is the whole reason it exists — and the only NOPASSWD
-# sudoers entry names Homebrew's non-networking x64sc, so elevation is not
-# an option here anyway. Opt out, but only if the caller has not decided.
-os.environ.setdefault("VICE_ETHERNET_ALLOW_UNELEVATED", "1")
-
-
 def log(msg: str) -> None:
     print(msg, flush=True)
 
@@ -232,13 +257,14 @@ def log(msg: str) -> None:
 def _dnsmasq_alive() -> bool:
     """True iff the rig's dnsmasq is serving feth1.
 
-    Two signals, either suffices. The pidfile is what rig-up-macos.sh asks
-    dnsmasq to write, but dnsmasq drops to `nobody` and on this bench the
-    file is routinely absent while the daemon is alive (measured
-    2026-09-03: pid 11847 running with --pid-file=/tmp/c64-rig-dnsmasq.pid
-    and no such file). So also accept a live process whose command line
-    binds the rig interface — pgrep on `--interface=feth1`, which no other
-    dnsmasq on this machine would carry.
+    Two signals, either suffices. The pidfile is what the rig-up helper asks
+    dnsmasq to write, but dnsmasq drops to `nobody` and under the old
+    rig-up-macos.sh the file was routinely absent while the daemon was
+    alive (measured 2026-09-03: pid 11847 running with
+    --pid-file=/tmp/c64-rig-dnsmasq.pid and no such file). So also accept
+    a live process whose command line binds the rig interface — pgrep on
+    `--interface=feth1`, which no other dnsmasq on this machine would carry
+    (the helper's does).
     """
     try:
         pid = int(open(DNSMASQ_PIDFILE).read().strip())
@@ -280,7 +306,7 @@ def rig_problems(vice_bin: str) -> list[str]:
     problems: list[str] = []
     if sys.platform != "darwin":
         return ["not macOS — this rig is the feth/pcap one from "
-                "c64-https' tools/rig-up-macos.sh"]
+                "the host's c64-https-rig-up.sh helper"]
     problems += vice_rawnet_problems(vice_bin)
     note = libpcap_node_note()
     if note:
@@ -305,6 +331,48 @@ def rig_problems(vice_bin: str) -> list[str]:
     return problems
 
 
+def park_outside_net(tr, L, timeout: float = 10.0) -> None:
+    """Halt the 6510 at the top of main_loop: OUTSIDE net_poll.
+
+    jsr() hijacks the CPU wherever the monitor stopped it, and puts back
+    PC, SP and FL afterwards -- but NOT A/X/Y (documented in the harness:
+    they carry the routine's return values). The main loop spends much of
+    its time in net_poll, whose net_restore_zp copies zero page back with
+    an X-indexed `STA $02,X` loop (src/net/ip65/net.s). Halted inside that
+    loop, the resumed code runs on with the jsr'd routine's X=$FF, the next
+    `STA $02,X` lands on $0001 -- the processor port -- and the machine maps
+    out ROM and I/O and runs into $FFFF/BRK forever. MEASURED 2026-10-22,
+    cpu_history up to a checkpoint at $FFFF: net_restore_zp+5 at X=$FF,
+    then $01=$10; 4 of 5 boots with port 4500, 0 of 3 with 2408 (where an
+    ICMP reply changes how long the loop sits in net_poll). It looked like
+    "'H' was not consumed". Parked at main_loop's first instruction, where
+    no register is live, every jsr returns to a point that tolerates any
+    A/X/Y, and the 60 net_poll calls never interleave with the loop's own.
+
+    A workaround for c64-test-harness#556 (jsr preserve_state does not put
+    A/X/Y back). Once #556 is fixed and the installed harness has it, this
+    park -- and its calls -- can be removed.
+
+    Already there (every jsr after a park returns there), it does nothing:
+    the takeover suites keep the 6510 halted between calls on purpose, and
+    a needless park would let main_loop run an iteration under them. It
+    checks where the CPU actually stopped and raises if that is not
+    main_loop -- a park that silently did not happen is the hazard again.
+    """
+    if tr.read_registers()["PC"] == L["main_loop"]:
+        return
+    cp = tr.set_checkpoint(L["main_loop"])
+    try:
+        tr.resume()
+        tr.wait_for_stopped(timeout=timeout)
+    finally:
+        tr.delete_checkpoint(cp)
+    pc = tr.read_registers()["PC"]
+    if pc != L["main_loop"]:
+        raise RuntimeError(f"park_outside_net: the 6510 stopped at ${pc:04X}, "
+                           f"not main_loop ${L['main_loop']:04X}")
+
+
 def skip_if_rig_down(vice_bin: str) -> None:
     """Print the SKIP report and exit 77 when the rig is not up."""
     problems = rig_problems(vice_bin)
@@ -315,8 +383,7 @@ def skip_if_rig_down(vice_bin: str) -> None:
         log(f"    - {p}")
     log("  The rig needs one privileged setup per boot and is not created "
         "here;")
-    log("  see c64-https' tools/rig-up-macos.sh (feth pair + dnsmasq + "
-        "bpf perms).")
+    log(f"  run `sudo -n {RIG_UP_HELPER}` (feth pair + dnsmasq).")
     sys.exit(SKIP_EXIT)
 
 
@@ -341,7 +408,11 @@ def iface_status(iface: str) -> dict:
         out["mtu"] = int(m.group(1))
     m = re.search(r"\bether ([0-9a-f:]{17})", t)
     if m:
+        # Present either way (it IS an ethernet interface), but macOS masks
+        # the address to some processes (Homebrew python included) as
+        # REDACTED_MAC: that value means "unknown", never a MAC to use.
         out["ether"] = m.group(1)
+        out["ether_masked"] = m.group(1) == REDACTED_MAC
     m = re.search(r"\n\tinet (\d+\.\d+\.\d+\.\d+) netmask (0x[0-9a-f]+)", t)
     if m:
         out["inet"] = m.group(1)
@@ -530,20 +601,106 @@ def selftest_conflict_probe(iface: str = "en4") -> list:
     return bad
 
 
+def hardware_port_table(text: str | None = None
+                        ) -> list[tuple[str, str, str | None]]:
+    """``(port, device, mac)`` rows of `networksetup -listallhardwareports`.
+
+    Empty when networksetup cannot be run or prints nothing parseable;
+    callers must treat that as "could not look". *mac* may be REDACTED_MAC:
+    MEASURED 2026-10-21 from Homebrew python, networksetup printed the
+    Belkin's real address but 02:00:00:00:00:00 for bridge0, whose real
+    one a shell sees -- so its addresses are masked per row, not never.
+    """
+    if text is None:
+        try:
+            r = subprocess.run(["networksetup", "-listallhardwareports"],
+                               capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            return []
+        text = r.stdout if r.returncode == 0 else ""
+    rows: list[tuple[str, str, str | None]] = []
+    port = dev = None
+    for line in text.splitlines():
+        key, _, val = line.partition(":")
+        val = val.strip()
+        if key == "Hardware Port":
+            port, dev = val, None
+        elif key == "Device" and port is not None:
+            dev = val
+            rows.append((port, dev, None))
+        elif key == "Ethernet Address" and dev is not None and rows:
+            rows[-1] = (port, dev, val.lower())
+            port = dev = None
+    return rows
+
+
+def hardware_ports(text: str | None = None) -> dict[str, str]:
+    """Device -> Hardware Port name (see hardware_port_table)."""
+    return {dev: port for port, dev, _ in hardware_port_table(text)}
+
+
+def resolve_bridged_iface(mac: str = BRIDGED_NIC_MAC, table=None
+                          ) -> tuple[str | None, str | None]:
+    """``(device, problem)``: the one hardware port whose address is *mac*.
+
+    Zero or several matches is a problem, never a guess. A masked row is
+    "unknown": it cannot match, and if any are masked the problem says the
+    adapter may be hiding behind one, with the override to use.
+    """
+    table = hardware_port_table() if table is None else table
+    if not table:
+        return None, ("could not read `networksetup -listallhardwareports` "
+                      "to find the bridged NIC; set VICE_BRIDGED_IFACE")
+    want = mac.lower()
+    if want == REDACTED_MAC:
+        return None, (f"the bridged NIC's MAC is set to {REDACTED_MAC}, macOS's "
+                      "masking placeholder, which would match masked rows — "
+                      "set VICE_BRIDGED_MAC to the adapter's real address")
+    hits = [dev for _, dev, m in table if m == want]
+    if len(hits) == 1:
+        return hits[0], None
+    if hits:
+        return None, (f"{len(hits)} hardware ports carry {want} ({hits}); "
+                      "set VICE_BRIDGED_IFACE")
+    masked = [dev for _, dev, m in table if m == REDACTED_MAC]
+    why = f"no hardware port carries the bridged NIC's MAC {want} (unplugged?)"
+    if masked:
+        why += (f"; macOS masked the address of {masked} to this process, "
+                "so it may be one of those")
+    return None, why + " — set VICE_BRIDGED_IFACE or pass --iface"
+
+
+def wifi_problem(iface: str, ports: dict[str, str] | None = None) -> str | None:
+    """Why *iface* cannot carry a bridged C64, if it is (or may be) Wi-Fi.
+
+    Apple's Wi-Fi drivers do not transmit frames with a foreign source MAC
+    (docs/vice-eth-nat.md), so the C64's frames never leave. Measured from
+    the system's own port map, not from the interface name.
+    """
+    ports = hardware_ports() if ports is None else ports
+    if not ports:
+        return (f"could not read `networksetup -listallhardwareports`, so "
+                f"cannot tell whether {iface} is Wi-Fi (which cannot bridge)")
+    port = ports.get(iface)
+    if port is not None and port.lower() in ("wi-fi", "airport"):
+        return (f"{iface} is the {port} port — Apple's Wi-Fi drivers do not "
+                "send frames with a foreign source MAC, so a bridged C64's "
+                "traffic never leaves (docs/vice-eth-nat.md); use a wired NIC")
+    return None
+
+
 def bridged_problems(iface: str, vice_bin: str) -> list[str]:
     """Missing-prerequisite messages for bridged mode; empty means ready."""
     problems: list[str] = []
     if sys.platform != "darwin":
         return ["not macOS — bridged mode is the pcap-on-a-real-NIC rig"]
-    if not os.path.exists(vice_bin):
-        problems.append(
-            f"{vice_bin} missing — an ethernet-capable x64sc is required. "
-            "Set VICE_ETHERNET_BIN or pass --vice-bin.")
-    if not bpf_capture_available():
-        problems.append(
-            "/dev/bpf0 and /dev/bpf1 are not world read-write — VICE's pcap "
-            "driver cannot attach. Ask the user to run: "
-            "sudo chmod o+rw /dev/bpf*  (resets on reboot)")
+    # VICE's own gate, as rig_problems asks it. This used to call a
+    # bpf_capture_available() that no longer exists anywhere, so every
+    # bridged preflight died of NameError before reaching the iface checks.
+    problems += vice_rawnet_problems(vice_bin)
+    note = libpcap_node_note()
+    if note:
+        problems.append(note)
     st = iface_status(iface)
     if not st:
         problems.append(f"{iface} does not exist")
@@ -555,6 +712,9 @@ def bridged_problems(iface: str, vice_bin: str) -> list[str]:
     if "ether" not in st:
         problems.append(f"{iface} is not an ethernet interface (no MAC) — "
                         "bridged mode needs a real L2 segment")
+    wifi = wifi_problem(iface)
+    if wifi:
+        problems.append(wifi)
     ip = st.get("inet")
     if not ip:
         problems.append(f"{iface} has no IPv4 address — it is not on a LAN")
@@ -583,7 +743,8 @@ def bridged_problems(iface: str, vice_bin: str) -> list[str]:
 def describe_bridged(iface: str) -> str:
     st = iface_status(iface)
     return (f"{iface}: {st.get('inet', '?')}/{st.get('netmask', 0):08x} "
-            f"mac={st.get('ether', '?')} mtu={st.get('mtu', '?')} "
+            f"mac={'<masked by macOS>' if st.get('ether_masked') else st.get('ether', '?')} "
+            f"mtu={st.get('mtu', '?')} "
             f"media={st.get('media', '?')} gw={default_gateway(iface)}")
 
 
@@ -905,7 +1066,7 @@ class EthVice:
             ethernet_interface=self.iface,
             ethernet_driver="pcap",
             ethernet_executable=self.vice_bin,
-            run_as_root=False,        # the BPF nodes are world-rw on this rig
+            run_as_root=False,        # the keg runs pcap as us; never sudo
             extra_args=(["-reu", "-reusize", "512"] if self.reu else []),
         )
         self.proc = ViceProcess(config)
@@ -1195,19 +1356,42 @@ class Tap:
         self._lock = threading.Lock()
         self._proc: subprocess.Popen | None = None
 
+    #: The capture binary; a self-test swaps in a fake.
+    TCPDUMP = "tcpdump"
+    START_TIMEOUT_S = 5.0
+
     def __enter__(self) -> "Tap":
+        import queue
         self._proc = subprocess.Popen(
-            ["tcpdump", "-i", self.iface, "-l", "-n", "-q", "-U", self.filter],
+            [self.TCPDUMP, "-i", self.iface, "-l", "-n", "-q", "-U", self.filter],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        threading.Thread(target=self._pump, daemon=True).start()
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline:
-            line = self._proc.stderr.readline()
-            if "listening on" in line:
-                return self
-            if not line and self._proc.poll() is not None:
-                break
-        raise RuntimeError("tcpdump did not start listening on " + self.iface)
+        # Our own failure path stops the tcpdump it started: a tap that
+        # raised here used to leave it running (a caller's __exit__ is
+        # never reached when __enter__ raises). stderr is read on a thread
+        # so a tcpdump that prints nothing cannot block the deadline.
+        try:
+            lines: "queue.Queue[str]" = queue.Queue()
+
+            def _err():
+                for ln in self._proc.stderr:
+                    lines.put(ln)
+                lines.put("")
+            threading.Thread(target=_err, daemon=True).start()
+            threading.Thread(target=self._pump, daemon=True).start()
+            deadline = time.monotonic() + self.START_TIMEOUT_S
+            while time.monotonic() < deadline:
+                try:
+                    line = lines.get(timeout=max(0.0, deadline - time.monotonic()))
+                except queue.Empty:
+                    break
+                if "listening on" in line:
+                    return self
+                if not line and self._proc.poll() is not None:
+                    break
+            raise RuntimeError("tcpdump did not start listening on " + self.iface)
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
 
     def __exit__(self, *exc) -> None:
         if self._proc is not None:

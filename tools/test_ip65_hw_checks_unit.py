@@ -109,15 +109,16 @@ _spec.loader.exec_module(C)
 #: whichever branch it takes, so two runs are comparable and a case that
 #: silently stopped running is a hard error rather than a smaller
 #: denominator nobody notices. Update deliberately when adding a check.
-EXPECTED_CHECKS = 215
+EXPECTED_CHECKS = 232
 
 # Disjoint alphabets: an echo of a request can never satisfy a reply check.
 REQ_ALPHABET = string.ascii_uppercase + string.digits
 REPLY_ALPHABET = string.ascii_lowercase
 
-# The rig, from tools/rig-up-rrnet-macos.sh. 10.0.66/24, not 10.0.65/24: the
-# VICE feth rig already owns 10.0.65.1. Taken from the library so the suite
-# and the checkers cannot drift apart.
+# The rig, from the rrnet-rig-up.sh helper (or its pins where it is not
+# installed; case 19). 10.0.66/24, not 10.0.65/24: the VICE feth rig already
+# owns 10.0.65.1. Taken from the library so the suite and the checkers
+# cannot drift apart.
 HOST_IP = C.RIG_HOST_IP
 RIG_SUBNET = C.RIG_SUBNET
 HOST_MAC = C.RIG_HOST_MAC
@@ -1014,6 +1015,187 @@ def case15_shifted_petscii(rng: random.Random, res: Result) -> None:
               naive_name="search the host-side ASCII bytes and the case-folded "
                          "form only",
               form="petscii-shifted")
+
+
+# ===========================================================================
+# Case 19 — the rig's constants come from the helper, not from a copy
+# ===========================================================================
+def case19_rig_helper(rng: random.Random, res: Result) -> None:
+    """The reader of rrnet-rig-up.sh, against synthetic helpers.
+
+    Every check runs on every host. The one that depends on whether the
+    real helper is installed (19h) asserts something true in BOTH branches
+    -- agreement with it when present, the fallback in effect when not --
+    so CI and a bench Mac report the same names and neither skips.
+    """
+    print("\n[case 19] the rig helper's NAME=value lines")
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        want = {k: v for k, v in C.RIG_PINNED.items()}
+        want["HOST_IP"] = f"10.{rng.randrange(256)}.{rng.randrange(256)}.1"
+        want["C64_IP"] = want["HOST_IP"].rsplit(".", 1)[0] + ".200"
+        body = "#!/bin/bash\n# NAME=value lines\nset -euo pipefail\n" + "".join(
+            f"{k}={v}\n" for k, v in want.items())
+        helper = d / "rrnet-rig-up.sh"
+        helper.write_text(body)
+        got = {k: C.rig_const(k, helper) for k in want}
+        res.check(got == want, "case19a/reads-the-helper-not-the-pins",
+                  f"rig_const returned {got} for a helper publishing {want}")
+
+        missing = d / "absent.sh"
+        got = {k: C.rig_const(k, missing) for k in C.RIG_PINNED}
+        res.check(got == C.RIG_PINNED, "case19b/absent-helper-falls-back-to-pins",
+                  f"with no helper rig_const returned {got}")
+
+        dropped = d / "dropped.sh"
+        dropped.write_text(body.replace(f"C64_IP={want['C64_IP']}\n", ""))
+        try:
+            v = C.rig_const("C64_IP", dropped)
+            res.check(False, "case19c/dropped-name-raises",
+                      f"an installed helper without C64_IP= gave {v!r} "
+                      "instead of raising: a stale pin would be served")
+        except C.RigConstError:
+            res.check(True, "case19c/dropped-name-raises")
+
+        indented = d / "indented.sh"
+        indented.write_text(body.replace("HOST_IP=", "\tHOST_IP=")
+                            + 'C64_IP="10.9.9.9"\n')
+        try:
+            v = C.rig_const("HOST_IP", indented)
+            res.check(False, "case19d/only-top-level-unquoted-lines-count",
+                      f"an indented HOST_IP= was read as {v!r}")
+        except C.RigConstError:
+            res.check(C.rig_const("C64_IP", indented) == want["C64_IP"],
+                      "case19d/only-top-level-unquoted-lines-count",
+                      "a quoted C64_IP= replaced the helper's own value")
+
+        res.check(C.rig_iface(str(d / "no.iface")) is None,
+                  "case19e/no-ifacefile-is-rig-down",
+                  "a missing IFACEFILE did not read as down")
+        nic = f"en{rng.randrange(1, 32)}"
+        (d / "ok.iface").write_text(nic + "\n")
+        res.check(C.rig_iface(str(d / "ok.iface")) == nic,
+                  "case19f/ifacefile-names-the-nic",
+                  f"read {C.rig_iface(str(d / 'ok.iface'))!r}, wrote {nic!r}")
+        (d / "bad.iface").write_text("../etc/passwd\n")
+        res.check(C.rig_iface(str(d / "bad.iface")) is None,
+                  "case19g/garbage-ifacefile-is-rig-down",
+                  "a non-interface name in IFACEFILE was accepted")
+
+    try:
+        published = C.read_rig_helper(C.RRNET_RIG_UP)
+    except C.RigConstError as e:
+        published = {"<unreadable>": str(e)}
+    if C.RIG_HELPER_ERROR or "<unreadable>" in published:
+        res.check(False, "case19h/installed-helper-agrees-with-pins",
+                  C.RIG_HELPER_ERROR or published["<unreadable>"])
+    elif published is not None:
+        drift = {k: (v, published.get(k)) for k, v in C.RIG_PINNED.items()
+                 if published.get(k) != v}
+        pool = ",".join(C.RIG_POOL_PINNED)
+        if published.get("--dhcp-range") != pool:
+            drift["--dhcp-range"] = (pool, published.get("--dhcp-range"))
+        res.check(not drift, "case19h/installed-helper-agrees-with-pins",
+                  f"{C.RRNET_RIG_UP} and RIG_PINNED differ (pinned, "
+                  f"published): {drift}. Update the pins through review.")
+    else:
+        res.check(C.RIG_HOST_IP == C.RIG_PINNED["HOST_IP"]
+                  and C.RIG_C64_IP == C.RIG_PINNED["C64_IP"],
+                  "case19h/installed-helper-agrees-with-pins",
+                  f"no helper at {C.RRNET_RIG_UP}, but the module did not "
+                  "take the pinned values")
+    print(f"        helper: {C.RRNET_RIG_UP} "
+          f"({'installed' if published is not None else 'absent: pins in use'})")
+    # An unreadable helper: the module still imported (on pins), and
+    # rig_const() raises for everyone else -- shown with a directory.
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            C.rig_const("HOST_IP", Path(td))
+            ok, why = False, "rig_const read a directory as a helper"
+        except C.RigConstError as e:
+            ok, why = "cannot be read" in str(e), str(e)
+    res.check(ok, "case19j/unreadable-helper-is-a-loud-error-not-the-pins", why)
+    # A PARTIAL helper (HOST_IP but no C64_IP) must not crash the import:
+    # the module records the error and takes the pins for every constant.
+    with tempfile.TemporaryDirectory() as td:
+        part = Path(td) / "rrnet-rig-up.sh"
+        part.write_text("HOST_IP=10.0.66.1\n")
+        r = subprocess.run(
+            [sys.executable, "-c",
+             "import importlib.util, sys\n"
+             f"sp = importlib.util.spec_from_file_location('m', {str(_CHECKS_PATH)!r})\n"
+             "m = importlib.util.module_from_spec(sp); sys.modules['m'] = m\n"
+             "sp.loader.exec_module(m)\n"
+             "print('ERR', m.RIG_HELPER_ERROR); print('IP', m.RIG_C64_IP)\n"],
+            capture_output=True, text=True, timeout=60,
+            env={**os.environ, "RRNET_RIG_HELPER": str(part)})
+    res.check(r.returncode == 0 and "C64_IP" in r.stdout
+              and f"IP {C.RIG_PINNED['C64_IP']}" in r.stdout,
+              "case19k/partial-helper-does-not-crash-the-import",
+              f"rc={r.returncode} out={r.stdout.strip()!r} err={r.stderr[-300:]!r}")
+    res.check(C.RIG_HELPER_ERROR is not None or (
+              C.RIG_HOST_IP == C.rig_const("HOST_IP")
+              and C.RIG_C64_IP == C.rig_const("C64_IP")
+              and C.RIG_C64_MAC == bytes.fromhex(
+                  C.rig_const("C64_MAC").replace(":", ""))),
+              "case19i/module-constants-come-from-the-reader",
+              "RIG_HOST_IP/RIG_C64_IP/RIG_C64_MAC are not rig_const's values")
+
+
+# ===========================================================================
+# Case 20 — the Mac's own MAC, when macOS will not tell this process
+# ===========================================================================
+def case20_host_mac(rng: random.Random, res: Result) -> None:
+    """Both 2026-10-21 live runs read en6 as 02:00:00:00:00:00: macOS's
+    redaction placeholder, shown to Homebrew's python3.15 but not to a
+    shell. Taking ifconfig's word made the Mac's own frames "frames from
+    unexpected MACs" and voided the plaintext-absence check."""
+    print("\n[case 20] host MAC: the helper's address, cross-checked")
+    nic = rand_mac(rng)
+    while nic in (HOST_MAC, C64_MAC):
+        nic = rand_mac(rng)
+    pub = ":".join(f"{b:02x}" for b in nic)
+    c64_mac = rand_mac(rng)
+    while c64_mac in (nic, HOST_MAC):
+        c64_mac = rand_mac(rng)
+    raw = [eth_frame(nic, c64_mac, C.ETHERTYPE_IPV4,
+                     ip_udp(HOST_IP, C64_IP, WG_PORT, 51820, wg_type4(rng, 64)))
+           for _ in range(4)] + [
+           eth_frame(c64_mac, nic, C.ETHERTYPE_IPV4,
+                     ip_udp(C64_IP, HOST_IP, 51820, WG_PORT, wg_type4(rng, 64)))
+           for _ in range(2)]
+    redacted = bytes.fromhex(C.REDACTED_MAC.replace(":", ""))
+
+    # What the suite did before: ifconfig's address, as printed.
+    old = C.check_c64_originated(cap(raw), c64_mac, redacted,
+                                 min_frames=1, udp_port=WG_PORT)
+    res.check(not old.ok and "unexpected MACs" in old.reason,
+              "case20a/ifconfig-placeholder-voids-the-two-station-check",
+              f"with host_mac={C.REDACTED_MAC} the check said: {old.reason!r}")
+
+    mac, problem, note = C.resolve_host_mac(pub, C.REDACTED_MAC)
+    res.check(mac == pub and problem is None,
+              "case20b/placeholder-falls-back-to-the-helper",
+              f"resolve_host_mac -> {(mac, problem, note)}")
+    new = C.check_c64_originated(cap(raw), c64_mac,
+                                 bytes.fromhex((mac or "").replace(":", "")),
+                                 min_frames=1, udp_port=WG_PORT)
+    res.check(new.ok, "case20c/helper-mac-passes-the-two-station-check",
+              f"with host_mac={mac} the check said: {new.reason!r}")
+
+    other = ":".join(f"{b:02x}" for b in rand_mac(rng))
+    while other == pub or other == C.REDACTED_MAC:
+        other = ":".join(f"{b:02x}" for b in rand_mac(rng))
+    mac, problem, _ = C.resolve_host_mac(pub, other)
+    res.check(mac is None and bool(problem),
+              "case20d/real-disagreement-is-a-problem-not-a-pick",
+              f"helper {pub} vs ifconfig {other} -> mac={mac!r} problem={problem!r}")
+    mac, problem, _ = C.resolve_host_mac(pub.upper(), pub)
+    res.check(mac == pub and problem is None, "case20e/agreement-any-case",
+              f"-> {(mac, problem)}")
+    mac, problem, _ = C.resolve_host_mac(pub, None)
+    res.check(mac == pub and problem is None, "case20f/no-ether-line-uses-helper",
+              f"-> {(mac, problem)}")
 
 
 # ===========================================================================
@@ -2160,6 +2342,21 @@ MUTANTS: dict[str, tuple[str, str]] = {
         '        ev["diagnosis"] = "no-cartridge"'),
     "bench/chip-failure-does-not-block": (
         "    if product_id is not None and not chip.ok:", "    if False:"),
+    "rig/helper-ignored": (
+        "    if published is None:\n        return RIG_PINNED[name]",
+        "    if True:\n        return RIG_PINNED[name]"),
+    "rig/dropped-name-falls-back": (
+        "    if name not in published:\n        raise RigConstError(",
+        "    if name not in published:\n        return RIG_PINNED[name]\n"
+        "        raise RigConstError("),
+    "rig/redaction-placeholder-trusted": (
+        "    if obs == REDACTED_MAC:", "    if False:"),
+    "rig/disagreement-picks-ifconfig": (
+        "    if obs != pub:\n        return None,",
+        "    if obs != pub:\n        return obs, None, \"\"\n        return None,"),
+    "rig/ifacefile-unvalidated": (
+        'return name if re.fullmatch(r"[a-z]+[0-9]+", name) else None',
+        "return name or None"),
 }
 
 
@@ -2249,7 +2446,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--only", default=None,
-                    help="run one case: 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16")
+                    help="run one case: 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20")
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("--self-check", action="store_true",
                     help=f"mutate the checker module {len(MUTANTS)} ways and require this "
@@ -2288,6 +2485,8 @@ def main() -> int:
         "18": lambda: case18_provenance(rng, res),
         "15": lambda: case15_shifted_petscii(rng, res),
         "16": lambda: case16_cs8900a(rng, res),
+        "19": lambda: case19_rig_helper(rng, res),
+        "20": lambda: case20_host_mac(rng, res),
     }
     for key, fn in cases.items():
         if args.only and args.only != key:

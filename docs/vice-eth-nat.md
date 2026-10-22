@@ -106,9 +106,9 @@ Apple's `vmnet` framework does give VMs a pseudo-bridge over Wi-Fi, but VICE
 cannot reach it:
 
 ```
-$ otool -L ~/opt/vice-eth/bin/x64sc | grep -i pcap
+$ otool -L /opt/homebrew/opt/vice-eth/bin/x64sc | grep -i pcap
 	/usr/lib/libpcap.A.dylib
-$ ~/opt/vice-eth/bin/x64sc -help | grep -A1 ethernetio
+$ /opt/homebrew/opt/vice-eth/bin/x64sc -help | grep -A1 ethernetio
 -ethernetiodriver <Name>
 	Set the low-level driver for Ethernet emulation (tuntap, pcap).
 -ethernetioif <Name>
@@ -141,17 +141,39 @@ own tooling says so by name:
 * `tools/vice_eth_rig.py:196-197` — `# docs/rig said there was no bridged mode
   on this Mac.` / `BRIDGED_IFACE = os.environ.get("VICE_BRIDGED_IFACE", "en4")`,
   with `bridged_problems()`, `describe_bridged()` and
-  `skip_if_bridged_rig_down()` built on it.
+  `skip_if_bridged_rig_down()` built on it. (Since 2026-10-21 the default is
+  resolved by the adapter's MAC, `BRIDGED_NIC_MAC`: BSD names moved on the new
+  Mac, where `en4` is a Thunderbolt port and the Belkin is `en5`.)
 * Commits `21be001` and `11eed28` landed **Cloudflare WARP end-to-end on the
   ip65 backend over bridged VICE**.
-* `tools/ip65_hw_checks.py:69-71` pins `en4` as the Mac side of the physical
-  RR-Net segment (`10.0.66.1`, `c0:56:27:b1:16:38`).
+* `tools/ip65_hw_checks.py:69-71` pinned `en4` as the Mac side of the physical
+  RR-Net segment (`10.0.66.1`, `c0:56:27:b1:16:38`). (Since 2026-10-21 the
+  root-owned `rrnet-rig-up.sh` helper finds that NIC by MAC instead.)
 
 **Why this matters more than a stale sentence:** the advice below tells you to
 change a *managed, Zero-Trust* VPN's split-tunnel policy, or to disconnect it,
 in order to route around a blocker that bridging avoids entirely. That is a
 real, user-visible change to a host others may depend on, taken for no gain.
-Use the bridged path (`tools/vice_eth_rig.py`, `tools/rig-up-rrnet-macos.sh`).
+Use the bridged path (`tools/vice_eth_rig.py`, or the physical RR-Net rig's
+`/usr/local/libexec/c64-harness/rrnet-rig-up.sh` helper).
+`tools/test_warp_ip65_vice.py` is that bridged WARP run. It needs no stored
+profile: every run registers a fresh WARP device with `wgcf` in a private temp
+dir, keeps the key in memory only and wipes the files before VICE starts (so
+nothing secret is stored and anyone can run it; each run leaves one WARP
+account behind, as wgcf has no deregistration). `--warp-profile PATH` /
+`WARP_PROFILE` uses an existing profile instead, for offline or rate-limited
+runs; a failed registration is exit 77, never a pass.
+
+Two traps for that run. **A NAT/peer 5-tuple can blackhole:** on 2026-10-22
+LAN `:51820` → `162.159.192.1:2408` drew no reply for ≥600 s while the same
+source to `:500`/`:4500`/`:1701`, and other sources to `:2408`, all answered.
+So the endpoint port is drawn per run from WARP's advertised set
+(2408/500/1701/4500) by the seed, and the remedy for a silent run is a retry
+with a different seed (`--warp-port` / `WARP_ENDPOINT_PORT` pins one). And
+**this host runs the Cloudflare WARP client** (MASQUE, routing
+`162.159.192.1` via `utun0`), so a host-side probe of WARP goes through that
+tunnel, not the LAN the C64 uses: inject on the wire (BPF on the bridged NIC)
+or the result says nothing about the C64's path.
 
 The §0 **measurements** above are fine and still worth reading — it is this
 verdict, not the data, that time overtook.
@@ -175,20 +197,27 @@ add — re-check the route, do not assume).
 
 ### If a wired adapter is attached
 
-Should the Belkin (`en4`) or the USB adapter (`en6`) be plugged in later,
+Should the Belkin (`en4` then; the BSD name moves, so the suites find it by
+its MAC `c0:56:27:b1:16:38` — `en5` on the current Mac) be plugged in later,
 bridging becomes a real option and needs **no new tooling for VICE itself** —
 VICE binds pcap directly to a named interface, so pointing it at the wired
 `enX` *is* the bridge; no `bridge0` membership is required. The steps would be:
 
-1. Confirm link: `ifconfig en4 | grep -E 'media|status'` → `status: active`.
+1. Find the NIC and confirm link: `networksetup -listallhardwareports` names
+   the device carrying that MAC (call it `enX`), then
+   `ifconfig enX | grep -E 'media|status'` → `status: active`.
 2. Stop the host-only rig's DHCP server, or it will answer the C64 before the
-   real router does — `rig-up-macos.sh` starts it:
-   `sudo pkill -F /tmp/c64-rig-dnsmasq.pid`
+   real router does — the rig-up helper starts it, and the rig-down helper
+   stops it (with the feth pair):
+   `sudo -n /usr/local/libexec/c64-harness/c64-https-rig-down.sh`
 3. Point VICE at the wired interface instead of `feth0`:
-   `x64sc -ethernetiodriver pcap -ethernetioif en4 ...`
-4. `/dev/bpf*` must be readable/writable. Already granted on this Mac
-   (`crw----rw-`), by `rig-up-macos.sh`'s `chmod o+rw /dev/bpf*`; it reverts on
-   reboot. **This is the only privileged step bridging needs.**
+   `x64sc -ethernetiodriver pcap -ethernetioif enX ...` (the suites resolve
+   it themselves: `vice_eth_rig.resolve_bridged_iface()`)
+4. This user must be able to open a `/dev/bpf*` node read-write. On this Mac
+   that is group access: the nodes are `crw-rw---- root:access_bpf` (Wireshark's
+   ChmodBPF) and `id -Gn` lists `access_bpf`. No `chmod o+rw` is needed, and
+   the patched `vice-eth` x64sc runs pcap as this user because of it
+   (`RAWNET_BPF_PERMISSIONS yes` in `x64sc -features`).
 5. The C64 then DHCPs from `10.43.23.1` and takes a third lease alongside the
    U64E (`.81`) and this Mac (`.99`). ip65's default MAC is a valid unicast
    locally-administered-free address and the router has no reason to refuse it,
@@ -201,13 +230,16 @@ real-peer / internet tests; keep the host-only rig for the responder.
 ## 1. Rig up
 
 ```sh
-sudo bash ../c64-https/tools/rig-up-macos.sh
+sudo -n /usr/local/libexec/c64-harness/c64-https-rig-up.sh
 ```
 
-Creates the `feth0`/`feth1` pair (+ `bridge10` only to satisfy the harness
-precondition — the feth peers are deliberately *not* bridge members), puts
-`10.0.65.1` on `feth1`, opens `/dev/bpf*`, and starts dnsmasq bound to `feth1`
-with a `10.0.65.100-150` pool.
+The host's root-owned, sudo-allowlisted helper (it replaced c64-https'
+`tools/rig-up-macos.sh`, deleted in c64-https `ef22225`). Creates the
+`feth0`/`feth1` pair (+ `bridge10` only to satisfy the harness precondition —
+the feth peers are deliberately *not* bridge members), puts `10.0.65.1` on
+`feth1`, and starts its own dnsmasq (as `nobody`, pid in
+`/var/run/c64-harness/dnsmasq.pid`) bound to `feth1` with a `10.0.65.100-150`
+pool. It does not touch `/dev/bpf*`: access is the `access_bpf` group.
 
 Two things to check on this host:
 
@@ -218,14 +250,14 @@ Two things to check on this host:
   dnsmasq. DNS itself does not matter for a WARP run — the endpoint is a
   literal IP, and the rig's dnsmasq runs `--no-resolv` so it resolves nothing
   upstream anyway.
-- **Idempotence is not perfect.** The script's "already running" test is
-  `[[ -f /tmp/c64-rig-dnsmasq.pid ]]`. That pidfile can be reaped from `/tmp`
-  while dnsmasq is still running, and a re-run then tries to start a *second*
-  dnsmasq and fails on the bind. **Check `pgrep -f dnsmasq` first** — do not
-  trust the pidfile. (A specific PID was recorded here once; it is omitted
-  deliberately, because a live PID in a document is false the moment the
-  process restarts, and it read as present tense.) Separately, `bridge10` currently carries a duplicate `10.0.65.1`
-  alias that the script is supposed to remove — re-running it clears that.
+- **Idempotence.** The old `rig-up-macos.sh` decided "already running" from
+  `/tmp/c64-rig-dnsmasq.pid` alone; that file could be reaped from `/tmp` while
+  dnsmasq lived, and a re-run then failed on the bind. The helper keeps its
+  pidfile in `/var/run/c64-harness` and checks the pid's command and user
+  before trusting it, and removes the `bridge10` duplicate `10.0.65.1` alias on
+  every run. `tools/vice_eth_rig.py` still also accepts a live
+  `dnsmasq --interface=feth1` by `pgrep`, so a missing pidfile alone never
+  reports the rig down.
 
 ## 2. NAT up
 
@@ -302,8 +334,7 @@ to a handshake.
 
 ```sh
 sudo bash tools/vice_eth_nat.sh down          # anchor flushed, forwarding + pf restored
-sudo pkill -F /tmp/c64-rig-dnsmasq.pid        # (or: sudo pkill -f 'dnsmasq.*feth1')
-sudo bash ../c64-test-harness/scripts/teardown-bridge-feth-macos.sh
+sudo -n /usr/local/libexec/c64-harness/c64-https-rig-down.sh   # dnsmasq + feth pair
 ```
 
 And, if you disconnected it, bring the VPN back:
@@ -317,7 +348,6 @@ warp-cli connect
 - The NAT is **host-wide** while it is up: `net.inet.ip.forwarding=1` makes the
   Mac route between all of its interfaces, not just the rig's. Take it down when
   you are done.
-- `/dev/bpf*` is left world-readable by the rig script (it reverts on reboot).
 - The rig's `10.0.65.0/24` is shared with c64-test-harness, which reserves
   `.1`–`.3`; the DHCP pool starts at `.100` for that reason. Do not narrow it.
 
@@ -328,8 +358,9 @@ diagnosable from the C64's own output, which is exactly why they are written dow
 
 ### An exhausted capture device looks like a broken network adapter
 
-This bench has **four world-rw `/dev/bpf` nodes**, shared by every lane, and each VICE instance
-needs one — as does each `tcpdump` tap. Oversubscribe them and `ip65_init` fails, the C64 prints
+The bench this was written on had **four world-rw `/dev/bpf` nodes** (this Mac has 256, all
+`crw-rw---- root:access_bpf`), shared by every lane, and each VICE instance needs one — as does
+each `tcpdump` tap. Oversubscribe them and `ip65_init` fails, the C64 prints
 `NET INIT FAILED`, and (since #120) it also sets `net_last_error = $41 NET_ERR_IP65_INIT`.
 
 **An oversubscribed rig and a genuine adapter fault are indistinguishable at the C64 end.** Before
@@ -339,8 +370,10 @@ concluding anything about the firmware, the driver or the build, count the live 
 pgrep -fl 'x64sc|tcpdump' | wc -l      # every one of these may hold a node
 ```
 
-The nodes are made world-readable by the rig script and the permission **reverts on reboot**, so a
-first run after a restart can fail this way with nothing else changed.
+On that bench the nodes were made world-rw by the old rig script and the permission **reverted on
+reboot**, so a first run after a restart could fail this way with nothing else changed. Group
+access (ChmodBPF) survives a reboot, but a login session that predates joining `access_bpf` does
+not have it — check `id -Gn`.
 
 ### A killed test driver orphans two processes, and the next run dies identically
 

@@ -709,7 +709,7 @@ Only one handshake per staged TAI64N base time is accepted by a real peer (#87);
 
 **This section is deliberately short.** `tools/test_ip65_rrnet_hw.py` asserts
 everything about the run itself, from a mutation-tested library
-(`tools/ip65_hw_checks.py`, 210 checks / 57 mutants, both in the gate). What
+(`tools/ip65_hw_checks.py`; its unit suite and mutation self-check are both in the gate, and each prints its own count). What
 follows is only what the tool **cannot** do for itself. Do not restate its
 checks here — a second copy of an assertion, in prose, is exactly how the rest
 of this document became untrustworthy.
@@ -744,28 +744,50 @@ two-station capture. Every ip65 result before that date was emulation.
   a reboot reloads **flash** for every item, and to the flash value rather
   than to `Auto` (`c64-test-harness#227`, from firmware source).
 
-  `snapshot_state` does not cover it (that covers `Cartridge`, a different
-  item), so restoring it is the caller's job — the tool does this, but a run
-  you abort by hand may not.
-- **The segment must be up**, which needs a password you have and the tool
-  does not:
+  The tool snapshots the device's **entry state** (harness `snapshot_state`,
+  which covers this item since `c64-test-harness#221`, plus turbo mode and
+  speed, REU and `Cartridge`) and restores that at exit, failing the run if
+  the read-back differs. Until 2026-10-21 it restored a fixed 1 MHz / REU off
+  instead, which left a device found at Turbo Control `Off` at `Manual`. A
+  run you abort by hand (SIGKILL) may still restore nothing.
+- **The segment.** A root-owned helper installed by new-computer-setup
+  (sudo-allowlisted by exact path, no arguments) raises and lowers it:
 
   ```bash
-  sudo bash tools/rig-up-rrnet-macos.sh en4     # down: ... en4 down
+  sudo -n /usr/local/libexec/c64-harness/rrnet-rig-up.sh     # rrnet-rig-down.sh to lower
   ```
 
-  A direct cable, no switch. The Mac is `10.0.66.1` and serves DHCP; the C64
-  is pinned to `10.0.66.200` by its MAC. **A lease is not a route** — this
-  segment has no path off itself, so the WireGuard peer runs on the Mac.
+  The tool runs `up` itself **only when the rig is down** (no
+  `/var/run/c64-harness/rrnet.iface`, or the helper's dnsmasq is dead), and
+  `down` at exit only if it was the one that raised it — never `up` over a
+  running rig, because every `up` restarts dnsmasq with an **empty lease file
+  and log** that another session may be reading. `--no-rig-up` turns that off.
+  The segment is shared with c64-https, so the tool holds the U64E's
+  DeviceLock from before rig-up until after rig-down, on every exit path.
+  `up` refuses unless the adapter's link is `status: active`, which a CS8900a
+  gives only with cartridge power: the U64E must be on with the RR-Net in.
+
+  The helper finds the NIC by its MAC (BSD names move between Macs and
+  re-plugs) and writes the name to `rrnet.iface`; the tool reads it there, and
+  the segment's addressing from the helper's `NAME=value` lines
+  (`ip65_hw_checks.rig_const`). It replaced `tools/rig-up-rrnet-macos.sh`,
+  which ran PATH's dnsmasq as root. A direct cable, no switch. The Mac is
+  `10.0.66.1` and serves DHCP; the C64 is pinned to `10.0.66.200` by its MAC.
+  **A lease is not a route** — this segment has no path off itself, so the
+  WireGuard peer runs on the Mac. **Why DHCP at all:** `src/boot.s`
+  `do_net_init` returns on a DHCP failure and has no static-IP path, and the
+  C64 does no IPv4LL, so without the rig's dnsmasq the build stops at
+  `DHCP FAILED`.
 
 ### Run it
 
 ```bash
-python3 tools/test_ip65_rrnet_hw.py            # --iface en4, --host $U64_HOST
+python3 tools/test_ip65_rrnet_hw.py --host <ip>   # the NIC comes from rrnet.iface
 ```
 
 It takes the DeviceLock like everything else here. Useful flags: `--speeds`
-(default `1,48`), `--capture auto|external|off`, `--seed N` to reproduce a
+(default `1,48`), `--capture auto|external|off` (auto runs tcpdump as you when a
+`/dev/bpf*` node opens read-write — group `access_bpf` — else via `sudo -n`), `--seed N` to reproduce a
 run's randomised payloads, `--skip-build`. The machine-readable artifact is the
 `run` JSON it dumps — that, not the log, is what a later audit reads.
 

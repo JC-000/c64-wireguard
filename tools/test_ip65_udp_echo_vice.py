@@ -292,7 +292,7 @@ def raw_send_ax(tr, L, payload: bytes) -> int:
     write_bytes(tr, buf, payload)
     write_bytes(tr, L["net_udp_send_len"], struct.pack("<H", len(payload)))
     write_bytes(tr, CARRY, b"\x00")
-    jsr(tr, SEND_TRAMP, timeout=30.0)
+    jsr(tr, SEND_TRAMP, timeout=30.0)  # exposed to c64-test-harness#556
     return read_bytes(tr, CARRY, 1)[0]
 
 
@@ -317,7 +317,7 @@ def run_free(tr, secs: float) -> None:
 
 def net_poll(tr, L) -> None:
     run_free(tr, 0.05)
-    jsr(tr, L["net_poll"], timeout=30.0)
+    jsr(tr, L["net_poll"], timeout=30.0)  # exposed to c64-test-harness#556
 
 
 def clear_recv(tr, L) -> None:
@@ -361,7 +361,7 @@ def transport_send(tr, L, payload: bytes, key: bytes, recv_idx: bytes,
     write_bytes(tr, L["tp_payload_len"], struct.pack("<H", len(payload)))
     write_bytes(tr, L["tp_packet_len"], b"\xEE\xEE")
     write_bytes(tr, CARRY, b"\x00")
-    jsr(tr, TRAMP, timeout=60.0)
+    jsr(tr, TRAMP, timeout=60.0)  # exposed to c64-test-harness#556
     c = read_bytes(tr, CARRY, 1)[0]
     tp_len = int.from_bytes(read_bytes(tr, L["tp_packet_len"], 2), "little")
     return c, tp_len

@@ -45,6 +45,8 @@ TRAPS THAT ARE ALREADY IN THE TREE
 from __future__ import annotations
 
 import hashlib
+import os
+import re
 import struct
 import subprocess
 import time
@@ -63,15 +65,163 @@ IP65_DEFAULT_CFG_GATEWAY = (192, 168, 1, 1)
 IP65_DEFAULT_CFG_MAC = (0x00, 0x80, 0x10, 0x00, 0x51, 0x00)
 
 # ---------------------------------------------------------------------------
-# The rig, from tools/rig-up-rrnet-macos.sh. 10.0.66/24 and not 10.0.65/24:
-# the VICE feth rig already owns 10.0.65.1 and the two would collide.
+# The rig. The physical RR-Net segment is raised by a root-owned helper that
+# new-computer-setup installs and sudoers allowlists by exact path, with no
+# arguments (it replaced tools/rig-up-rrnet-macos.sh). Its NAME=value lines
+# are the segment's addressing and file layout, and they are READ from it,
+# not copied: the subnet once moved from 10.0.65.0/24 to 10.0.66.0/24 under
+# a suite carrying its own copy, which would have kept preflighting a subnet
+# nobody serves. 10.0.66/24 because the VICE feth rig owns 10.0.65.1.
+#
+# Where the helper is not installed (CI, another Mac) RIG_PINNED stands in,
+# so the pure checks and their unit suite still run; that suite asserts the
+# pins equal what an installed helper publishes, so a reviewed reinstall
+# that moves a value turns it red instead of drifting. RRNET_RIG_HELPER
+# points the reader elsewhere -- at a nonexistent path to exercise the
+# fallback on a host that has the helper.
 # ---------------------------------------------------------------------------
-RIG_HOST_IP = "10.0.66.1"
-RIG_HOST_MAC = bytes.fromhex("c05627b11638")        # the Mac's en4
-RIG_C64_IP = "10.0.66.200"                          # pinned via dhcp-host
-RIG_C64_MAC = bytes.fromhex("000e3a646464")         # ip65's MAC on this card
-RIG_SUBNET = "10.0.66.0"
-RIG_POOL = ("10.0.66.10", "10.0.66.60")
+RRNET_RIG_UP = Path(os.environ.get(
+    "RRNET_RIG_HELPER", "/usr/local/libexec/c64-harness/rrnet-rig-up.sh"))
+RRNET_RIG_DOWN = RRNET_RIG_UP.with_name("rrnet-rig-down.sh")
+
+#: What rrnet-rig-up.sh publishes, as of new-computer-setup 4be92f7.
+RIG_PINNED = {
+    "HOST_IP": "10.0.66.1",
+    "C64_MAC": "00:0e:3a:64:64:64",       # ip65's MAC on this card
+    "C64_IP": "10.0.66.200",              # pinned via dhcp-host
+    "TEST_HOST": "www.foo.invalid",
+    "PIDFILE": "/var/run/c64-harness/rrnet-dnsmasq.pid",
+    "LEASEFILE": "/var/run/c64-harness/rrnet-dnsmasq.leases",
+    "LOGFILE": "/var/log/c64-harness/rrnet-dnsmasq.log",
+    # The NIC the helper found by MAC. Exists only while the rig is up.
+    "IFACEFILE": "/var/run/c64-harness/rrnet.iface",
+    # That NIC's MAC: the Mac's side of the cable (USB adapter, en6 today).
+    "RRNET_NIC_MAC": "a0:ce:c8:dd:f4:f9",
+}
+#: The helper's --dhcp-range, which is a dnsmasq argument, not a NAME= line.
+RIG_POOL_PINNED = ("10.0.66.10", "10.0.66.60")
+
+
+class RigConstError(RuntimeError):
+    """The installed helper no longer publishes a name we read from it."""
+
+
+def read_rig_helper(path: Path = RRNET_RIG_UP) -> dict | None:
+    """The helper's top-level NAME=value lines, or None if not installed.
+
+    Only unquoted, unindented single-token assignments -- the form the
+    helper promises for the lines lanes read.
+    """
+    try:
+        text = Path(path).read_text()
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        # Installed but unreadable (a directory, no permission): loud, never
+        # the pins -- the helper the rig runs is not the one we would read.
+        raise RigConstError(f"rig helper {path} exists but cannot be read: "
+                            f"{e}") from e
+    consts = dict(re.findall(r"^([A-Z][A-Z0-9_]*)=([^\s#'\"$]+)\s*$",
+                             text, re.M))
+    m = re.search(r"--dhcp-range=([\d.]+),([\d.]+),", text)
+    if m:
+        consts["--dhcp-range"] = f"{m.group(1)},{m.group(2)}"
+    return consts
+
+
+def rig_const(name: str, path: Path = RRNET_RIG_UP) -> str:
+    """*name* as the installed helper sets it, else its pinned value.
+
+    An installed helper that has stopped defining *name* raises rather than
+    falling back: the pin would then be a stale value nobody serves.
+    """
+    published = read_rig_helper(path)
+    if published is None:
+        return RIG_PINNED[name]
+    if name not in published:
+        raise RigConstError(
+            f"{path} no longer defines {name}=. The suites read the "
+            f"segment's addressing from it so the two cannot drift; update "
+            f"RIG_PINNED and the readers with it.")
+    return published[name]
+
+
+def rig_iface(path: str | None = None) -> str | None:
+    """The NIC the helper brought the rig up on, or None if it is down.
+
+    The helper writes the name it resolved by MAC to IFACEFILE on every up
+    and down removes it, so absence means the rig is down. A file holding
+    anything but a BSD interface name is treated as absent.
+    """
+    path = path or rig_const("IFACEFILE")
+    try:
+        name = Path(path).read_text().strip()
+    except FileNotFoundError:
+        return None
+    return name if re.fullmatch(r"[a-z]+[0-9]+", name) else None
+
+
+#: What macOS hands a process it does not trust with link-layer addresses
+#: in place of the real one. MEASURED 2026-10-21: `ifconfig en6` run from
+#: Homebrew's python3.15 printed `ether 02:00:00:00:00:00`, while the same
+#: command from a shell, perl, or Apple's /usr/bin/python3 printed
+#: a0:ce:c8:dd:f4:f9 -- the answer depends on the calling process, not on
+#: the interface or on timing.
+REDACTED_MAC = "02:00:00:00:00:00"
+
+
+def resolve_host_mac(published: str, observed: str | None
+                     ) -> tuple[str | None, str | None, str]:
+    """``(mac, problem, note)`` for the Mac's side of the cable.
+
+    *published* is the helper's RRNET_NIC_MAC -- the address it found the
+    NIC by, so the one frames from the Mac carry. *observed* is what
+    ifconfig printed for the NIC. They must agree; a real disagreement is
+    a problem (wrong NIC, or a stale helper), never a silent pick. The
+    redaction placeholder is not an observation, so it cannot disagree:
+    the published address stands, and the note says why.
+    """
+    pub = published.lower()
+    if observed is None:
+        return pub, None, "ifconfig printed no ether line; using the helper's"
+    obs = observed.lower()
+    if obs == REDACTED_MAC:
+        return pub, None, (f"ifconfig shows macOS's redaction placeholder "
+                           f"{REDACTED_MAC} to this process; using the "
+                           f"helper's {pub} (not cross-checked)")
+    if obs != pub:
+        return None, (f"the helper found the NIC by {pub} but ifconfig "
+                      f"reports {obs} -- wrong NIC, or the helper is stale"), ""
+    return pub, None, "helper and ifconfig agree"
+
+
+#: Set when the installed helper cannot supply EVERY constant this module
+#: derives at import -- unreadable, or a partial helper missing one of them.
+#: The module constants then all take the pins, so a broken helper does not
+#: crash the import (the gate's unit suite imports this module). Every
+#: rig_const() caller -- the live suite -- still gets the RigConstError, and
+#: the unit suite's case 19h reports this as a FAIL.
+_MODULE_CONSTS = ("HOST_IP", "C64_IP", "C64_MAC")
+RIG_HELPER_ERROR: str | None = None
+try:
+    for _name in _MODULE_CONSTS:
+        rig_const(_name)
+except RigConstError as _e:
+    RIG_HELPER_ERROR = str(_e)
+
+
+def _module_const(name: str) -> str:
+    return RIG_PINNED[name] if RIG_HELPER_ERROR else rig_const(name)
+
+
+RIG_HOST_IP = _module_const("HOST_IP")
+#: A Mac NIC address for SYNTHETIC frames (the old en4 adapter's). The live
+#: suite reads the real one from ifconfig; nothing compares against this.
+RIG_HOST_MAC = bytes.fromhex("c05627b11638")
+RIG_C64_IP = _module_const("C64_IP")
+RIG_C64_MAC = bytes.fromhex(_module_const("C64_MAC").replace(":", ""))
+RIG_SUBNET = RIG_HOST_IP.rsplit(".", 1)[0] + ".0"
+RIG_POOL = RIG_POOL_PINNED
 
 #: src/wg/data.s:727 -- wg_state: 0=IDLE, 1=HS_SENT, 2=ACTIVE.
 WG_STATE_IDLE = 0

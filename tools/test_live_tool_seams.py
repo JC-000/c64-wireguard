@@ -1294,6 +1294,13 @@ _NOT_LIVE_TOOLS = {
 # purpose (#134). It still restores the CLOCK, inside the lock (#166).
 EXPECTED_SHORTFALL = {"wg_chat.py": frozenset({"reset", "set_reu"})}
 
+#: Tools that restore the device to its ENTRY state (the 2026-10-18 rule)
+#: rather than to idle: their finally must reach the harness's
+#: restore_state. Without this the audit credited test_ip65_rrnet_hw's
+#: set_turbo_mhz(client, 1) -- the no-snapshot FALLBACK branch -- and
+#: stayed green with restore_state deleted (review F4).
+ENTRY_STATE_TOOLS = frozenset({"test_ip65_rrnet_hw.py"})
+
 _TREE_CACHE: dict[str, ast.AST] = {}
 
 
@@ -1963,6 +1970,12 @@ def _teardown_audit(tools_dir: Path, overrides: dict | None = None) -> dict:
 
     res["starters"] = {rel for rel in res["discovered"] & LIVE_TOOLS
                        if "reset" in _direct_need(trees[rel])}
+    # Every live tool that snapshots or restores device state, for the
+    # set-equality check against ENTRY_STATE_TOOLS (review D7).
+    res["entry_state_callers"] = {
+        rel for rel in res["discovered"] & LIVE_TOOLS
+        if any(_callee(c) in ("snapshot_state", "restore_state")
+               for c in _calls_in(trees[rel]))}
     for rel in sorted(res["discovered"] & LIVE_TOOLS):
         tree = trees[rel]
         need = _direct_need(tree)
@@ -1974,6 +1987,10 @@ def _teardown_audit(tools_dir: Path, overrides: dict | None = None) -> dict:
         problems += _result_problems(tree)
         problems += _acquire_gap_problems(tree)
         problems += _released_before_restore(tree)
+        if rel in ENTRY_STATE_TOOLS and not any(
+                _callee(c) == "restore_state" for c in _finally_calls(tree)):
+            problems.append("restores to entry state by policy, but no "
+                            "restore_state() is reachable from a finally")
         info = {"need": set(need), "missing": missing,
                 "problems": problems, "delegates": False}
         if rel != _HS_FILE and _delegates(tree):
@@ -2038,6 +2055,14 @@ def check_live_tool_teardown(check, tools_dir: Path | None = None) -> None:
           "classified-only: a tool starts a PRG some way _PRG_START_CALLS "
           "does not know, so it owes no reset — teach the trigger; "
           "derived-only: classify it")
+    callers = r["entry_state_callers"]
+    check(f"teardown audit: tools calling snapshot_state/restore_state == "
+          f"ENTRY_STATE_TOOLS (unlisted {sorted(callers - ENTRY_STATE_TOOLS)}, "
+          f"listed-but-not-calling {sorted(ENTRY_STATE_TOOLS - callers)})",
+          callers == ENTRY_STATE_TOOLS,
+          "unlisted: a tool restores entry state but its finally is not held "
+          "to reaching restore_state -- list it; listed-but-not-calling: "
+          "a stale entry, or the tool stopped snapshotting")
     check("teardown audit: every EXPECTED_SHORTFALL key is a live tool",
           set(EXPECTED_SHORTFALL) <= LIVE_TOOLS,
           f"{sorted(set(EXPECTED_SHORTFALL) - LIVE_TOOLS)}")
@@ -2386,12 +2411,36 @@ def check_live_tool_teardown_alarms(check) -> None:
 
     # Review round 2 (PR #178). Same contract: each must go red.
     ip65 = "test_ip65_rrnet_hw.py"
-    ov = _mutated(ip65, "                        client.reset()\n",
-                  "                        pass\n")
+    ov = _mutated(ip65, "            client.reset()\n",
+                  "            pass\n")
     r = _teardown_audit(tools_dir, ov) if ov else None
     check("alarm-proof (review 2): test_ip65_rrnet_hw's finally reset "
           "deleted -> missing ['reset']",
           r is not None and r["tools"][ip65]["missing"] == {"reset"},
+          "mutation did not apply" if r is None else f"{r['tools'][ip65]}")
+    # D7, the reverse direction: an unlisted live tool that starts calling
+    # snapshot_state must break the set equality.
+    other = sorted(LIVE_TOOLS - ENTRY_STATE_TOOLS)[0]
+    try:
+        other_src = (tools_dir / other).read_text()
+    except OSError:
+        other_src = None
+    r = (_teardown_audit(tools_dir, {other: other_src + "\n\ndef _d7(c):\n"
+                                     "    snapshot_state(c)\n"})
+         if other_src else None)
+    check(f"alarm-proof (D7): {other} calling snapshot_state, unlisted -> "
+          "set equality breaks",
+          r is not None and other in r["entry_state_callers"]
+          and r["entry_state_callers"] != ENTRY_STATE_TOOLS,
+          "mutation did not apply" if r is None else
+          f"{sorted(r['entry_state_callers'])}")
+    ov = _mutated(ip65, "        restore_state(client, entry)\n",
+                  "        pass\n")
+    r = _teardown_audit(tools_dir, ov) if ov else None
+    check("alarm-proof (F4): test_ip65_rrnet_hw's restore_state deleted -> "
+          "an audit problem",
+          r is not None and any("restore_state" in p for p in
+                                r["tools"][ip65]["problems"]),
           "mutation did not apply" if r is None else f"{r['tools'][ip65]}")
     try:
         text = (tools_dir / ip65).read_text()

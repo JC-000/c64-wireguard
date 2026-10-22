@@ -3,8 +3,8 @@
 
 OPT-IN, BRIDGED ethernet-VICE only. Exit 77 (skipped) when the rig is not
 up. Deliberately NOT registered in tools/run_regression.py: it needs a real
-NIC on a real LAN, a pcap-capable x64sc and world-rw BPF nodes, none of
-which the gate can assume.
+NIC on a real LAN, a pcap-capable x64sc and BPF nodes this user can open
+read-write (group access_bpf), none of which the gate can assume.
 
 WHAT IT PROVES
 ==============
@@ -125,7 +125,9 @@ from vice_eth_rig import (  # noqa: E402
     EthVice, assert_ip65_build, boot_and_net_init, build_ip65, c64_ip,
     classify_tcpdump_line,
     libpcap_node_note, log, parse_map_exports, selftest_classifier,
-    selftest_map_parsers, vice_holders, vice_rawnet_problems,
+    park_outside_net, resolve_bridged_iface, selftest_map_parsers,
+    vice_holders,
+    vice_rawnet_problems, wifi_problem,
 )
 
 # Cloudflare WARP, the endpoint issue #120 was measured against. Any
@@ -134,7 +136,7 @@ from vice_eth_rig import (  # noqa: E402
 # such as 198.51.100.42 is an equally valid --dest.
 DEFAULT_DEST = "162.159.192.1:2408"
 
-DEFAULT_IFACE = "en4"
+DEFAULT_IFACE = None        # vice_eth_rig.resolve_bridged_iface() by MAC
 # 30 jiffies ~= 0.5 s, the budget after adversarial review. arp_lookup
 # retransmits every 100 ms, so 0.5 s still covers five attempts, and it cuts
 # the inbound-deafness window fourfold on the eviction path where Type 4
@@ -294,6 +296,9 @@ def bridged_rig_problems(vice_bin: str, iface: str) -> list[str]:
     note = libpcap_node_note()
     if note:
         problems.append(note)
+    wifi = wifi_problem(iface)
+    if wifi:
+        problems.append(wifi)
     inet = iface_inet(iface)
     if inet is None:
         problems.append(f"{iface} is missing, down, or has no IPv4 address — "
@@ -331,6 +336,52 @@ def arp_known(ip: str) -> bool:
     if r.returncode != 0 or "no entry" in r.stdout:
         return False
     return bool(re.search(r"at ([0-9a-f]{1,2}:){5}[0-9a-f]{1,2}\b", r.stdout))
+
+
+def known_lan_hosts() -> tuple[set[str], str | None]:
+    """``(addresses, problem)``: what the blackhole must never be.
+
+    This Mac's own IPv4s, and every host the harness's device map lists (a
+    powered-off U64E or C64U is silent, so a probe alone would pick it).
+    Read from local configuration, never by contacting a device; it
+    replaces two hard-coded addresses. The map is what protects the
+    devices, so failing to read it is a PROBLEM (the caller skips with it),
+    never a silently shorter list.
+    """
+    out: set[str] = set()
+    r = subprocess.run(["ifconfig", "-a"], capture_output=True, text=True)
+    out |= set(re.findall(r"\binet (\d+\.\d+\.\d+\.\d+)", r.stdout))
+    try:
+        import tomllib
+        from c64_test_harness.backends.device_aliases import aliases_file_path
+        path = aliases_file_path()
+        with open(path, "rb") as fh:
+            for dev in tomllib.load(fh).get("devices", {}).values():
+                out |= {h for h in dev.get("hosts", []) if isinstance(h, str)}
+    except (ImportError, OSError, ValueError) as e:
+        return out, (f"cannot read the harness device map ({e!r}), so the "
+                     "blackhole could land on a device that is switched off "
+                     "— fix it, or pass --blackhole")
+    return out, None
+
+
+def validate_blackhole(addr: str, avoid: set[str]) -> str | None:
+    """Why an operator's --blackhole cannot be used, or None.
+
+    The same tests pick_blackhole() applies to its own candidates: never a
+    known host (a device in the harness map is refused BEFORE any probe,
+    so a switched-off one is not contacted either), and never an address
+    that answers a ping or that the host has a MAC for.
+    """
+    if addr in avoid:
+        return (f"--blackhole {addr} is a known host (this Mac or a device "
+                "in the harness map)")
+    subprocess.run(["arp", "-d", addr], capture_output=True, text=True)
+    if ping_silent(addr):
+        return f"--blackhole {addr} answers a ping, so it is not a blackhole"
+    if arp_known(addr):
+        return f"--blackhole {addr} has a MAC in the host's ARP cache"
+    return None
 
 
 def pick_blackhole(subnet_prefix: str, avoid: set[str]) -> str | None:
@@ -428,16 +479,18 @@ def opt_byte(tr, L, name: str) -> int | None:
 class WireTap:
     """ONE tcpdump. Frames for bytes, and tcpdump's own text for classifying.
 
-    ONE BPF HANDLE IS THE WHOLE POINT. This bench has exactly four world-rw
-    /dev/bpf nodes (bpf0-bpf3; bpf4+ are root-only) and they are shared by
-    every lane. VICE's pcap driver needs one, so a suite that opens two
-    leaves one spare for the entire rest of the machine — and when the
-    fourth is gone, VICE's eth_init fails, ip65_init returns carry set, and
-    the C64 prints NET INIT FAILED. That is not a network problem and looks
-    nothing like one. MEASURED: two concurrent tcpdumps plus VICE on en4
-    gave "cannot open BPF device /dev/bpf4: Permission denied" and three
-    consecutive runs died at network init. An earlier draft of this suite
-    ran a second live capture for payload bytes and caused exactly that.
+    ONE BPF HANDLE IS THE WHOLE POINT. The bench this was written on had
+    exactly four world-rw /dev/bpf nodes (bpf0-bpf3; bpf4+ root-only),
+    shared by every lane. VICE's pcap driver needs one, so a suite that
+    opens two leaves one spare for the entire rest of the machine — and
+    when the fourth is gone, VICE's eth_init fails, ip65_init returns carry
+    set, and the C64 prints NET INIT FAILED. That is not a network problem
+    and looks nothing like one. MEASURED: two concurrent tcpdumps plus VICE
+    on en4 gave "cannot open BPF device /dev/bpf4: Permission denied" and
+    three consecutive runs died at network init. An earlier draft of this
+    suite ran a second live capture for payload bytes and caused exactly
+    that. (The current Mac has 256 nodes, all crw-rw---- root:access_bpf,
+    so the ceiling is far higher; each consumer still holds one.)
 
     So: one live ``tcpdump -w`` writing a pcap file (``-U``, packet
     buffered, so records land as they arrive), and two readers of that one
@@ -709,6 +762,9 @@ def send_once(tr, L, payload: bytes, timeout: float,
     # Staging is several monitor round trips. Anything timed against the
     # CALL must start here, after them, or it races the setup instead of
     # the send — which is how the mid-pump probe kept landing late.
+    # Off net_poll first (c64-test-harness#556): see park_outside_net. A
+    # no-op when the CPU is already parked, which takeover keeps it.
+    park_outside_net(tr, L)
     if on_before_jsr is not None:
         on_before_jsr()
     t0 = time.monotonic()
@@ -717,8 +773,9 @@ def send_once(tr, L, payload: bytes, timeout: float,
     return read_bytes(tr, CARRY, 1)[0], elapsed
 
 
-def timing_floor(tr) -> float:
+def timing_floor(tr, L) -> float:
     """What a jsr() to a bare RTS costs — the noise floor of send_once()."""
+    park_outside_net(tr, L)                     # c64-test-harness#556
     samples = []
     for _ in range(5):
         t0 = time.monotonic()
@@ -729,6 +786,7 @@ def timing_floor(tr) -> float:
 
 def pump(tr, L, calls: int = POLL_CALLS) -> None:
     """Run ip65_process *calls* times so an ARP reply gets processed."""
+    park_outside_net(tr, L)                     # c64-test-harness#556
     for _ in range(calls):
         jsr(tr, L["net_poll"], timeout=10.0)
 
@@ -752,7 +810,9 @@ def main() -> int:
         "VICE_ETHERNET_BIN", DEFAULT_VICE_BIN))
     ap.add_argument("--iface", default=os.environ.get("C64_ETH_IFACE",
                                                       DEFAULT_IFACE),
-                    help="the real NIC VICE binds by pcap name (default en4)")
+                    help="the real NIC VICE binds by pcap name (default: "
+                         "$C64_ETH_IFACE, else the port carrying the bridged "
+                         "NIC's MAC)")
     ap.add_argument("--dest", default=DEFAULT_DEST,
                     help="OFF-SUBNET destination IP:PORT (default Cloudflare "
                          "WARP, as measured in issue #120)")
@@ -761,8 +821,11 @@ def main() -> int:
     ap.add_argument("--budget", type=float, default=DEFAULT_BUDGET,
                     help="the implementer's ARP-retry budget in seconds "
                          f"(default {DEFAULT_BUDGET})")
+    # `is None`, not `or`: --seed 0 / TEST_SEED=0 is a seed, not "random".
     ap.add_argument("--seed", type=int,
-                    default=int(os.environ.get("TEST_SEED", "0")) or None)
+                    default=(int(os.environ["TEST_SEED"])
+                             if os.environ.get("TEST_SEED", "").strip()
+                             else None))
     ap.add_argument("--arp-cache-addr", type=lambda s: int(s, 0), default=None,
                     help="override the arp_cache address derived from the "
                          "ip65 map. FOR THE ALARM PROOF ONLY: pointing it at "
@@ -809,7 +872,19 @@ def main() -> int:
             return 1
         log(f"  {label} self-test: OK")
 
+    if args.iface is None:
+        args.iface, why = resolve_bridged_iface()
+        if why:
+            log(f"SKIP: bridged ethernet rig not ready: {why}")
+            return SKIP_EXIT
     problems = bridged_rig_problems(args.vice_bin, args.iface)
+    lan_hosts, why = known_lan_hosts()
+    if why and not args.blackhole:
+        problems.append(why)
+    if args.blackhole:
+        bad = validate_blackhole(args.blackhole, lan_hosts)
+        if bad:
+            problems.append(bad)
     if problems:
         log("SKIP: bridged ethernet rig not ready:")
         for p in problems:
@@ -898,14 +973,14 @@ def main() -> int:
                 inconclusive(f"gateway {gw} is not on {prefix}.0/24")
 
             blackhole = args.blackhole or pick_blackhole(
-                prefix, {host_ip, gw, c64, "10.43.23.81", "10.43.23.99"})
+                prefix, {host_ip, gw, c64} | lan_hosts)
             if blackhole is None:
                 inconclusive("could not find an unused on-subnet address for "
                              "the budget phase; pass --blackhole")
             log(f"  blackhole (on-subnet, unanswered): {blackhole}")
 
             install_send_tramp(tr, L)
-            floor = timing_floor(tr)
+            floor = timing_floor(tr, L)
             log(f"  jsr() timing floor: {floor * 1000:.0f} ms")
 
             sport = rng.randrange(49152, 65536)
@@ -1395,6 +1470,7 @@ def main() -> int:
                 log("")
                 log("=== Phase 4: net_init clears ip65_send_attempts ===")
                 before = opt_byte(tr, L, "ip65_send_attempts")
+                park_outside_net(tr, L)         # c64-test-harness#556
                 jsr(tr, L["net_init"], timeout=30.0)
                 after = opt_byte(tr, L, "ip65_send_attempts")
                 log(f"  ip65_send_attempts: {before} -> {after} across "
