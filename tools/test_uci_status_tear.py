@@ -73,6 +73,15 @@ Also
   (DATA_AV clear, phase randomised). A fix must leave with $89 inside
   BOUND_SECONDS of emulated time at both 1 MHz and TURBO MHz — a spin is
   caught as a budget overrun, never as a hang of this process.
+* the idle gate (case `orphan`): the poll starts while an orphaned reply is
+  still in STATE 01 and goes 01 -> 10 after K reads (K = 1, 3); a one-sample
+  $00 is swept over every read. A torn $00 taken for idle pushes SOCKET_READ
+  into a live 10, which the model DROPS (command_protocol.vhd: no push in
+  1x), and the orphan is delivered in place of the reply. Off-edge reds are
+  allowed only on the reply path (wrs_loop / hdr_loop), never in the gate.
+* the bound is also counted at the wire tap: at most BOUND_STATUS_READS
+  UCI_STATUS reads after the flicker begins, so a cap that is merely huge
+  goes red, not only a spin.
 * interpreter fidelity: tools/test_uci_short_read_drop.py's case 0 (BLAKE2s
   out of the same PRG against hashlib, plus a one-bit corruption alarm).
 * detector: a verdict computed against a payload with one byte flipped must
@@ -110,19 +119,21 @@ sys.path.insert(0, str(PROJECT_ROOT / "tools"))
 from uci.mos6502 import Mos6502, CpuBudgetExceeded  # noqa: E402
 import test_uci_short_read_drop as rig  # noqa: E402
 from test_uci_short_read_drop import (  # noqa: E402
-    UCI_STATUS, CTRL_NEXT_DATA, STATE_IDLE, STATE_DATA_LAST,
+    UCI_STATUS, CTRL_NEXT_DATA, STATE_IDLE, STATE_BUSY, STATE_DATA_LAST,
     STATE_DATA_MORE, FIRST_BLOCK_PAYLOAD, READ_CHUNK_MAX, ERR_WAIT_TIMEOUT,
     Cia1Tod, Machine, PollResult, Result, UciDevice, make_device,
     _payload_for,
 )
 
-EXPECTED_CHECKS = 43
+EXPECTED_CHECKS = 57
 
 # (a) torn high on the 01 -> 10 edge, (b) torn low, (c) STATE settled but
 # DATA_AV one FPGA clock late. All three have DATA_AV clear.
 TRANSIENTS = {"a:$30-torn": 0x30, "b:$00-torn": 0x00, "c:$20-lag": 0x20}
 
 EDGE_SCHEDULES = (1, 2, 3, 4)
+# Orphan validated LAST after K idle-gate reads.
+ORPHAN_SCHEDULES = (1, 3)
 
 # Where a one-sample transient on a STABLE register (no edge at that read,
 # so not a physical tear) still breaks a delivery once @block_end is fixed.
@@ -143,6 +154,13 @@ OFF_EDGE_RESIDUAL = {"uci_wait_idle@wi_loop",
                      "uci_wait_reply_staged@wrs_loop",
                      "net_poll@hdr_loop"}
 BOUND_SECONDS = 3.0
+# Wire-tap ceiling on UCI_STATUS reads from the first flickering read to the
+# poll's return. The time bound above only catches a SPIN; this one catches
+# a cap that is merely huge (200 reads = ~1.1 s of fences at 1 MHz still
+# fits in 3 s). The fix spends 11: one @byte_loop read, the 8-read @settle
+# cap, and one read each in uci_drain_resp / uci_drain_status. 24 leaves
+# room for a cap up to ~2x the fix's 8 without rewriting this.
+BOUND_STATUS_READS = 24
 # A sweep child may legitimately sit out a TOD budget (<= 5 s); anything
 # past this is reported as HUNG rather than waited for.
 SWEEP_BUDGET_SECONDS = 30.0
@@ -164,6 +182,19 @@ class TapDevice(UciDevice):
         self.inject = None          # (index, value)
         self.override = None        # callable(index, true) -> served
         self.on_status_read = None  # fork hook
+        self.dropped_pushes = 0
+
+    def _push_cmd(self):
+        # command_protocol.vhd: in state 1x a PUSH_CMD is dropped, while the
+        # command bytes already written stay in the buffer and misalign the
+        # next command (uci_cmd.s ORPHAN CLEAR note). The base model accepts
+        # every push; no flow in tools/test_uci_short_read_drop.py pushes in
+        # 1x, so the rule only matters here.
+        if self.state & STATE_DATA_LAST:
+            self.dropped_pushes += 1
+            self.log.append(("push-dropped", f"state=${self.state:02X}"))
+            return
+        super()._push_cmd()
 
     def _read_pc(self):
         # Every UCI_STATUS read in this PRG is an absolute-mode load; at the
@@ -195,6 +226,45 @@ class TapDevice(UciDevice):
         if addr == UCI_STATUS and value & CTRL_NEXT_DATA:
             self.acks.append((self.state, len(self.resp) - self.resp_pos,
                               len(self.status_log)))
+        super().write(addr, value)
+
+
+class OrphanDevice(TapDevice):
+    """The idle gate's case: the poll begins while a PREVIOUS command's
+    reply is still being staged (STATE 01, CMD_BUSY clear: an orphan left
+    by a timed-out wait). After `orphan_after` UCI_STATUS reads the firmware
+    validates it LAST, so STATE goes 01 -> 10 with the orphan's bytes in the
+    FIFO. uci_wait_idle has to see that and accept it (NEXT_DATA, 10 -> 00)
+    before net_poll pushes SOCKET_READ; a torn $00 on the edge read must not
+    pass for idle. The orphan's own accept is counted apart from the real
+    reply's acks, so it is neither "extra" nor "destructive"."""
+
+    def __init__(self, *a, orphan, orphan_after, **kw):
+        super().__init__(*a, **kw)
+        self.state = STATE_BUSY
+        self.orphan = orphan
+        self._orphan_countdown = orphan_after
+        self.orphan_live = False
+        self.orphan_acks = 0
+
+    def read(self, addr):
+        v = super().read(addr)
+        if addr == UCI_STATUS and self._orphan_countdown is not None:
+            self._orphan_countdown -= 1
+            if self._orphan_countdown <= 0:
+                self._orphan_countdown = None
+                self.state = STATE_DATA_LAST
+                self.resp, self.resp_pos = self.orphan, 0
+                self.orphan_live = True
+                self.log.append(("orphan-staged", len(self.orphan)))
+        return v
+
+    def write(self, addr, value):
+        if addr == UCI_STATUS and value & CTRL_NEXT_DATA and self.orphan_live:
+            self.orphan_live = False
+            self.orphan_acks += 1
+            UciDevice.write(self, addr, value)
+            return
         super().write(addr, value)
 
 
@@ -278,10 +348,12 @@ def site_names(sym_lines):
 # =============================================================================
 class Scenario:
     def __init__(self, tag, n, payload, poison, socket_id, make_dev,
-                 sweep_from_first_ack):
+                 sweep_from_first_ack, values=None, residual=None):
         self.tag, self.n, self.payload, self.poison = tag, n, payload, poison
         self.socket_id, self.make_dev = socket_id, make_dev
         self.sweep_from_first_ack = sweep_from_first_ack
+        self.values = values or dict(TRANSIENTS)
+        self.residual = OFF_EDGE_RESIDUAL if residual is None else residual
 
 
 def build_scenarios(rng, mod, buf_cap):
@@ -347,6 +419,10 @@ def verdict(r, dev, sc, clean_acks):
                    f"unread={destructive[0][1]})")
     if clean_acks is not None and len(dev.acks) != clean_acks:
         why.append(f"acks={len(dev.acks)}!={clean_acks}")
+    if dev.dropped_pushes:
+        why.append(f"push-dropped-in-1x x{dev.dropped_pushes}")
+    if isinstance(dev, OrphanDevice) and dev.orphan_acks != 1:
+        why.append(f"orphan-acks={dev.orphan_acks}")
     return why
 
 
@@ -382,7 +458,7 @@ def sweep(machine, sc, rng, mhz, jobs):
     def fork_at(idx):
         if sc.sweep_from_first_ack and not dev.acks:
             return
-        names = list(TRANSIENTS)
+        names = list(sc.values)
         order_rng.shuffle(names)
         for name in names:
             while len(live) >= jobs:
@@ -393,7 +469,7 @@ def sweep(machine, sc, rng, mhz, jobs):
             if pid == 0:
                 os.close(rfd)
                 dev.on_status_read = None
-                dev.inject = (idx, TRANSIENTS[name])
+                dev.inject = (idx, sc.values[name])
                 child["ctx"] = (idx, name, wfd)
                 return              # the child finishes the poll from here
             os.close(wfd)
@@ -433,7 +509,7 @@ def summarise(rows, site_of, label):
     """Compress red rows into (value, site, true, edge, why) runs."""
     red = [row for row in rows if row[5]]
     lines = []
-    for vname in TRANSIENTS:
+    for vname in sorted({row[1] for row in rows}):
         mine = [row for row in red if row[1] == vname]
         runs = []
         for idx, _n, pc, true, edge, why in mine:
@@ -453,26 +529,58 @@ def summarise(rows, site_of, label):
 # =============================================================================
 # Cases
 # =============================================================================
+def run_scenario(ctx, res, sc, tag):
+    """Sweep one scenario and apply the four per-scenario checks."""
+    m, rng = ctx["machine"], ctx["rng"]
+    r, dev, rows = sweep(m, sc, rng, ctx["mhz"], ctx["jobs"])
+    clean_why = verdict(r, dev, sc, len(dev.acks))
+    edges = [i for i in range(1, len(dev.status_log))
+             if dev.status_log[i][1] != dev.status_log[i - 1][1]]
+    print(f"  [{sc.tag}] clean: reads={len(dev.status_log)} "
+          f"acks={len(dev.acks)} ready={r.ready} len={r.recv_len} "
+          f"err=${r.error:02X} | children={len(rows)} | edges at "
+          + ", ".join(f"#{i}(${dev.status_log[i - 1][1]:02X}->"
+                      f"${dev.status_log[i][1]:02X} "
+                      f"{ctx['site'](dev.status_log[i][0])})"
+                      for i in edges))
+    res.check(not clean_why, f"control/{tag}",
+              f"the clean poll (no transient) is not a correct delivery: "
+              f"{clean_why}")
+    swept = sorted({row[0] for row in rows})
+    first_ack = dev.acks[0][2] if dev.acks else len(dev.status_log)
+    want = list(range(first_ack if sc.sweep_from_first_ack else 0,
+                      len(dev.status_log)))
+    res.check(swept == want and len(rows) == len(want) * len(sc.values),
+              f"swept-every-index/{tag}",
+              f"children ran at {len(swept)} indices, the clean run made "
+              f"{len(want)} reads in range; rows={len(rows)}")
+    red, lines = summarise(rows, ctx["site"], sc.tag)
+    for line in lines:
+        print(line)
+    edge_red = [row for row in red if row[4]]
+    print(f"  [{sc.tag}] red {len(red)}/{len(rows)} "
+          f"(at EDGE reads: {len(edge_red)})")
+    res.check(not edge_red, f"edge-green/{tag}",
+              f"{len(edge_red)} transient(s) on a read where the true "
+              f"STATUS changed broke the delivery — see RED ... EDGE")
+    off_sites = {ctx["site"](row[2]) for row in red if not row[4]}
+    print(f"  [{sc.tag}] off-edge red sites: {sorted(off_sites) or '-'}")
+    res.check(off_sites <= sc.residual,
+              f"off-edge-residual/{tag}",
+              f"off-edge transients broke the delivery at "
+              f"{sorted(off_sites - sc.residual)}, outside the "
+              f"measured residual {sorted(sc.residual)}")
+    return r, dev, edges
+
+
 def case_sweeps(ctx, res):
     print("\n[sweep] one-sample transient at every UCI_STATUS read")
     m, rng = ctx["machine"], ctx["rng"]
     scenarios = build_scenarios(rng, ctx["mod"], m.buf_cap)
     prefix_ref = None
     for sc in scenarios:
-        r, dev, rows = sweep(m, sc, rng, ctx["mhz"], ctx["jobs"])
-        clean_why = verdict(r, dev, sc, len(dev.acks))
-        edges = [i for i in range(1, len(dev.status_log))
-                 if dev.status_log[i][1] != dev.status_log[i - 1][1]]
-        print(f"  [{sc.tag}] clean: reads={len(dev.status_log)} "
-              f"acks={len(dev.acks)} ready={r.ready} len={r.recv_len} "
-              f"err=${r.error:02X} | children={len(rows)} | edges at "
-              + ", ".join(f"#{i}(${dev.status_log[i - 1][1]:02X}->"
-                          f"${dev.status_log[i][1]:02X} "
-                          f"{ctx['site'](dev.status_log[i][0])})"
-                          for i in edges))
-        res.check(not clean_why, f"control/{sc.tag.split('/')[-1] if 'multi' in sc.tag else 'single'}",
-                  f"the clean poll (no transient) is not a correct delivery: "
-                  f"{clean_why}")
+        tag = sc.tag.split("/")[-1] if "multi" in sc.tag else "single"
+        r, dev, _edges = run_scenario(ctx, res, sc, tag)
         # The prefix the from-first-ack schedules skip must really be
         # identical: same PCs, same true values, same served values.
         if sc.tag.startswith("multi"):
@@ -482,35 +590,9 @@ def case_sweeps(ctx, res):
                 prefix_ref = prefix
             elif sc.sweep_from_first_ack:
                 res.check(prefix == prefix_ref,
-                          f"prefix-identical/{sc.tag.split('/')[-1]}",
+                          f"prefix-identical/{tag}",
                           "the reads before the first DATA_ACC differ from "
                           "edge+1's, so skipping them is not justified")
-        swept = sorted({row[0] for row in rows})
-        first_ack = dev.acks[0][2] if dev.acks else len(dev.status_log)
-        want = list(range(first_ack if sc.sweep_from_first_ack else 0,
-                          len(dev.status_log)))
-        res.check(swept == want and len(rows) == len(want) * len(TRANSIENTS),
-                  f"swept-every-index/{sc.tag.split('/')[-1] if 'multi' in sc.tag else 'single'}",
-                  f"children ran at {len(swept)} indices, the clean run made "
-                  f"{len(want)} reads in range; rows={len(rows)}")
-        red, lines = summarise(rows, ctx["site"], sc.tag)
-        for line in lines:
-            print(line)
-        edge_red = [row for row in red if row[4]]
-        print(f"  [{sc.tag}] red {len(red)}/{len(rows)} "
-              f"(at EDGE reads: {len(edge_red)})")
-        ctx["sweep_rows"].append((sc, rows))
-        tag = sc.tag.split("/")[-1] if "multi" in sc.tag else "single"
-        res.check(not edge_red, f"edge-green/{tag}",
-                  f"{len(edge_red)} transient(s) on a read where the true "
-                  f"STATUS changed broke the delivery — see RED ... EDGE")
-        off_sites = {ctx["site"](row[2]) for row in red if not row[4]}
-        print(f"  [{sc.tag}] off-edge red sites: {sorted(off_sites) or '-'}")
-        res.check(off_sites <= OFF_EDGE_RESIDUAL,
-                  f"off-edge-residual/{tag}",
-                  f"off-edge transients broke the delivery at "
-                  f"{sorted(off_sites - OFF_EDGE_RESIDUAL)}, outside the "
-                  f"measured residual {sorted(OFF_EDGE_RESIDUAL)}")
     # Detector proof: the verdict must see one flipped payload byte.
     sc = scenarios[0]
     dev = sc.make_dev()
@@ -524,6 +606,57 @@ def case_sweeps(ctx, res):
               "detector/one-flipped-byte-is-red",
               "a verdict against a payload with one flipped bit came out "
               "green — the byte-exact comparison is not observing the copy")
+
+
+def case_orphan(ctx, res):
+    """uci_wait_idle must not take a torn $00 on an orphan's 01 -> 10 edge.
+
+    The poll starts with a previous command's reply still being staged
+    (STATE 01); the firmware validates it LAST after K reads. A one-sample
+    $00 is swept over every read. If the idle gate believes it, net_poll
+    pushes SOCKET_READ into a live 10, the FPGA drops the push, and what
+    comes back is the orphan, not our reply. The only off-edge residual
+    allowed here is the reply path's (wrs_loop / hdr_loop): the idle gate
+    itself, at any read, must stay green.
+    """
+    print("\n[orphan] a torn $00 at the idle gate must not pass for idle")
+    m, rng = ctx["machine"], ctx["rng"]
+    poison = ctx["mod"].poison_pattern(m.buf_cap)
+    n = rng.randrange(1, 65)
+    payload = _payload_for(rng, n, poison)
+    # The orphan: a 2-byte header claiming a length the real reply never
+    # has, then bytes from the top half of the byte range only. The real
+    # reply's length is < 65, so a delivered orphan cannot pass for it.
+    olen = rng.randrange(100, 400)
+    orphan = bytes([olen & 0xFF, olen >> 8]) + bytes(
+        rng.randrange(0x80, 0x100) for _ in range(olen))
+    sid = rng.randrange(1, 250)
+    accept = rng.randrange(2_000, 40_000)
+    first = rng.randrange(3_000, 60_000)
+    residual = OFF_EDGE_RESIDUAL - {"uci_wait_idle@wi_loop"}
+    for k in ORPHAN_SCHEDULES:
+        def mk(k=k):
+            d = make_device(random.Random(0), announced=n,
+                            delivered_payload=payload,
+                            final_state=STATE_IDLE)
+            return OrphanDevice(announced=d.announced, payload=d.payload,
+                                blocks=d.blocks, final_state=d.final_state,
+                                accept_cycles=accept,
+                                stage_cycles=[first, first],
+                                orphan=orphan, orphan_after=k)
+        sc = Scenario(f"orphan+{k}/single{n}", n, payload, poison, sid, mk,
+                      sweep_from_first_ack=False,
+                      values={"b:$00-torn": 0x00}, residual=residual)
+        tag = f"orphan+{k}"
+        _r, dev, edges = run_scenario(ctx, res, sc, tag)
+        at_gate = [i for i in edges
+                   if ctx["site"](dev.status_log[i][0]).startswith(
+                       "uci_wait_idle")
+                   and dev.status_log[i - 1][1] & 0x30 == STATE_BUSY
+                   and dev.status_log[i][1] & 0x30 == STATE_DATA_LAST]
+        res.check(bool(at_gate), f"edge-at-idle-gate/{tag}",
+                  "the clean run has no 01 -> 10 edge on an idle-gate read, "
+                  "so this scenario is not exercising the gate at all")
 
 
 def case_bound(ctx, res):
@@ -579,6 +712,11 @@ def case_bound(ctx, res):
                   f"net_poll did not return within {BOUND_SECONDS} s of "
                   f"emulated time at {mhz:g} MHz after STATUS began to "
                   f"flicker: {r.hung}")
+        res.check(r.hung is None and flick_reads <= BOUND_STATUS_READS,
+                  f"bound/{mhz:g}MHz/phase{phase}/status-reads",
+                  f"{flick_reads} UCI_STATUS reads after STATUS began to "
+                  f"flicker (ceiling {BOUND_STATUS_READS}"
+                  f"{', and it never returned' if r.hung else ''})")
         res.check(r.error == ERR_WAIT_TIMEOUT and r.carry == 1
                   and r.ready == 0, f"bound/{mhz:g}MHz/phase{phase}/wait-timeout",
                   f"err=${r.error:02X} C={r.carry} ready={r.ready}; "
@@ -600,7 +738,7 @@ def main(argv=None):
     p.add_argument("--turbo-mhz", type=float,
                    default=float(os.environ.get("UCI_TEAR_TURBO_MHZ", "48")))
     p.add_argument("--jobs", type=int, default=os.cpu_count() or 2)
-    p.add_argument("--only", choices=("interp", "sweep", "bound"))
+    p.add_argument("--only", choices=("interp", "sweep", "orphan", "bound"))
     args = p.parse_args(argv)
 
     seed = args.seed
@@ -632,7 +770,7 @@ def main(argv=None):
            "site": site, "sweep_rows": []}
     res = Result()
     cases = {"interp": case_interpreter, "sweep": case_sweeps,
-             "bound": case_bound}
+             "orphan": case_orphan, "bound": case_bound}
     for key, fn in cases.items():
         if args.only and args.only != key:
             continue
