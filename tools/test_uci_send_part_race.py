@@ -65,7 +65,8 @@ Scenarios (all multi-part ones are 889..1087 bytes: part 0 = the clamp, part
             uci_udp_connect (a `85` refusal staged late must be OPEN_REFUSED
             $8D, not $88 after the 1 s budget) and net_udp_close (its reply
             consumed, not orphaned): the same STATE-01 sites as the send,
-            in the default build too.
+            the same source as in the default build (not under #ifdef), but
+            the default PRG itself is not what this suite runs.
   refuseR   as refuse, but the refusal ALSO stages two RESP_DATA bytes (the
             firmware's reply shape was not characterised on the bench): they
             must land in uci_write_resp with uci_resp_count == 2, as the
@@ -129,7 +130,7 @@ from test_uci_short_read_drop import (  # noqa: E402
 )
 from test_uci_status_tear import TapDevice, site_names  # noqa: E402
 
-EXPECTED_CHECKS = 202
+EXPECTED_CHECKS = 210
 
 ERR_SEND_FAIL = 0x85
 ERR_OPEN_REFUSED = 0x8D
@@ -235,6 +236,8 @@ class SendDevice(TapDevice):
     def _accept(self):
         self.cmd_busy = 0               # STATE stays 01 until staged
         kind, val = self.stage_mode
+        if kind == "never":
+            return                      # STATE stays 01: a wedged firmware task
         if kind == "edge":
             if val == 0:
                 self._stage_reply()
@@ -359,6 +362,8 @@ class SendMachine(tear.TapMachine):
             cpu.call(s[entry], max_cycles=max_cycles)
         except CpuBudgetExceeded as exc:
             hung = str(exc)
+        except Exception as exc:    # noqa: BLE001 — a CPU that left the code
+            hung = f"CPU FAULT {exc!r}"   # (bad return address) did not return
         wr = s["uci_write_resp"]
         return PollResult(carry=cpu.c, error=mem[s["net_last_error"]],
                           cycles=cpu.cycles, hung=hung,
@@ -807,6 +812,41 @@ def case_bound(ctx, res):
                   f"ONE command, no datagram")
 
 
+def case_wedge(ctx, res):
+    """STATE stays 01 after ACCEPT: uci_wait_reply_staged's 1 s budget must
+    expire into $89 at the new close and connect sites, return cleanly, and
+    leave the socket state as the site documents."""
+    print("\n[wedge] a reply that never leaves STATE 01 ends in $89, cleanly")
+    m, rng = ctx["machine"], ctx["rng"]
+    accept = rng.randrange(2_000, 12_000)
+    for kind, entry in (("close", "net_udp_close"),
+                        ("connect", "uci_udp_connect")):
+        ip = tuple(rng.randrange(1, 255) for _ in range(4))
+        dest = (ip, rng.randrange(1024, 65000))
+        sid = rng.randrange(1, 250)
+        dev = SendDevice(simple_reply=(b"", b"00,OK"),
+                         stage_mode=("never", 0), accept_cycles=accept)
+        r = m.cmd(dev, entry, socket_id=sid if kind == "close" else 0,
+                  socket_open=1 if kind == "close" else 0, dest=dest,
+                  mhz=ctx["mhz"],
+                  max_cycles=int(SWEEP_BUDGET_SECONDS * ctx["mhz"] * 1e6))
+        print(f"  [{kind}] hung={r.hung} C={r.carry} err=${r.error:02X} "
+              f"socket_open={r.socket_open} id=${r.socket_id:02X} "
+              f"cmds={len(dev.simple_cmds)}")
+        tag = f"wedge/{kind}"
+        res.check(r.hung is None, f"{tag}/returns-cleanly",
+                  f"{entry} did not return to its caller: {r.hung}")
+        res.check(r.carry == 1 and r.error == ERR_WAIT_TIMEOUT,
+                  f"{tag}/c1-and-89",
+                  f"C={r.carry} err=${r.error:02X}; expected C=1, $89")
+        res.check(r.socket_open == 0 and (kind != "close" or r.socket_id == 0),
+                  f"{tag}/socket-state",
+                  f"socket_open={r.socket_open} id=${r.socket_id:02X}; "
+                  f"expected 0 (and id 0 for close)")
+        res.check(len(dev.simple_cmds) == 1, f"{tag}/one-command",
+                  f"{len(dev.simple_cmds)} commands on the wire, expected 1")
+
+
 def case_interpreter(ctx, res):
     rig.case0_interpreter_fidelity(ctx, res)
 
@@ -835,7 +875,7 @@ def main(argv=None):
                    default=float(os.environ.get("UCI_SEND_RACE_TURBO_MHZ",
                                                 "48")))
     p.add_argument("--jobs", type=int, default=os.cpu_count() or 2)
-    p.add_argument("--only", choices=("interp", "sweep", "bound"))
+    p.add_argument("--only", choices=("interp", "sweep", "bound", "wedge"))
     args = p.parse_args(argv)
 
     seed = args.seed
@@ -876,7 +916,7 @@ def main(argv=None):
            "site": site}
     res = Result()
     cases = {"interp": case_interpreter, "sweep": case_sweep,
-             "bound": case_bound}
+             "bound": case_bound, "wedge": case_wedge}
     for key, fn in cases.items():
         if args.only and args.only != key:
             continue

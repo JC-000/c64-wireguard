@@ -1163,8 +1163,9 @@ uci_udp_connect:
         ; HANDSHAKE_ACCEPT_COMMAND; the status line is staged AFTER that (STATE
         ; stays 01 until copy_result validates), so wait for STATE to leave 01
         ; before draining, else a refusal drained in the window misses the fast
-        ; path, sits out the 1 s budget and surfaces as $88. Drain it FIRST: if a non-"00" refusal code
-        ; is present we can name it (UCI_ERR_OPEN_REFUSED) and bail immediately,
+        ; path, sits out the 1 s budget and surfaces as $88. Drain it FIRST:
+        ; if a non-"00" refusal code is present we can name it
+        ; (UCI_ERR_OPEN_REFUSED) and bail immediately,
         ; instead of sitting out uci_read_resp_bytes' full wall-clock budget
         ; waiting for a socket_id byte that will never arrive and then surfacing
         ; a generic $88. Draining status here does not disturb the socket_id on
