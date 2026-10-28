@@ -573,3 +573,9 @@ The Unix timestamp (line 9) initializes the TAI64N epoch anchor for handshake re
 - **Keepalive**: Empty Type 4 packet after 10 seconds of silence
 - **Rekey**: Re-initiate handshake after 120 seconds
 - **Expire**: Reset session after 180 seconds
+
+## License
+
+MIT — see [LICENSE](LICENSE). The submodules under `libs/` are MIT-licensed
+as well. ip65, which is built from the sibling `c64-https` checkout for
+`BACKEND=ip65`, keeps its own license.
