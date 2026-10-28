@@ -382,6 +382,15 @@ SERIAL_TESTS = [
     # announced lengths and payloads are random per run and the seed is on
     # the first line of its output (reproduce with --seed).
     ("uci_short_read", ["tools/test_uci_short_read_drop.py"]),
+    # A torn UCI_STATUS read: $DF1C is unlatched, so a read on the
+    # firmware's 01 -> 10 VALIDATE_LAST edge can return $30 or $00, and
+    # DATA_AV lags STATE by one FPGA clock ($20). Same host 6502 + $DF1C
+    # model as uci_short_read; a one-sample transient is swept over EVERY
+    # UCI_STATUS read of a multi-block reply (forked from one clean poll),
+    # under several staging schedules, and a STATUS that never settles must
+    # end in $89 at 1 and 48 MHz. Serial: builds `make BACKEND=uci` itself.
+    # Unseeded; the seed is on its first line. Uses os.cpu_count() workers.
+    ("uci_status_tear", ["tools/test_uci_status_tear.py"]),
     # WiFi-only "DHCP FAILED": the real net_dhcp_acquire on the host 6502
     # against a model of the firmware's GET_IPADDR per interface (index 0 =
     # ethernet, 1 = WiFi; out of range = empty reply + "82,..." status),

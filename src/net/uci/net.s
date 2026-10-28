@@ -1220,6 +1220,8 @@ uci_udp_connect:
 ; producing-side change only.
 ; Clobbers: A, X, Y
 ; =============================================================================
+UCI_STATUS_SETTLE_READS = 8     ; @settle read cap: worst case needs 4
+
 net_poll:
         lda uci_socket_open
         bne @sock_ok
@@ -1479,11 +1481,39 @@ net_poll:
         ; datagram; 5500 cyc -> stop=893 with len=1216, i.e. the #130
         ; signature produced by a reply that was never short; 20000 cyc ->
         ; whole datagram again. So poison_stop == 893 has TWO causes, and
-        ; only DATA_AV tells them apart. `tax` latches ONE read for both
+        ; only DATA_AV tells them apart. `tax` latches ONE value for both
         ; tests: two reads could straddle the staging edge and disagree, and
         ; the $30 arm needs the distinction too — without it an already-
         ; drained Data More block and a freshly staged one are identical at
         ; the compare, and we would re-ack instead of draining.
+        ;
+        ; BUT ONE READ IS NOT ONE VALUE (2026-10-26, RTL + U64E measurement
+        ; by the 1541ultimate session; ~/Documents/1541u-link/lanes/uci-race/
+        ; ANALYSIS.md). UCI_STATUS is a live combinational view of the FPGA
+        ; slot_status register; nothing latches it for the 6510. VALIDATE_LAST
+        ; flips STATE 01 -> 10 in one FPGA clock, and a read on that edge
+        ; resolves each bit on its own: it can return 11 — measured at 3.2e-5
+        ; per last-block transition at 48 MHz — or, by inference, 00. Torn 11
+        ; takes @block_more and acks a real Last block; torn 00 takes
+        ; @block_short. AND DATA_AV / STAT_AV follow state(1) one FPGA clock
+        ; LATE (command_protocol.vhd:128-137), so even an untorn read can show
+        ; STATE 10 with DATA_AV still 0 for ~16-20 ns: @block_short again, a
+        ; complete datagram dropped. A second read decided on alone is no
+        ; better — the edge is asynchronous, so it is as likely to land on
+        ; read 2 as on read 1. So @settle reads until TWO CONSECUTIVE fenced
+        ; reads agree on DATA_AV|STATE ($B0), and decides on that value. The
+        ; fence spaces the reads tens of microseconds apart, so no two of
+        ; them can sit inside one tear-or-lag window, and an agreeing pair is
+        ; a value the register really held. The normal cost is one extra
+        ; fence per block boundary.
+        ;
+        ; @settle IS BOUNDED BY A READ COUNT, not by the argument that it
+        ; settles. From here at most one firmware event can happen before we
+        ; act (01 -> 1x, its DATA_AV lag, or a RESET 11 -> 00), so the worst
+        ; case is old, torn-or-lagged, new, new = 4 reads.
+        ; UCI_STATUS_SETTLE_READS = 8 is double that; running out means
+        ; STATUS changed on 7 consecutive fenced reads, which no protocol
+        ; path produces, so it is reported as the $89 wedge it is.
         ;
         ; WHY THE RE-ENTRY TERMINATES, structurally — no new wait, bounded or
         ; otherwise, is introduced here, and this project has enough history
@@ -1534,9 +1564,23 @@ net_poll:
         ora uci_poll_rem+1
         beq @done_data          ; nothing outstanding — reply complete
 
+        ldx #UCI_STATUS_SETTLE_READS
+        lda #$FF                ; no masked status is $FF: read 1 never agrees
+@settle:
+        sta @settle_cmp+1       ; SMC: the previous masked read
         lda UCI_STATUS
         uci_fence               ; settle before latching STATUS
-        tax                     ; ONE read decides both tests below
+        and #(UCI_STAT_DATA_AV | UCI_STAT_STATE)
+@settle_cmp:
+        cmp #$FF                ; SMC: patched above
+        beq @settled
+        dex
+        bne @settle
+        lda #UCI_ERR_WAIT_TIMEOUT   ; STATUS never held still: wedge
+        sta net_last_error
+        jmp @block_wedged
+@settled:
+        tax                     ; ONE AGREED value decides both tests below
         and #UCI_STAT_DATA_AV
         beq @block_terminal     ; nothing staged — the STATE field decides
         jmp @byte_loop          ; staged during the fence after all: drain it,

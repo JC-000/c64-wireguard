@@ -189,7 +189,7 @@ uci_wait_idle:
         uci_fence                   ; settle read before testing bits
         sta @wi_status              ; the one read this pass decides on
         and #(UCI_STAT_STATE | UCI_STAT_CMD_BUSY)   ; $31
-        beq @idle_done
+        beq @wi_idle_seen           ; idle only if the next read agrees
 
         ; ORPHAN CLEAR — the one place a stranded reply is accepted. Every
         ; command passes this gate before its first byte, so the exits that
@@ -236,6 +236,23 @@ uci_wait_idle:
         sta net_last_error
         sec
         rts
+@wi_idle_seen:
+        ; CONFIRM IDLE ON A SECOND, CONSECUTIVE READ (2026-10-26). UCI_STATUS
+        ; is not latched for the 6510: a read on the firmware's 01 -> 10
+        ; VALIDATE edge can tear to 00 (inferred; its twin 11 was measured at
+        ; 3.2e-5 per edge at 48 MHz — net.s @block_end has the detail). That
+        ; edge is reachable HERE: an orphaned reply still being staged (STATE
+        ; 01) after a timed-out push is exactly what this gate waits out. A
+        ; torn 00 would return "idle" into a real 10, whose next PUSH_CMD the
+        ; FPGA drops while the command bytes misalign the buffer (see the
+        ; ORPHAN CLEAR note). One edge cannot tear two fenced reads, so both
+        ; reads reading idle means idle. A disagreeing read goes through the
+        ; TOD tick, so this cannot extend the wait past its budget. Cost: one
+        ; fence per gate call.
+        lda UCI_STATUS
+        uci_fence
+        and #(UCI_STAT_STATE | UCI_STAT_CMD_BUSY)
+        bne @wi_tick
 @idle_done:
         ; A latched ERROR here predates the caller's push (error_busy is set
         ; only by a refused push, command_protocol.vhd:159): clear it so the
