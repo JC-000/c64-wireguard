@@ -391,6 +391,18 @@ SERIAL_TESTS = [
     # end in $89 at 1 and 48 MHz. Serial: builds `make BACKEND=uci` itself.
     # Unseeded; the seed is on its first line. Uses os.cpu_count() workers.
     ("uci_status_tear", ["tools/test_uci_status_tear.py"]),
+    # Issue #186, the send-path twin of uci_status_tear: under
+    # UCI_CHUNKED_WRITE=1 a non-completing $16 part decided "reply staged?"
+    # on one unlatched $DF1C read, so a refused part (81/82) could report as
+    # queued and leave its reply for the next command's orphan clear. Real
+    # net_udp_send on the host 6502 against a model of the firmware's $16
+    # (parts and datagrams counted at the wire tap), a one-sample $30/$00/$20
+    # swept over EVERY UCI_STATUS read under eight staging schedules, plus a
+    # never-settling STATUS that must end in $89 at 1 and 48 MHz. Serial:
+    # builds `make BACKEND=uci UCI_CHUNKED_WRITE=1` itself and the gate
+    # restores the default tree afterwards. Unseeded; the seed is on its
+    # first line. Uses os.cpu_count() workers.
+    ("uci_send_race", ["tools/test_uci_send_part_race.py"]),
     # WiFi-only "DHCP FAILED": the real net_dhcp_acquire on the host 6502
     # against a model of the firmware's GET_IPADDR per interface (index 0 =
     # ethernet, 1 = WiFi; out of range = empty reply + "82,..." status),
