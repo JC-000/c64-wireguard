@@ -205,11 +205,12 @@ and `brew install wgcf` for the bridged WARP run.
 ```bash
 pip install c64-test-harness
 
-# All 56 suites — the canonical run, and the gate for any change.
-# Most run in a staggered parallel pool against a single build; the TWELVE that
+# All 57 suites — the canonical run, and the gate for any change.
+# Most run in a staggered parallel pool against a single build; the THIRTEEN that
 # rebuild the tree themselves (x25519, write_bytes, uci_stub, both_backends,
 # chunked_send, multipart_split, build_mtu1440, ip65_bss_guard,
-# uci_short_read, uci_status_tear, uci_dhcp_iface, uci_wait_carry) run
+# uci_short_read, uci_status_tear, uci_send_race, uci_dhcp_iface,
+# uci_wait_carry) run
 # serially afterwards,
 # then the default build is restored.
 #

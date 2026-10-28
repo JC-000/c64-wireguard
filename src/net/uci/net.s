@@ -561,11 +561,16 @@ net_udp_send:
 ; Reply semantics. COMPLETING part: the firmware emits the datagram and
 ; answers with the 2-byte total on RESP_DATA — judged exactly as the plain
 ; SOCKET_WRITE path judges its count. NON-COMPLETING part: the spec says no
-; RESP_DATA reply, and that is the one thing the #807 bench did not verify,
-; so this routine MEASURES instead of assuming: once CMD_BUSY has cleared,
-; if DATA_AV is already up the first two bytes are captured into
-; uci_write_resp exactly as for a completing part, else uci_resp_count is
-; set to 0 — WITHOUT paying uci_read_resp_bytes' 1 s per-part wait budget.
+; RESP_DATA reply, but EVERY $16 part gets a reply (network_target.cc:418-462,
+; command_intf.cc run_task at 8b003dcf0): `00,OK`, or `81`/`82` on a refusal,
+; staged by copy_result AFTER HANDSHAKE_ACCEPT_COMMAND has cleared CMD_BUSY.
+; STATE then goes 01 -> 10 with DATA_AV=0 and STAT_AV=1. So CMD_BUSY clearing
+; says nothing about the reply being staged (#186): this routine waits for
+; STATE to leave 01 (uci_wait_reply_staged, bounded, $89), then decides on two
+; agreeing UCI_STATUS reads. If DATA_AV is up the first two bytes are
+; captured into uci_write_resp exactly as for a completing part, else
+; uci_resp_count is set to 0 — WITHOUT paying uci_read_resp_bytes' 1 s
+; per-part wait budget for a RESP_DATA byte that is not coming.
 ; Either way, after any part the host can read uci_resp_count,
 ; uci_write_resp and uci_status_buf/uci_status_seen and see what the
 ; firmware actually said. The verdict for a non-completing part comes from
@@ -739,14 +744,28 @@ uci_send_part:
         rts
 
 @sp_more:
-        ; NON-COMPLETING PART — capture whatever reply is already staged
-        ; (see the header), never wait for one.
+        ; NON-COMPLETING PART — capture whatever reply the firmware staged
+        ; (see the header). No wait for DATA_AV itself, only for STATE to
+        ; leave 01.
         lda #$00
         sta uci_resp_count
         sta uci_write_resp+0
         sta uci_write_resp+1
-        lda UCI_STATUS
-        uci_fence
+        ; The reply is NOT staged just because CMD_BUSY cleared: STATE stays
+        ; 01 until the firmware has VALIDATEd (see uci_wait_reply_staged), so
+        ; a read taken now can say "no reply" about one still being staged.
+        ; THAT WAIT CARRIES THE LOAD (#186). It returns at once if STATE is
+        ; not 01. The settle below is then only a wedge bound: with STATE
+        ; already past 01 the tear/lag window is gone, so it exists to turn a
+        ; STATE/DATA_AV flicker that never settles into $89 rather than a hang.
+        jsr uci_wait_reply_staged
+        bcc :+
+        rts                     ; $89 already set
+:
+        jsr uci_settle_status
+        bcc :+
+        rts                     ; $89 already set
+:
         and #UCI_STAT_DATA_AV
         beq @sp_no_resp
         lda #<uci_write_resp
@@ -1033,6 +1052,10 @@ net_udp_close:
         jsr uci_check_err
         php                         ; keep the command's verdict across the
                                     ; drains, which have a carry of their own
+        ; The STATUS line is staged after CMD_BUSY clears (STATE 01 -> 10);
+        ; drain only once it is there, or the drains see an empty queue.
+        jsr uci_wait_reply_staged
+        bcs @uc_drain_wedged        ; $89 outranks the verdict
         jsr uci_drain_resp
         bcs @uc_drain_wedged
         jsr uci_drain_status
@@ -1126,14 +1149,21 @@ uci_udp_connect:
         rts
 
 @uc_no_err:
+        jsr uci_wait_reply_staged
+        bcc @uc_staged
+        rts                         ; $89; uci_socket_open stays clear
+@uc_staged:
         ; REFUSAL FAST-PATH (issue #72; GideonZ/1541ultimate#808).
         ; A refused open — the firmware's UDP-PCB pool (MEMP_NUM_UDP_PCB=8) is
         ; exhausted — does NOT set the hardware ERROR bit (so uci_check_err
         ; passed above) and returns NO socket_id on RESP_DATA. It reports the
         ; refusal ONLY on the $DF1F STATUS channel as `85,ERROR OPENING SOCKET`.
         ;
-        ; uci_push_wait has already waited for CMD_BUSY=0, so if a status line
-        ; exists it is posted by now. Drain it FIRST: if a non-"00" refusal code
+        ; uci_push_wait only waited for CMD_BUSY=0, which the firmware clears at
+        ; HANDSHAKE_ACCEPT_COMMAND; the status line is staged AFTER that (STATE
+        ; stays 01 until copy_result validates), so wait for STATE to leave 01
+        ; before draining, else a refusal drained in the window misses the fast
+        ; path, sits out the 1 s budget and surfaces as $88. Drain it FIRST: if a non-"00" refusal code
         ; is present we can name it (UCI_ERR_OPEN_REFUSED) and bail immediately,
         ; instead of sitting out uci_read_resp_bytes' full wall-clock budget
         ; waiting for a socket_id byte that will never arrive and then surfacing
@@ -1202,6 +1232,40 @@ uci_udp_connect:
         rts
 
 ; =============================================================================
+; uci_settle_status — read UCI_STATUS until two CONSECUTIVE fenced reads agree
+; on DATA_AV|STATE, and return that value. See net_poll's @block_end note for
+; why one read is not one value ($DF1C is unlatched: it tears on the 01 -> 10
+; edge and DATA_AV lags state(1) by one clock) and why "read twice, decide on
+; the second" was rejected. Bounded by UCI_STATUS_SETTLE_READS, not by the
+; argument that it settles.
+;
+; Output: C=0, A = agreed (DATA_AV | STATE) value.
+;         C=1, net_last_error = UCI_ERR_WAIT_TIMEOUT: STATUS never held still.
+; Clobbers: A, X. Y is preserved (net_poll's @byte_loop owns it).
+; =============================================================================
+UCI_STATUS_SETTLE_READS = 8     ; read cap: worst case needs 4
+
+uci_settle_status:
+        ldx #UCI_STATUS_SETTLE_READS
+        lda #$FF                ; no masked status is $FF: read 1 never agrees
+@settle:
+        sta uci_settle_prev     ; the previous masked read (BSS, not SMC)
+        lda UCI_STATUS
+        uci_fence               ; settle before latching STATUS
+        and #(UCI_STAT_DATA_AV | UCI_STAT_STATE)
+        cmp uci_settle_prev
+        beq @settled
+        dex
+        bne @settle
+        lda #UCI_ERR_WAIT_TIMEOUT   ; STATUS never held still: wedge
+        sta net_last_error
+        sec
+        rts
+@settled:
+        clc
+        rts
+
+; =============================================================================
 ; net_poll — drive UDP receive via SOCKET_READ on the connected socket.
 ;
 ; If no socket is open yet, nothing to do (we haven't sent the first
@@ -1220,7 +1284,6 @@ uci_udp_connect:
 ; producing-side change only.
 ; Clobbers: A, X, Y
 ; =============================================================================
-UCI_STATUS_SETTLE_READS = 8     ; @settle read cap: worst case needs 4
 
 net_poll:
         lda uci_socket_open
@@ -1564,21 +1627,9 @@ net_poll:
         ora uci_poll_rem+1
         beq @done_data          ; nothing outstanding — reply complete
 
-        ldx #UCI_STATUS_SETTLE_READS
-        lda #$FF                ; no masked status is $FF: read 1 never agrees
-@settle:
-        sta @settle_cmp+1       ; SMC: the previous masked read
-        lda UCI_STATUS
-        uci_fence               ; settle before latching STATUS
-        and #(UCI_STAT_DATA_AV | UCI_STAT_STATE)
-@settle_cmp:
-        cmp #$FF                ; SMC: patched above
-        beq @settled
-        dex
-        bne @settle
-        lda #UCI_ERR_WAIT_TIMEOUT   ; STATUS never held still: wedge
-        sta net_last_error
-        jmp @block_wedged
+        jsr uci_settle_status
+        bcc @settled
+        jmp @block_wedged       ; $89 already in net_last_error
 @settled:
         tax                     ; ONE AGREED value decides both tests below
         and #UCI_STAT_DATA_AV
@@ -1871,6 +1922,7 @@ net_udp_send_len: .res 2          ; caller-visible: 16-bit length
 
 net_local_ip:       .res 4          ; local IPv4 (filled by net_dhcp_acquire)
 net_last_error:     .res 1          ; 0 = OK, nonzero = UCI_ERR_*
+uci_settle_prev:    .res 1          ; uci_settle_status: previous masked read
 
 uci_ipaddr_resp:    .res 12         ; scratch for GET_IPADDR response
 
